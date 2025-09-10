@@ -250,8 +250,6 @@ async def main():
         except Exception as e:
             logging.error(f"❌ Telethon failed to start: {e}")
 
-
-
     logging.info("🚀 Bot started polling...")
     await dp.start_polling(bot)
 
