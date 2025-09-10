@@ -242,13 +242,14 @@ async def main():
     flask_thread.start()
 
     # Telethon, якщо налаштований
-if telethon_client:
-    try:
-        # ✅ Запускаємо Telethon через BOT_TOKEN, щоб не питав input()
-        await telethon_client.start(bot_token=BOT_TOKEN)
-        logging.info("Telethon client started via bot token ✅")
-    except Exception as e:
-        logging.error(f"❌ Telethon failed to start: {e}")
+    if telethon_client:
+        try:
+            # ✅ Запускаємо Telethon через BOT_TOKEN, без input()
+            await telethon_client.start(bot_token=BOT_TOKEN)
+            logging.info("Telethon client started via bot token ✅")
+        except Exception as e:
+            logging.error(f"❌ Telethon failed to start: {e}")
+
 
 
     logging.info("🚀 Bot started polling...")
