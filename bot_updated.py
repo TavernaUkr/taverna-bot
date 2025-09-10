@@ -174,20 +174,16 @@ async def cmd_publish_test(msg: Message):
         "Це перевірка кнопки <b>«Замовити»</b>.\n"
         "Натисніть і перевірте форму замовлення."
     )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 Замовити", callback_data="order:start")]
+        ]
+    )
     try:
-        sent = await bot.send_message(TEST_CHANNEL, text)
-        post_id = getattr(sent, "message_id", None)
-        if post_id:
-            kb = get_order_keyboard(post_id)
-            try:
-                await bot.edit_message_reply_markup(TEST_CHANNEL, post_id, reply_markup=kb)
-            except Exception as e:
-                logger.exception("Failed edit reply_markup")
-                await bot.send_message(ADMIN_ID, f"⚠️ Не вдалося поставити кнопку у тест-каналі: {e}")
+        await bot.send_message(TEST_CHANNEL, text, reply_markup=kb)
         await msg.answer("✅ Тестовий пост опубліковано в тестовому каналі.")
     except Exception as e:
-        logger.exception("publish_test failed")
-        await msg.answer(f"❌ Не вдалося опублікувати тестовий пост: {e}")
+        await msg.answer(f"⚠️ Помилка при публікації: {e}")
 
 # Simplified order FSM handlers (collect minimal fields). Expand as needed.
 @router.message(OrderForm.pib)
