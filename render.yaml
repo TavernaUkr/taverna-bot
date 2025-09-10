@@ -1,0 +1,50 @@
+services:
+  - type: worker
+    name: taverna-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot_updated.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: BOT_USERNAME
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: TEST_CHANNEL
+        sync: false
+      - key: MAIN_CHANNEL
+        sync: false
+      - key: TG_API_ID
+        sync: false
+      - key: TG_API_HASH
+        sync: false
+      - key: SESSION_NAME
+        sync: false
+      - key: SUPPLIER_CHANNEL
+        sync: false
+      - key: SUPPLIER_NAME
+        sync: false
+      - key: NP_API_KEY
+        sync: false
+      - key: NP_API_URL
+        sync: false
+      - key: MYDROP_API_KEY
+        sync: false
+      - key: MYDROP_ORDERS_URL
+        sync: false
+      - key: ORDERS_DIR
+        sync: false
+      - key: USE_GCS
+        sync: false
+      - key: GCS_BUCKET
+        sync: false
+      - key: SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: USE_GDRIVE
+        sync: false
+      - key: GDRIVE_FOLDER_ID
+        sync: false
+      - key: TEST_MODE
+        sync: false
