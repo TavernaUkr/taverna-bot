@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Final bot_updated.py
+Final bot_updated.py (fixed order button)
 - Aiogram bot with FSM for orders
 - Telethon client listens supplier channel, reposts to MAIN_CHANNEL with paraphrase and +33% markup
 - MyDrop integration: test mode -> admin confirmation; live mode -> POST order
@@ -17,7 +17,6 @@ import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, List
-import base64
 import tempfile
 import re
 
@@ -77,7 +76,7 @@ MAIN_CHANNEL = os.getenv("MAIN_CHANNEL")
 api_id = int(os.getenv("TG_API_ID", "0") or 0)
 api_hash = os.getenv("TG_API_HASH", "")
 SESSION_NAME = os.getenv("SESSION_NAME", "bot1")
-supplier_channel = os.getenv("SUPPLIER_CHANNEL")  # e.g. "land_liz_drop"
+supplier_channel = os.getenv("SUPPLIER_CHANNEL")
 supplier_name = os.getenv("SUPPLIER_NAME", "Supplier")
 
 NP_API_KEY = os.getenv("NP_API_KEY")
@@ -118,28 +117,14 @@ class OrderForm(StatesGroup):
     pib = State()
     phone = State()
     article = State()
-    delivery = State()
-    np_city_query = State()
-    np_city_pick = State()
-    np_warehouse_pick = State()
-    np_warehouse_manual = State()
-    address = State()
-    delivery_type = State()
-    payment_type = State()
-    note = State()
     confirm = State()
 
 # ---------------- Helpers: keyboards ----------------
 def get_order_keyboard(post_id: int):
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Замовити", url=f"https://t.me/{BOT_USERNAME}?start=order_{post_id}")]
+            [InlineKeyboardButton(text="🛒 Замовити", callback_data=f"order:start:{post_id}")]
         ]
-    )
-
-def order_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🛒 Замовити", callback_data="order:start")]]
     )
 
 def confirm_keyboard():
@@ -155,17 +140,10 @@ async def cmd_start_simple(message: types.Message):
 
 @router.message(Command("start"))
 async def cmd_start(msg: Message, state: FSMContext):
-    args = msg.get_args() or ""
-    if args.startswith("order_"):
-        try:
-            post_id = int(args.split("_", 1)[1])
-        except:
-            post_id = None
-        await state.update_data(post_message_id=post_id, post_channel=TEST_CHANNEL)
-        await msg.answer("🧾 Розпочнемо оформлення. Введіть ваші ПІБ:")
-        await state.set_state(OrderForm.pib)
-        return
-    await msg.answer("Привіт! Це бот Taverna 👋\nНатисніть кнопку «Замовити» під постом у каналі, щоб оформити замовлення.")
+    await msg.answer(
+        "Привіт! Це бот Taverna 👋\n"
+        "Натисніть кнопку «Замовити» під постом у каналі, щоб оформити замовлення."
+    )
 
 @router.message(Command("publish_test"))
 async def cmd_publish_test(msg: Message):
@@ -176,7 +154,7 @@ async def cmd_publish_test(msg: Message):
     )
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Замовити", callback_data="order:start")]
+            [InlineKeyboardButton(text="🛒 Замовити", callback_data="order:start:999")]
         ]
     )
     try:
@@ -185,7 +163,15 @@ async def cmd_publish_test(msg: Message):
     except Exception as e:
         await msg.answer(f"⚠️ Помилка при публікації: {e}")
 
-# Simplified order FSM handlers (collect minimal fields). Expand as needed.
+# Simplified order FSM handlers
+@router.callback_query(F.data.startswith("order:start:"))
+async def order_start(cb: CallbackQuery, state: FSMContext):
+    post_id = int(cb.data.split(":")[2])
+    await state.update_data(post_message_id=post_id, post_channel=MAIN_CHANNEL)
+    await cb.message.answer("🧾 Розпочнемо оформлення. Введіть ваші ПІБ:")
+    await state.set_state(OrderForm.pib)
+    await cb.answer()
+
 @router.message(OrderForm.pib)
 async def state_pib(msg: Message, state: FSMContext):
     await state.update_data(pib=msg.text)
@@ -210,7 +196,6 @@ async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await cb.message.edit_text("Дякую! Ваше замовлення прийнято (тимчасово). Ми з вами зв'яжемося.")
     await cb.answer()
-    # create order payload
     order_payload = {
         "name": data.get("pib"),
         "phone": data.get("phone"),
@@ -219,23 +204,24 @@ async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
                 "vendor_name": supplier_name or "supplier",
                 "product_title": data.get("article"),
                 "amount": 1,
-                "drop_price": None,   # optional
+                "drop_price": None,
                 "price": None
             }
         ],
         "description": data.get("note", ""),
     }
-    # store pending order for admin confirmation in TEST_MODE
     order_id = int(datetime.utcnow().timestamp())
     ORDERS_PENDING[order_id] = order_payload
     if TEST_MODE:
-        # send admin confirmation button
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="Створити замовлення у MyDrop", callback_data=f"mydrop:create:{order_id}")]
         ])
-        await bot.send_message(ADMIN_ID, f"Тестове замовлення (id={order_id}):\n{json.dumps(order_payload, ensure_ascii=False, indent=2)}", reply_markup=kb)
+        await bot.send_message(
+            ADMIN_ID,
+            f"Тестове замовлення (id={order_id}):\n{json.dumps(order_payload, ensure_ascii=False, indent=2)}",
+            reply_markup=kb
+        )
     else:
-        # live mode -> directly create order
         asyncio.create_task(create_mydrop_order(order_payload, notify_chat=ADMIN_ID))
     await state.clear()
 
@@ -246,7 +232,6 @@ async def cb_order_cancel(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 # ---------------- Pending orders store ----------------
-# In-memory store for orders awaiting admin confirmation (test mode).
 ORDERS_PENDING: Dict[int, Dict[str, Any]] = {}
 
 # ---------------- MyDrop integration ----------------
