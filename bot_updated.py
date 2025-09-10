@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Final bot_updated.py (fixed order button)
+Final bot_updated.py (fixed start args)
 - Aiogram bot with FSM for orders
 - Telethon client listens supplier channel, reposts to MAIN_CHANNEL with paraphrase and +33% markup
 - MyDrop integration: test mode -> admin confirmation; live mode -> POST order
@@ -140,6 +140,17 @@ async def cmd_start_simple(message: types.Message):
 
 @router.message(Command("start"))
 async def cmd_start(msg: Message, state: FSMContext):
+    args = msg.get_args() or ""
+    if args.startswith("order_"):
+        try:
+            post_id = int(args.split("_", 1)[1])
+        except:
+            post_id = None
+        await state.update_data(post_message_id=post_id, post_channel=MAIN_CHANNEL)
+        await msg.answer("🧾 Розпочнемо оформлення. Введіть ваші ПІБ:")
+        await state.set_state(OrderForm.pib)
+        return
+
     await msg.answer(
         "Привіт! Це бот Taverna 👋\n"
         "Натисніть кнопку «Замовити» під постом у каналі, щоб оформити замовлення."
@@ -154,7 +165,7 @@ async def cmd_publish_test(msg: Message):
     )
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Замовити", callback_data="order:start:999")]
+            [InlineKeyboardButton(text="🛒 Замовити", url=f"https://t.me/{BOT_USERNAME}?start=order_999")]
         ]
     )
     try:
@@ -164,14 +175,6 @@ async def cmd_publish_test(msg: Message):
         await msg.answer(f"⚠️ Помилка при публікації: {e}")
 
 # Simplified order FSM handlers
-@router.callback_query(F.data.startswith("order:start:"))
-async def order_start(cb: CallbackQuery, state: FSMContext):
-    post_id = int(cb.data.split(":")[2])
-    await state.update_data(post_message_id=post_id, post_channel=MAIN_CHANNEL)
-    await cb.message.answer("🧾 Розпочнемо оформлення. Введіть ваші ПІБ:")
-    await state.set_state(OrderForm.pib)
-    await cb.answer()
-
 @router.message(OrderForm.pib)
 async def state_pib(msg: Message, state: FSMContext):
     await state.update_data(pib=msg.text)
@@ -236,10 +239,6 @@ ORDERS_PENDING: Dict[int, Dict[str, Any]] = {}
 
 # ---------------- MyDrop integration ----------------
 async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int] = None):
-    """
-    payload must follow MyDrop expected structure.
-    For demo we attempt to map our minimal payload into products format.
-    """
     if not MYDROP_ORDERS_URL:
         logger.error("MYDROP_ORDERS_URL not set")
         if notify_chat:
@@ -248,9 +247,8 @@ async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int
 
     headers = {"Content-Type": "application/json"}
     if MYDROP_API_KEY:
-        headers["Authorization"] = f"Bearer {MYDROP_API_KEY}"
+        headers["Authorization"] = f"Bearer {MYDROP_API_KEY}"    
 
-    # transform minimal payload to MyDrop format (example)
     body = {
         "name": payload.get("name"),
         "phone": payload.get("phone"),
@@ -297,10 +295,6 @@ async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int
 
 @router.callback_query(F.data.startswith("mydrop:create:"))
 async def cb_mydrop_create(cb: CallbackQuery):
-    """
-    Admin pressed confirm in test mode -> actually create order in MyDrop.
-    Callback data: mydrop:create:<order_id>
-    """
     if cb.from_user.id != ADMIN_ID:
         await cb.answer("Тільки адмін може створювати замовлення.", show_alert=True)
         return
@@ -323,21 +317,15 @@ async def cb_mydrop_create(cb: CallbackQuery):
 
 # ---------------- Nova Poshta helpers (basic) ----------------
 async def np_search_city(query: str) -> List[Dict[str, Any]]:
-    """
-    Search city by query using NP API.
-    This is a general implementation; adjust params depending on NP API version.
-    """
     if not NP_API_URL or not NP_API_KEY:
         logger.warning("NP API not configured")
         return []
     payload = {"modelName": "Address", "calledMethod": "getCities", "methodProperties": {"FindByString": query}}
     headers = {"Content-Type": "application/json"}
-    # If NP expects apiKey differently, adjust here.
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(NP_API_URL, json=payload, headers=headers, timeout=10) as resp:
                 data = await resp.json()
-                # expected structure may vary
                 return data.get("data", [])
         except Exception:
             logger.exception("np_search_city failed")
@@ -360,11 +348,7 @@ async def np_get_warehouses(city_ref: str) -> List[Dict[str, Any]]:
 # ---------------- Telethon client ----------------
 telethon_client: Optional[TelegramClient] = None
 if api_id and api_hash:
-    # prefer using existing session file (e.g., bot1.session) if present to avoid input() prompt.
-    # SESSION_NAME can be a path to session file or name. Telethon will add .session if needed.
     session_path = SESSION_NAME
-    # if full path uploaded in container (like /app/bot1.session), allow it
-    # Telethon accepts either 'bot1' (file bot1.session) or full path '.../bot1.session'
     try:
         telethon_client = TelegramClient(session_path, api_id, api_hash)
         logger.info("Telethon client initialized (session=%s)", session_path)
@@ -376,29 +360,17 @@ else:
     telethon_client = None
 
 async def telethon_download_and_send(event, caption_text: str):
-    """
-    Download media from telethon event to temp file(s), then send to MAIN_CHANNEL via aiogram bot
-    Returns message_id of sent message (if any)
-    """
     files = []
     try:
         if not event.message.media:
-            # no media -> send text only
             sent = await bot.send_message(MAIN_CHANNEL, caption_text, reply_markup=None)
             return getattr(sent, "message_id", None)
-        # if single or multiple media, Telethon event.message.media may be photo or media_group
-        # Telethon has method download_media; we download to temp files
-        media = event.message.media
-        # Telethon supports download_media for message; it returns path
         tmpdir = tempfile.mkdtemp(prefix="telethon_")
-        # For single message with possibly multiple photo parts - Telethon doesn't expose media_group easily here.
-        # We'll attempt to download the whole message media.
         file_path = await event.message.download_media(file=tmpdir)
         if isinstance(file_path, (list, tuple)):
             files = file_path
         else:
             files = [file_path]
-        # send media via aiogram: if one file -> send_photo, if many -> send_media_group
         if len(files) == 1:
             with open(files[0], "rb") as f:
                 sent = await bot.send_photo(MAIN_CHANNEL, f, caption=caption_text, reply_markup=None)
@@ -407,9 +379,7 @@ async def telethon_download_and_send(event, caption_text: str):
             media_group = []
             for p in files:
                 media_group.append(types.InputMediaPhoto(types.BufferedInputFile(open(p, "rb"))))
-            # aiogram bot has send_media_group
             sent_items = await bot.send_media_group(MAIN_CHANNEL, media_group)
-            # edit caption of the first to include caption_text
             if sent_items:
                 first_id = getattr(sent_items[0], "message_id", None)
                 try:
@@ -422,18 +392,11 @@ async def telethon_download_and_send(event, caption_text: str):
     return None
 
 def extract_drop_price_from_text(text: str) -> Optional[float]:
-    """
-    Try to heuristically find a price number in text.
-    Looks for currency-like patterns like 300, 300 грн, 300.00, $300, 300UAH
-    """
     if not text:
         return None
-    # find sequences of digits with optional separators
     matches = re.findall(r"(\d{2,6}(?:[.,]\d{1,2})?)", text.replace(" ", ""))
-    # filter unrealistic: choose largest match
     if not matches:
         return None
-    # pick first plausible
     try:
         val = matches[0].replace(",", ".")
         return float(val)
@@ -443,55 +406,42 @@ def extract_drop_price_from_text(text: str) -> Optional[float]:
         except Exception:
             return None
 
-# Telethon handler: listens supplier_channel and reposts to MAIN_CHANNEL
 if telethon_client:
     @telethon_client.on(events.NewMessage(chats=supplier_channel))
     async def supplier_handler(event):
         try:
-            # event.message.text may be None for media posts
             text = event.message.message or event.message.text or ""
             logger.info("New supplier message: %s", (text[:120] if text else "<media>"))
-            # basic paraphrase: replace supplier name mentions and add header
             paraphrase_intro = f"📦 Новий товар від {supplier_name} — перероблено та опубліковано від імені нашого магазину.\n\n"
-            # try to extract drop price
             drop_price = extract_drop_price_from_text(text)
             price_note = ""
             if drop_price:
                 my_price = round(drop_price * 1.33)
                 price_note = f"\n\n💰 Наша ціна (націнка +33%): {my_price} грн (дроп: {drop_price} грн)"
-            # Compose caption
             caption = paraphrase_intro + (text or "") + price_note
-            # Download media and send
             sent_post_id = await telethon_download_and_send(event, caption)
-            # If we managed to send and get message id, add order button
             if sent_post_id:
                 try:
                     kb = get_order_keyboard(sent_post_id)
                     await bot.edit_message_reply_markup(MAIN_CHANNEL, sent_post_id, reply_markup=kb)
                 except Exception:
-                    # some channels/users can't edit; ignore
                     logger.exception("Failed to edit reply markup for posted message")
-            # Optionally notify admin
             await bot.send_message(ADMIN_ID, f"🔁 Репост зроблено в {MAIN_CHANNEL}. Оригінал: {event.chat_id}/{event.message.id}")
         except Exception:
             logger.exception("supplier_handler failed")
 
 # ---------------- Main ----------------
 async def main():
-    # start Flask healthcheck thread
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
 
-    # Start Telethon first (if present) using existing session (avoid interactive input)
     if telethon_client:
         try:
-            # prefer starting with session file; do NOT pass bot_token here to avoid getUpdates conflict.
             await telethon_client.start()
             logger.info("Telethon client started")
         except Exception as e:
             logger.exception("Telethon failed to start: %s", e)
 
-    # Start aiogram polling
     logger.info("Starting aiogram polling...")
     try:
         await dp.start_polling(bot)
