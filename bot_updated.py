@@ -244,7 +244,7 @@ async def main():
     # Telethon, якщо налаштований
 if telethon_client:
     try:
-        # Якщо хочеш юзати бота, логін через BOT_TOKEN
+        # ✅ Запускаємо Telethon через BOT_TOKEN, щоб не питав input()
         await telethon_client.start(bot_token=BOT_TOKEN)
         logging.info("Telethon client started via bot token ✅")
     except Exception as e:
