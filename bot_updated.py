@@ -242,9 +242,14 @@ async def main():
     flask_thread.start()
 
     # Telethon, якщо налаштований
-    if telethon_client:
-        await telethon_client.start()
-        logging.info("Telethon client started ✅")
+if telethon_client:
+    try:
+        # Якщо хочеш юзати бота, логін через BOT_TOKEN
+        await telethon_client.start(bot_token=BOT_TOKEN)
+        logging.info("Telethon client started via bot token ✅")
+    except Exception as e:
+        logging.error(f"❌ Telethon failed to start: {e}")
+
 
     logging.info("🚀 Bot started polling...")
     await dp.start_polling(bot)
