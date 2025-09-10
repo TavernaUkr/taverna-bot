@@ -123,7 +123,7 @@ class OrderForm(StatesGroup):
 def get_order_keyboard(post_id: int):
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Замовити", callback_data=f"order:start:{post_id}")]
+            [InlineKeyboardButton(text="🛒 Замовити", url=f"https://t.me/{BOT_USERNAME}?start=order_{post_id}")]
         ]
     )
 
