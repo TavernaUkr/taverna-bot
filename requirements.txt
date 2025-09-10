@@ -1,4 +1,6 @@
-aiogram==3.22.0
-python-dotenv==1.0.1
-flask==3.0.3
+aiogram==3.*
+flask
 telethon
+google-cloud-storage
+python-dotenv
+requests
