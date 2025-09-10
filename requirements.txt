@@ -1,5 +1,0 @@
-aiogram==3.*
-telethon==1.*
-aiohttp==3.*
-python-dotenv==1.*
-google-cloud-storage==3.*
