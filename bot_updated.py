@@ -245,7 +245,7 @@ async def main():
     if telethon_client:
         try:
             # ✅ Запускаємо Telethon через BOT_TOKEN, без input()
-            await telethon_client.start(bot_token=BOT_TOKEN)
+            await telethon_client.start()
             logging.info("Telethon client started via bot token ✅")
         except Exception as e:
             logging.error(f"❌ Telethon failed to start: {e}")
