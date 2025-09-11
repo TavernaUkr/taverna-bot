@@ -54,7 +54,8 @@ def check_env_vars():
         "TEST_CHANNEL", "MAIN_CHANNEL", "TG_API_ID", "TG_API_HASH",
         "SESSION_NAME", "SUPPLIER_CHANNEL", "SUPPLIER_NAME",
         "NP_API_KEY", "NP_API_URL", "MYDROP_API_KEY",
-        "MYDROP_ORDERS_URL", "ORDERS_DIR", "USE_GCS", "GCS_BUCKET",
+    "MYDROP_ORDERS_URL", "MYDROP_PRODUCTS_URL",
+    "MYDROP_CONSUMER_KEY", "MYDROP_CONSUMER_SECRET", "ORDERS_DIR", "USE_GCS", "GCS_BUCKET",
         "SERVICE_ACCOUNT_JSON", "USE_GDRIVE", "GDRIVE_FOLDER_ID", "TEST_MODE"
     ]
     for var in env_vars:
@@ -83,6 +84,10 @@ NP_API_URL = os.getenv("NP_API_URL")
 
 MYDROP_API_KEY = os.getenv("MYDROP_API_KEY")
 MYDROP_ORDERS_URL = os.getenv("MYDROP_ORDERS_URL")
+MYDROP_PRODUCTS_URL = os.getenv("MYDROP_PRODUCTS_URL")
+MYDROP_CONSUMER_KEY = os.getenv("MYDROP_CONSUMER_KEY")
+MYDROP_CONSUMER_SECRET = os.getenv("MYDROP_CONSUMER_SECRET")
+
 
 ORDERS_DIR = os.getenv("ORDERS_DIR", "/tmp/orders")
 Path(ORDERS_DIR).mkdir(parents=True, exist_ok=True)
@@ -207,44 +212,60 @@ async def state_phone(msg: Message, state: FSMContext):
     await state.set_state(OrderForm.article)
 
 # --- Артикул ---
-async def check_article(article: str) -> bool:
+async def check_article(article: str) -> Optional[Dict[str, Any]]:
     """
-    Перевірка артикулу на MyDrop.
-    Повертає True, якщо артикул знайдено.
+    Перевіряє артикул (SKU) на MyDrop (WooCommerce API).
+    Якщо знайдено — повертає dict з info про товар (назва, кількість).
+    Якщо ні — None.
     """
-    if not MYDROP_API_KEY:
-        return True
+    if not (os.getenv("MYDROP_CONSUMER_KEY") and os.getenv("MYDROP_CONSUMER_SECRET")):
+        return None
 
-    url = "https://backend.mydrop.com.ua/dropshipper/api/products/search"
-    headers = {
-        "X-API-KEY": MYDROP_API_KEY,
-        "Content-Type": "application/json"
-    }
-    payload = {"query": str(article)}
+    url = os.getenv("MYDROP_PRODUCTS_URL", "https://mydrop.com.ua/wp-json/wc/v3/products")
+    auth = aiohttp.BasicAuth(
+        os.getenv("MYDROP_CONSUMER_KEY"),
+        os.getenv("MYDROP_CONSUMER_SECRET")
+    )
+    params = {"sku": str(article)}
 
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.post(url, json=payload, headers=headers) as resp:
+            async with session.get(url, params=params, auth=auth) as resp:
                 if resp.status != 200:
                     logger.error(f"MyDrop API error: {resp.status}")
-                    return False
+                    return None
                 data = await resp.json()
-                products = data.get("data", [])
-                logger.info(f"MyDrop response for article {article}: {products}")
-                return any(str(article) == str(p.get("sku")) for p in products)
+                if not data:
+                    return None
+                product = data[0]
+                return {
+                    "name": product.get("name"),
+                    "stock": product.get("stock_quantity", "Невідомо")
+                }
         except Exception as e:
             logger.error(f"Помилка перевірки артикулу: {e}")
-            return False
+            return None
 
 @router.message(OrderForm.article)
 async def state_article(msg: Message, state: FSMContext):
     article = msg.text.strip()
 
-    # перевірка артикулу на MyDrop
-    valid = await check_article(article)
-    if not valid:
+    product = await check_article(article)
+    if not product:
         await msg.answer("❌ Невірний артикул. Спробуйте ще раз.")
         return
+
+    # зберігаємо
+    await state.update_data(article=article, product_name=product["name"], stock=product["stock"])
+
+    await msg.answer(
+        f"✅ Знайдено товар:\n"
+        f"🔖 {product['name']}\n"
+        f"📦 Наявність: {product['stock']} шт.\n\n"
+        "Оберіть службу доставки:",
+        reply_markup=delivery_keyboard()
+    )
+    await state.set_state(OrderForm.delivery)
 
     # якщо артикул валідний — зберігаємо та рухаємось далі
     await state.update_data(article=article)
