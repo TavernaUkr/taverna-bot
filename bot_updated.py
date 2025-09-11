@@ -257,7 +257,6 @@ async def state_article(msg: Message, state: FSMContext):
 
     # зберігаємо
     await state.update_data(article=article, product_name=product["name"], stock=product["stock"])
-
     await msg.answer(
         f"✅ Знайдено товар:\n"
         f"🔖 {product['name']}\n"
@@ -265,11 +264,6 @@ async def state_article(msg: Message, state: FSMContext):
         "Оберіть службу доставки:",
         reply_markup=delivery_keyboard()
     )
-    await state.set_state(OrderForm.delivery)
-
-    # якщо артикул валідний — зберігаємо та рухаємось далі
-    await state.update_data(article=article)
-    await msg.answer("Оберіть службу доставки:", reply_markup=delivery_keyboard())
     await state.set_state(OrderForm.delivery)
 
 # --- Доставка ---
@@ -316,7 +310,8 @@ async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
         "📦 НОВЕ ЗАМОВЛЕННЯ\n\n"
         f"👤 ПІБ: {data.get('pib')}\n"
         f"📞 Телефон: {data.get('phone')}\n"
-        f"🔖 Товар: {data.get('article')}\n"
+        f"🔖 Товар: {data.get('product_name')} (SKU: {data.get('article')})\n"
+        f"📦 Наявність: {data.get('stock')} шт.\n"
         f"🚚 Служба: {data.get('delivery')}\n"
         f"📍 Адреса/відділення: {data.get('address')}\n"
         f"💳 Тип оплати: {data.get('payment')}\n"
