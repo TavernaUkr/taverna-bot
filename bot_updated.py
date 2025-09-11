@@ -170,6 +170,21 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
         "Натисніть кнопку «Замовити» під постом у каналі, щоб оформити замовлення."
     )
 
+# ---------------- Test command ----------------
+@router.message(Command("publish_test"))
+async def cmd_publish_test(msg: Message):
+    text = (
+        "🔥 <b>Тестовий пост для</b> @test_taverna\n\n"
+        "Це перевірка кнопки <b>«Замовити»</b>.\n"
+        "Натисніть і перевірте форму замовлення."
+    )
+    kb = get_order_keyboard(post_id=12345, test=True)  # test=True -> order_test_xxx
+    try:
+        await bot.send_message(TEST_CHANNEL, text, reply_markup=kb)
+        await msg.answer("✅ Тестовий пост опубліковано в тестовому каналі.")
+    except Exception as e:
+        await msg.answer(f"⚠️ Помилка при публікації: {e}")
+
 # --- ПІБ ---
 @router.message(OrderForm.pib)
 async def state_pib(msg: Message, state: FSMContext):
