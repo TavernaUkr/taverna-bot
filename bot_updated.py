@@ -215,21 +215,23 @@ async def check_article(article: str) -> bool:
     if not MYDROP_API_KEY:
         return True
 
-    url = "https://backend.mydrop.com.ua/dropshipping/products/search"
+    url = "https://backend.mydrop.com.ua/dropshipper/api/products/search"
     headers = {
-        "Authorization": f"Bearer {MYDROP_API_KEY}",
+        "X-API-KEY": MYDROP_API_KEY,
         "Content-Type": "application/json"
     }
-    payload = {"query": article}
+    payload = {"query": str(article)}
 
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(url, json=payload, headers=headers) as resp:
                 if resp.status != 200:
+                    logger.error(f"MyDrop API error: {resp.status}")
                     return False
                 data = await resp.json()
                 products = data.get("data", [])
-                return any(str(article) in str(p.get("article", "")) for p in products)
+                logger.info(f"MyDrop response for article {article}: {products}")
+                return any(str(article) == str(p.get("sku")) for p in products)
         except Exception as e:
             logger.error(f"Помилка перевірки артикулу: {e}")
             return False
@@ -237,9 +239,14 @@ async def check_article(article: str) -> bool:
 @router.message(OrderForm.article)
 async def state_article(msg: Message, state: FSMContext):
     article = msg.text.strip()
-    if not await check_article(article):
+
+    # перевірка артикулу на MyDrop
+    valid = await check_article(article)
+    if not valid:
         await msg.answer("❌ Невірний артикул. Спробуйте ще раз.")
         return
+
+    # якщо артикул валідний — зберігаємо та рухаємось далі
     await state.update_data(article=article)
     await msg.answer("Оберіть службу доставки:", reply_markup=delivery_keyboard())
     await state.set_state(OrderForm.delivery)
