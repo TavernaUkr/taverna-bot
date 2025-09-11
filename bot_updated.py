@@ -17,17 +17,16 @@ import threading
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, List
-import tempfile
 import re
 
 import aiohttp
 from dotenv import load_dotenv
 from flask import Flask
 
-from aiogram import Bot, Dispatcher, Router, F, types
+from aiogram import Bot, Dispatcher, Router, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -36,7 +35,7 @@ from aiogram.types import (
     InlineKeyboardButton, InlineKeyboardMarkup,
 )
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 
 # ---------------- Config & Env ----------------
 load_dotenv()
@@ -155,9 +154,9 @@ def confirm_keyboard():
     ])
 
 # ---------------- Routers / Handlers ----------------
-@router.message(CommandStart())
-async def cmd_start(msg: Message, state: FSMContext):
-    args = msg.get_args() or ""
+@router.message(CommandStart(deep_link=True))
+async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
+    args = command.args or ""
     if args.startswith("order_"):
         parts = args.split("_")
         if len(parts) == 3:
@@ -166,8 +165,10 @@ async def cmd_start(msg: Message, state: FSMContext):
             await msg.answer("🧾 Розпочнемо оформлення. Введіть ваші ПІБ:")
             await state.set_state(OrderForm.pib)
             return
-    await msg.answer("Привіт! Це бот Taverna 👋
-Натисніть кнопку «Замовити» під постом у каналі, щоб оформити замовлення.")
+    await msg.answer(
+        "Привіт! Це бот Taverna 👋\n"
+        "Натисніть кнопку «Замовити» під постом у каналі, щоб оформити замовлення."
+    )
 
 # --- ПІБ ---
 @router.message(OrderForm.pib)
@@ -193,7 +194,7 @@ async def state_phone(msg: Message, state: FSMContext):
 # --- Артикул ---
 async def check_article(article: str) -> bool:
     if not MYDROP_ORDERS_URL or not MYDROP_API_KEY:
-        return True  # skip check if no API
+        return True
     headers = {"Authorization": f"Bearer {MYDROP_API_KEY}", "Content-Type": "application/json"}
     url = MYDROP_ORDERS_URL.replace("orders", "products") + "/search"
     async with aiohttp.ClientSession() as session:
@@ -282,9 +283,6 @@ async def cb_order_cancel(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.message.edit_text("Замовлення скасовано.")
     await cb.answer()
-
-# ---------------- Pending orders ----------------
-ORDERS_PENDING: Dict[int, Dict[str, Any]] = {}
 
 # ---------------- MyDrop integration ----------------
 async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int] = None):
