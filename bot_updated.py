@@ -272,92 +272,67 @@ import xml.etree.ElementTree as ET
 
 async def check_article(article: str) -> Optional[Dict[str, Any]]:
     """
-    Шукає артикул у вигрузці (MYDROP_EXPORT_URL).
+    Шукає артикул (vendorCode) у вигрузці MyDrop.
     """
     article = str(article).strip()
-    # 1) Експорт (YML/JSON)
     text = await load_products_export()
     if not text:
         return None
-        # Спробуємо розпізнати JSON
-        try:
-            parsed = json.loads(text)
-            # Випадок JSON export — шукаємо записи з sku
+
+    # Спробуємо JSON
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, (dict, list)):
+            candidates = []
             if isinstance(parsed, dict):
-                # можливий ключ 'offers' / 'products' / 'data'
                 candidates = parsed.get("offers") or parsed.get("products") or parsed.get("data") or []
             elif isinstance(parsed, list):
                 candidates = parsed
-            else:
-                candidates = []
             for item in candidates:
-                # item може мати ключи 'sku' або 'vendor_code' або 'product_sku'
                 sku = item.get("sku") or item.get("product_sku") or item.get("vendor_code") or item.get("vendorCode")
-                if sku and str(sku) == article:
-                    name = item.get("title") or item.get("name") or item.get("product_title") or item.get("title_ru") or article
+                if sku and str(sku).strip() == article:
+                    name = item.get("title") or item.get("name") or article
                     stock = item.get("stock") or item.get("stock_quantity") or item.get("amount") or "Невідомо"
                     return {"name": name, "stock": stock}
-        except Exception:
-            # не JSON — пробуем парсити як XML/YML
-            pass
+    except Exception:
+        pass  # якщо не JSON — парсимо XML
 
-        # Спроба парсингу XML/YML
-        try:
-            root = ET.fromstring(text.encode("utf-8"))
-            # YML/Offers: знайдемо всі <offer> або <product> елементи
-            offers = list(root.findall(".//offer")) + list(root.findall(".//product")) + list(root.findall(".//item"))
-            for o in offers:
-                # 1) перевіряємо атрибут id
-                offer_id = o.attrib.get("id")
-                if offer_id and str(offer_id) == article:
-                    # ім'я
-                    name_el = o.find("name") or o.find("title") or o.find("model")
-                    name = name_el.text if name_el is not None else article
-                    # stock: дивимось за кількома варіантами
-                    stock = None
-                    # звичні поля: <available> (true/false), <stock> або <param name="...">
-                    avail = o.attrib.get("available")
-                    if avail:
-                        stock = "Наявність" if avail.lower() in ("true", "1", "yes") else 0
-                    st_el = o.find("stock")
-                    if st_el is not None and st_el.text and st_el.text.isdigit():
+    # Спроба XML / YML
+    try:
+        root = ET.fromstring(text.encode("utf-8"))
+        offers = list(root.findall(".//offer"))
+        for o in offers:
+            vendor_code = o.find("vendorCode")
+            if vendor_code is not None and vendor_code.text and vendor_code.text.strip() == article:
+                # Назва товару
+                name_el = o.find("name") or o.find("title") or o.find("model")
+                name = name_el.text if name_el is not None else article
+
+                # Наявність
+                avail = o.attrib.get("available", "").lower()
+                stock = "Наявний" if avail in ("true", "1", "yes") else "Немає"
+
+                # Якщо є <stock>
+                st_el = o.find("stock")
+                if st_el is not None and st_el.text:
+                    try:
                         stock = int(st_el.text)
-                    # vendorCode, vendor_code, sku як піделементи
-                    vendor_code = o.find("vendorCode") or o.find("vendor_code") or o.find("sku") or o.find("vendor-code")
-                    if vendor_code is not None and vendor_code.text and str(vendor_code.text) == article:
-                        # намагаємось знайти запас
-                        # перевіримо param(name=...) на можливі назви залишків
-                        for p in o.findall("param"):
-                            name_attr = p.attrib.get("name", "").lower()
-                            if name_attr in ("количество", "остаток", "остання", "stock", "amount", "кількість"):
-                                try:
-                                    stock = int(p.text)
-                                except Exception:
-                                    stock = p.text or "Невідомо"
-                        return {"name": name, "stock": stock if stock is not None else "Невідомо"}
+                    except Exception:
+                        stock = st_el.text
 
-                # якщо не знайшли по id — перевіримо піделементи (vendorCode / sku / param)
-                # знайдемо sku-поля
-                sku_elem = o.find("sku") or o.find("vendorCode") or o.find("vendor_code") or o.find("vendor-code")
-                if sku_elem is not None and sku_elem.text and str(sku_elem.text).strip() == article:
-                    name_el = o.find("name") or o.find("title") or o.find("model")
-                    name = name_el.text if name_el is not None else article
-                    stock = None
-                    st_el = o.find("stock")
-                    if st_el is not None and st_el.text and st_el.text.isdigit():
-                        stock = int(st_el.text)
-                    for p in o.findall("param"):
-                        name_attr = p.attrib.get("name", "").lower()
-                        if name_attr in ("количество", "остаток", "stock", "amount", "кількість"):
-                            try:
-                                stock = int(p.text)
-                            except Exception:
-                                stock = p.text or "Невідомо"
-                    return {"name": name, "stock": stock if stock is not None else "Невідомо"}
-        except Exception as e:
-            logger.exception("XML parse error: %s", e)
+                # Якщо є <param name="Кількість"> або подібне
+                for p in o.findall("param"):
+                    name_attr = p.attrib.get("name", "").lower()
+                    if name_attr in ("количество", "остаток", "stock", "amount", "кількість"):
+                        try:
+                            stock = int(p.text)
+                        except Exception:
+                            stock = p.text or stock
 
-    # Якщо нічого не знайшли — None
+                return {"name": name, "stock": stock}
+    except Exception as e:
+        logger.exception("XML parse error: %s", e)
+
     return None
 
 
@@ -367,18 +342,16 @@ async def state_article(msg: Message, state: FSMContext):
     await msg.chat.do("typing")
     product = await check_article(article)
     if not product:
-        # Якщо нічого не знайдено — пробуємо ще раз з менш суворим порівнянням (lowercase)
         product = await check_article(article.lower())
     if not product:
         await msg.answer("❌ Невірний артикул або товар недоступний у вигрузці. Спробуйте ще раз або напишіть 'підтримка'.")
         return
 
-    # зберігаємо
     await state.update_data(article=article, product_name=product.get("name"), stock=product.get("stock"))
     await msg.answer(
         f"✅ Знайдено товар:\n"
         f"🔖 <b>{product.get('name')}</b>\n"
-        f"📦 Наявність: <b>{product.get('stock')}</b> шт.\n\n"
+        f"📦 Наявність: <b>{product.get('stock')}</b>\n\n"
         "Оберіть службу доставки:",
         reply_markup=delivery_keyboard()
     )
