@@ -53,9 +53,7 @@ def check_env_vars():
         "BOT_TOKEN", "BOT_USERNAME", "ADMIN_ID",
         "TEST_CHANNEL", "MAIN_CHANNEL", "TG_API_ID", "TG_API_HASH",
         "SESSION_NAME", "SUPPLIER_CHANNEL", "SUPPLIER_NAME",
-        "NP_API_KEY", "NP_API_URL", "MYDROP_API_KEY",
-    "MYDROP_ORDERS_URL", "MYDROP_PRODUCTS_URL",
-    "MYDROP_CONSUMER_KEY", "MYDROP_CONSUMER_SECRET", "ORDERS_DIR", "USE_GCS", "GCS_BUCKET",
+        "NP_API_KEY", "NP_API_URL", "MYDROP_API_KEY", "MYDROP_EXPORT_URL", "MYDROP_ORDERS_URL", "ORDERS_DIR", "USE_GCS", "GCS_BUCKET",
         "SERVICE_ACCOUNT_JSON", "USE_GDRIVE", "GDRIVE_FOLDER_ID", "TEST_MODE"
     ]
     for var in env_vars:
@@ -83,16 +81,20 @@ NP_API_KEY = os.getenv("NP_API_KEY")
 NP_API_URL = os.getenv("NP_API_URL")
 
 MYDROP_API_KEY = os.getenv("MYDROP_API_KEY")
+MYDROP_EXPORT_URL = os.getenv("MYDROP_EXPORT_URL")
 MYDROP_ORDERS_URL = os.getenv("MYDROP_ORDERS_URL")
-MYDROP_PRODUCTS_URL = os.getenv("MYDROP_PRODUCTS_URL")
-MYDROP_CONSUMER_KEY = os.getenv("MYDROP_CONSUMER_KEY")
-MYDROP_CONSUMER_SECRET = os.getenv("MYDROP_CONSUMER_SECRET")
-
 
 ORDERS_DIR = os.getenv("ORDERS_DIR", "/tmp/orders")
 Path(ORDERS_DIR).mkdir(parents=True, exist_ok=True)
 
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+
+# ---------------- Cache for MyDrop products ----------------
+PRODUCTS_CACHE = {
+    "last_update": None,
+    "data": None
+}
+CACHE_TTL = 900  # 15 хвилин (900 секунд)
 
 # ---------------- Flask ----------------
 app = Flask(__name__)
@@ -190,6 +192,16 @@ async def cmd_publish_test(msg: Message):
     except Exception as e:
         await msg.answer(f"⚠️ Помилка при публікації: {e}")
 
+@router.message(Command("refresh_cache"))
+async def cmd_refresh_cache(msg: Message):
+    """Примусово оновлює кеш вигрузки товарів"""
+    await msg.answer("⏳ Оновлюю кеш вигрузки...")
+    text = await load_products_export(force=True)
+    if text:
+        await msg.answer("✅ Кеш оновлено успішно.")
+    else:
+        await msg.answer("⚠️ Помилка при оновленні кешу. Перевір логи.")
+
 # --- ПІБ ---
 @router.message(OrderForm.pib)
 async def state_pib(msg: Message, state: FSMContext):
@@ -211,56 +223,162 @@ async def state_phone(msg: Message, state: FSMContext):
     await msg.answer("Введіть артикул товару:")
     await state.set_state(OrderForm.article)
 
-# --- Артикул ---
-async def check_article(article: str) -> Optional[Dict[str, Any]]:
+async def load_products_export(force: bool = False) -> Optional[str]:
     """
-    Перевіряє артикул (SKU) на MyDrop (WooCommerce API).
-    Якщо знайдено — повертає dict з info про товар (назва, кількість).
-    Якщо ні — None.
+    Завантажує вигрузку з MYDROP_EXPORT_URL (YML/JSON) з кешем.
+    Якщо force=True — качає заново навіть якщо кеш ще актуальний.
     """
-    if not (os.getenv("MYDROP_CONSUMER_KEY") and os.getenv("MYDROP_CONSUMER_SECRET")):
+    global PRODUCTS_CACHE
+    now = datetime.now()
+
+    # Використати кеш, якщо він свіжий
+    if not force and PRODUCTS_CACHE["last_update"] and (now - PRODUCTS_CACHE["last_update"]).seconds < CACHE_TTL:
+        return PRODUCTS_CACHE["data"]
+
+    export_url = os.getenv("MYDROP_EXPORT_URL")
+    if not export_url:
+        logger.error("❌ MYDROP_EXPORT_URL не налаштований")
         return None
 
-    url = os.getenv("MYDROP_PRODUCTS_URL", "https://mydrop.com.ua/wp-json/wc/v3/products")
-    auth = aiohttp.BasicAuth(
-        os.getenv("MYDROP_CONSUMER_KEY"),
-        os.getenv("MYDROP_CONSUMER_SECRET")
-    )
-    params = {"sku": str(article)}
-
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.get(url, params=params, auth=auth) as resp:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(export_url, timeout=20) as resp:
                 if resp.status != 200:
-                    logger.error(f"MyDrop API error: {resp.status}")
+                    logger.warning("⚠️ Export URL error %s", resp.status)
                     return None
-                data = await resp.json()
-                if not data:
-                    return None
-                product = data[0]
-                return {
-                    "name": product.get("name"),
-                    "stock": product.get("stock_quantity", "Невідомо")
-                }
+                text = await resp.text()
+
+                PRODUCTS_CACHE["last_update"] = now
+                PRODUCTS_CACHE["data"] = text
+
+                # збережемо у файл (бекап)
+                cache_file = Path(ORDERS_DIR) / "products_cache.xml"
+                cache_file.write_text(text, encoding="utf-8")
+
+                logger.info("✅ Завантажено нову вигрузку (%d символів)", len(text))
+                return text
+    except Exception as e:
+        logger.error("Помилка завантаження вигрузки: %s", e)
+
+        # fallback — беремо з кеш-файлу
+        cache_file = Path(ORDERS_DIR) / "products_cache.xml"
+        if cache_file.exists():
+            return cache_file.read_text(encoding="utf-8")
+
+        return None
+
+# --- Артикул ---
+import xml.etree.ElementTree as ET
+
+async def check_article(article: str) -> Optional[Dict[str, Any]]:
+    """
+    Шукає артикул у вигрузці (MYDROP_EXPORT_URL).
+    """
+    article = str(article).strip()
+    # 1) Експорт (YML/JSON)
+    text = await load_products_export()
+    if not text:
+        return None
+        # Спробуємо розпізнати JSON
+        try:
+            parsed = json.loads(text)
+            # Випадок JSON export — шукаємо записи з sku
+            if isinstance(parsed, dict):
+                # можливий ключ 'offers' / 'products' / 'data'
+                candidates = parsed.get("offers") or parsed.get("products") or parsed.get("data") or []
+            elif isinstance(parsed, list):
+                candidates = parsed
+            else:
+                candidates = []
+            for item in candidates:
+                # item може мати ключи 'sku' або 'vendor_code' або 'product_sku'
+                sku = item.get("sku") or item.get("product_sku") or item.get("vendor_code") or item.get("vendorCode")
+                if sku and str(sku) == article:
+                    name = item.get("title") or item.get("name") or item.get("product_title") or item.get("title_ru") or article
+                    stock = item.get("stock") or item.get("stock_quantity") or item.get("amount") or "Невідомо"
+                    return {"name": name, "stock": stock}
+        except Exception:
+            # не JSON — пробуем парсити як XML/YML
+            pass
+
+        # Спроба парсингу XML/YML
+        try:
+            root = ET.fromstring(text.encode("utf-8"))
+            # YML/Offers: знайдемо всі <offer> або <product> елементи
+            offers = list(root.findall(".//offer")) + list(root.findall(".//product")) + list(root.findall(".//item"))
+            for o in offers:
+                # 1) перевіряємо атрибут id
+                offer_id = o.attrib.get("id")
+                if offer_id and str(offer_id) == article:
+                    # ім'я
+                    name_el = o.find("name") or o.find("title") or o.find("model")
+                    name = name_el.text if name_el is not None else article
+                    # stock: дивимось за кількома варіантами
+                    stock = None
+                    # звичні поля: <available> (true/false), <stock> або <param name="...">
+                    avail = o.attrib.get("available")
+                    if avail:
+                        stock = "Наявність" if avail.lower() in ("true", "1", "yes") else 0
+                    st_el = o.find("stock")
+                    if st_el is not None and st_el.text and st_el.text.isdigit():
+                        stock = int(st_el.text)
+                    # vendorCode, vendor_code, sku як піделементи
+                    vendor_code = o.find("vendorCode") or o.find("vendor_code") or o.find("sku") or o.find("vendor-code")
+                    if vendor_code is not None and vendor_code.text and str(vendor_code.text) == article:
+                        # намагаємось знайти запас
+                        # перевіримо param(name=...) на можливі назви залишків
+                        for p in o.findall("param"):
+                            name_attr = p.attrib.get("name", "").lower()
+                            if name_attr in ("количество", "остаток", "остання", "stock", "amount", "кількість"):
+                                try:
+                                    stock = int(p.text)
+                                except Exception:
+                                    stock = p.text or "Невідомо"
+                        return {"name": name, "stock": stock if stock is not None else "Невідомо"}
+
+                # якщо не знайшли по id — перевіримо піделементи (vendorCode / sku / param)
+                # знайдемо sku-поля
+                sku_elem = o.find("sku") or o.find("vendorCode") or o.find("vendor_code") or o.find("vendor-code")
+                if sku_elem is not None and sku_elem.text and str(sku_elem.text).strip() == article:
+                    name_el = o.find("name") or o.find("title") or o.find("model")
+                    name = name_el.text if name_el is not None else article
+                    stock = None
+                    st_el = o.find("stock")
+                    if st_el is not None and st_el.text and st_el.text.isdigit():
+                        stock = int(st_el.text)
+                    for p in o.findall("param"):
+                        name_attr = p.attrib.get("name", "").lower()
+                        if name_attr in ("количество", "остаток", "stock", "amount", "кількість"):
+                            try:
+                                stock = int(p.text)
+                            except Exception:
+                                stock = p.text or "Невідомо"
+                    return {"name": name, "stock": stock if stock is not None else "Невідомо"}
         except Exception as e:
-            logger.error(f"Помилка перевірки артикулу: {e}")
-            return None
+            logger.exception("XML parse error: %s", e)
+
+    # Якщо нічого не знайшли — None
+    return None
+
 
 @router.message(OrderForm.article)
 async def state_article(msg: Message, state: FSMContext):
     article = msg.text.strip()
-
+    await msg.chat.do("typing")
     product = await check_article(article)
     if not product:
-        await msg.answer("❌ Невірний артикул. Спробуйте ще раз.")
+        # Якщо нічого не знайдено — пробуємо ще раз з менш суворим порівнянням (lowercase)
+        product = await check_article(article.lower())
+    if not product:
+        await msg.answer("❌ Невірний артикул або товар недоступний у вигрузці. Спробуйте ще раз або напишіть 'підтримка'.")
         return
 
     # зберігаємо
-    await state.update_data(article=article, product_name=product["name"], stock=product["stock"])
+    await state.update_data(article=article, product_name=product.get("name"), stock=product.get("stock"))
     await msg.answer(
         f"✅ Знайдено товар:\n"
-        f"🔖 {product['name']}\n"
-        f"📦 Наявність: {product['stock']} шт.\n\n"
+        f"🔖 <b>{product.get('name')}</b>\n"
+        f"📦 Наявність: <b>{product.get('stock')}</b> шт.\n\n"
         "Оберіть службу доставки:",
         reply_markup=delivery_keyboard()
     )
@@ -338,7 +456,84 @@ async def cb_order_cancel(cb: CallbackQuery, state: FSMContext):
 
 # ---------------- MyDrop integration ----------------
 async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int] = None):
-    pass
+    """
+    Формує та відправляє замовлення в MyDrop (dropshipper endpoint).
+    Використовує MYDROP_ORDERS_URL (POST) і заголовок X-API-KEY = MYDROP_API_KEY
+    payload: словник зі стейту FSM (має містити pib, phone, article, product_name, stock, delivery, address, payment, note, mode)
+    """
+    orders_url = os.getenv("MYDROP_ORDERS_URL")
+    api_key = os.getenv("MYDROP_API_KEY")
+    if not orders_url or not api_key:
+        logger.error("MYDROP_ORDERS_URL or MYDROP_API_KEY not configured")
+        if notify_chat:
+            await bot.send_message(notify_chat, "⚠️ MYDROP_ORDERS_URL або MYDROP_API_KEY не налаштовані на сервері.")
+        return None
+
+    # Сформуємо products масив згідно з docs (для dropshipper endpoint)
+    article = payload.get("article")
+    product_name = payload.get("product_name") or payload.get("title") or article or "Товар"
+    amount = int(payload.get("amount", 1) or 1)
+    # Якщо у state немає ціни — можна вказати 0 або намагатись витягти drop_price, але для безпечності ставимо 0
+    price = payload.get("price") or 0
+    # vendor_name необов'язкове — можна підставити SUPPLIER_NAME
+    vendor_name = os.getenv("SUPPLIER_NAME") or payload.get("vendor_name") or None
+
+    product_obj = {
+        "product_title": product_name,
+        "sku": article,
+        "price": price,
+        "amount": amount
+    }
+    if vendor_name:
+        product_obj["vendor_name"] = vendor_name
+
+    # Формуємо body
+    body = {
+        "name": payload.get("pib"),
+        "phone": payload.get("phone"),
+        "products": [product_obj],
+    }
+
+    # додаткові поля доставки
+    if payload.get("delivery"):
+        body["delivery_service"] = payload.get("delivery")
+    if payload.get("address"):
+        # якщо NP — може бути місто + warehouse_number; тут в state address зберігається те, що ввів користувач
+        body["warehouse_number"] = payload.get("address")
+    if payload.get("note"):
+        body["description"] = payload.get("note")
+    if payload.get("mode") == "test":
+        body["order_source"] = "Bot Test"
+
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json"
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(orders_url, json=body, headers=headers, timeout=20) as resp:
+                text = await resp.text()
+                try:
+                    data = await resp.json()
+                except Exception:
+                    data = {"raw": text}
+                if 200 <= resp.status < 300:
+                    logger.info("MyDrop order created: %s", data)
+                    if notify_chat:
+                        # зберемо коротку інфу для адміна
+                        await bot.send_message(notify_chat, f"✅ Замовлення відправлено в MyDrop.\nВідповідь: {json.dumps(data, ensure_ascii=False)}")
+                    return data
+                else:
+                    logger.error("MyDrop order error %s: %s", resp.status, text)
+                    if notify_chat:
+                        await bot.send_message(notify_chat, f"❌ Помилка при створенні замовлення в MyDrop (status {resp.status}):\n{text}")
+                    return None
+    except Exception as e:
+        logger.exception("Error creating MyDrop order: %s", e)
+        if notify_chat:
+            await bot.send_message(notify_chat, f"❌ Виняток при відправці в MyDrop: {e}")
+        return None
 
 # ---------------- Telethon client ----------------
 telethon_client: Optional[TelegramClient] = None
