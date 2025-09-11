@@ -208,16 +208,30 @@ async def state_phone(msg: Message, state: FSMContext):
 
 # --- Артикул ---
 async def check_article(article: str) -> bool:
-    if not MYDROP_ORDERS_URL or not MYDROP_API_KEY:
+    """
+    Перевірка артикулу на MyDrop.
+    Повертає True, якщо артикул знайдено.
+    """
+    if not MYDROP_API_KEY:
         return True
-    headers = {"Authorization": f"Bearer {MYDROP_API_KEY}", "Content-Type": "application/json"}
-    url = MYDROP_ORDERS_URL.replace("orders", "products") + "/search"
+
+    url = "https://backend.mydrop.com.ua/dropshipping/products/search"
+    headers = {
+        "Authorization": f"Bearer {MYDROP_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {"query": article}
+
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, params={"q": article}, headers=headers) as resp:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    return False
                 data = await resp.json()
-                return bool(data.get("data"))
-        except Exception:
+                products = data.get("data", [])
+                return any(str(article) in str(p.get("article", "")) for p in products)
+        except Exception as e:
+            logger.error(f"Помилка перевірки артикулу: {e}")
             return False
 
 @router.message(OrderForm.article)
