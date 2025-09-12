@@ -368,16 +368,11 @@ def apply_markup(price: Optional[float]) -> Optional[int]:
     except Exception:
         return None
 
+# ---------------- improved check_article_or_name ----------------
 async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     """
     Robust search in MYDROP export by article (id / sku) or product name.
-    Повертає словник продукту або None.
-    Поліпшене матчення:
-      - exact match по offer_id або vendor_code (sku)
-      - numeric match: порівнюємо цифрові частини у offer_id, sku, name, description
-      - substring match по name (як suggestion або точний, залежно від довжини)
-      - шукаємо digits підстроку у всіх полях
-    Logging: додає debug-логи про тип знайденого матчу.
+    Returns product dict or None. Tries many tag name variants (localname aware).
     """
     q_raw = str(query or "").strip()
     q = q_raw.lower()
@@ -389,7 +384,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
         logger.debug("check_article_or_name: feed empty")
         return None
 
-    # only digits from query (e.g. user ввів "1053")
     q_digits = re.sub(r'\D', '', q_raw)
 
     def parse_components_from_description(desc_text: str):
@@ -398,7 +392,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
         desc = re.sub(r'<br\s*/?>', '\n', desc_text, flags=re.I)
         desc = re.sub(r'<[^>]+>', '', desc)
         desc = unescape(desc).strip()
-
         parts = re.split(r'(?m)^([А-ЯЇЄІҐA-Za-z0-9\-\s]{2,60}):', desc)
         comps = []
         for i in range(1, len(parts), 2):
@@ -424,39 +417,152 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 comps.append({"name": name, "options": final_opts})
         return comps or None
 
+    # helper to get localname of tag (strip namespace)
+    def local(tag: str) -> str:
+        return tag.split("}", 1)[-1] if "}" in tag else tag
+
+    # helper: find first occurrence of candidate child tags (by localname) anywhere in element
+    def find_first_text(elem, candidates):
+        for node in elem.iter():
+            ln = local(node.tag).lower()
+            if ln in candidates and (node.text or "").strip():
+                return (ln, (node.text or "").strip())
+        return (None, None)
+
+    # list of possible price tag localnames to try (in order)
+    PRICE_KEYS = {
+        "price", "drop_price", "price_uah", "retail", "rrc", "oldprice", "baseprice", "wholesale_price", "value"
+    }
+    # sku/vendor keys
+    SKU_KEYS = {"vendorcode", "sku", "vendor_code", "articul", "article"}
+    # name/title keys
+    NAME_KEYS = {"name", "title", "product", "product_name", "producttitle"}
+    # qty keys
+    QTY_KEYS = {"quantity_in_stock", "quantity", "stock", "stock_qty", "available", "count"}
+
     try:
         it = ET.iterparse(io.StringIO(text), events=("end",))
         for event, elem in it:
-            tag = elem.tag
-            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
+            tag = local(elem.tag).lower()
+            if not (tag in ("offer", "item", "product")):
                 elem.clear()
                 continue
 
             offer_id = (elem.attrib.get("id") or "").strip()
-            vendor_code = (elem.findtext("vendorCode") or elem.findtext("sku") or "").strip()
-            name = (elem.findtext("name") or elem.findtext("title") or "").strip()
+            # try to get vendorCode/sku/name/description robustly
+            # scan children for candidate names
+            sku_found = None
+            name_found = None
             desc_text = elem.findtext("description") or ""
+            # try direct common tags first:
+            sku_found = (elem.findtext("vendorCode") or elem.findtext("sku") or "") or ""
+            name_found = (elem.findtext("name") or elem.findtext("title") or "") or ""
+            # if still empty, scan generically
+            if not sku_found:
+                for child in elem.iter():
+                    if (child.text or "").strip() and local(child.tag).lower() in SKU_KEYS:
+                        sku_found = (child.text or "").strip()
+                        break
+            if not name_found:
+                for child in elem.iter():
+                    if (child.text or "").strip() and local(child.tag).lower() in NAME_KEYS:
+                        name_found = (child.text or "").strip()
+                        break
+            vendor_code = (sku_found or "").strip()
+            name = (name_found or "").strip()
 
-            # numeric prices & stock
-            price_text = elem.findtext("price") or ""
-            try:
-                drop_price = float(price_text) if price_text.strip() else None
-            except Exception:
-                drop_price = None
-            rrc_text = elem.findtext("rrc") or elem.findtext("retail") or elem.findtext("oldprice") or None
-            try:
-                retail_price = float(rrc_text) if rrc_text and str(rrc_text).strip() else None
-            except Exception:
-                retail_price = None
+            # find price: try multiple localnames and nested values
+            price_val = None
+            price_source = None
+            # first check common direct children
+            for child in elem.iter():
+                ln = local(child.tag).lower()
+                if ln in PRICE_KEYS and (child.text or "").strip():
+                    cand = (child.text or "").strip()
+                    # if value is like <price><value>123</value></price> - handle nested
+                    if ln == "price" and any(c.tag for c in list(child)):
+                        # look for numeric in descendants
+                        for d in child.iter():
+                            if (d.text or "").strip():
+                                txt = (d.text or "").strip()
+                                if re.search(r'[\d]', txt):
+                                    price_val = txt
+                                    price_source = f"{ln} (nested)"
+                                    break
+                        if price_val:
+                            break
+                    price_val = cand
+                    price_source = ln
+                    break
+            # fallback: parse any numeric-looking child text
+            if price_val is None:
+                for child in elem.iter():
+                    txt = (child.text or "").strip()
+                    if re.fullmatch(r'^\d+[\.,]?\d*$', txt):
+                        price_val = txt
+                        price_source = f"numeric_fallback:{local(child.tag)}"
+                        break
 
-            quantity_text = elem.findtext("quantity_in_stock")
+            # parse numeric prices safely
+            def to_float(v):
+                try:
+                    if v is None:
+                        return None
+                    s = str(v).strip().replace(",", ".")
+                    return float(re.sub(r'[^\d\.]', '', s)) if re.search(r'\d', s) else None
+                except Exception:
+                    return None
+
+            drop_price = to_float(price_val)
+
+            # retail price: try rrc/retail/oldprice
+            retail_val = None
+            for child in elem.iter():
+                ln = local(child.tag).lower()
+                if ln in ("rrc", "retail", "oldprice", "recommended_price"):
+                    if (child.text or "").strip():
+                        retail_val = (child.text or "").strip()
+                        break
+            retail_price = to_float(retail_val)
+
+            # quantity (try several keys)
             stock_qty = None
-            if quantity_text and quantity_text.strip().isdigit():
-                stock_qty = int(quantity_text.strip())
-            stock_attr = elem.attrib.get("available", "true").lower()
-            stock = "Є" if stock_attr in ("true", "1", "yes") else "Немає"
+            qty_found = None
+            # check attributes too
+            if elem.attrib.get("stock") and str(elem.attrib.get("stock")).strip().isdigit():
+                stock_qty = int(str(elem.attrib.get("stock")).strip())
+            elif elem.attrib.get("quantity") and str(elem.attrib.get("quantity")).strip().isdigit():
+                stock_qty = int(str(elem.attrib.get("quantity")).strip())
+            else:
+                for child in elem.iter():
+                    ln = local(child.tag).lower()
+                    if ln in QTY_KEYS and (child.text or "").strip():
+                        t = (child.text or "").strip()
+                        # might be "10" or "10 шт." etc
+                        m = re.search(r'(\d+)', t)
+                        if m:
+                            stock_qty = int(m.group(1))
+                            qty_found = ln
+                            break
 
-            # ------------------------------------------------------------------
+            # availability attribute (boolean-ish)
+            stock_attr = elem.attrib.get("available", "").strip().lower()
+            stock = None
+            if stock_attr:
+                stock = "Є" if stock_attr in ("true", "1", "yes") else "Немає"
+            else:
+                # guess from stock_qty or specific tags
+                if stock_qty is not None:
+                    stock = "Є" if stock_qty > 0 else "Немає"
+                else:
+                    # check text nodes for words like "є", "в наявності", "да"
+                    desc_all = (desc_text or "") + " " + (name or "") + " " + " ".join([(c.text or "") for c in elem.findall("param")])
+                    if re.search(r'\b(є|в наявності|есть|available)\b', desc_all, flags=re.I):
+                        stock = "Є"
+                    else:
+                        stock = "Немає"
+
+            # components and sizes logic (reuse your previous code)
             sizes_from_param = []
             components_from_params = []
             for p in elem.findall("param"):
@@ -471,7 +577,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                         if v:
                             sizes_from_param.append(v)
                     continue
-
                 if any(kw in low for kw in COMPONENT_KEYWORDS):
                     opts = []
                     opts += re.findall(r'\b\d{2,3}-\d{2,3}\b', ptext)
@@ -492,8 +597,8 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                         seen2.add(o2.lower())
                         final.append(o2)
                     components_from_params.append({"name": pname or "Компонент", "options": final})
+
             components_from_desc = parse_components_from_description(desc_text)
-            # Merge components
             if components_from_desc:
                 if components_from_params:
                     desc_names = {c["name"].lower(): c for c in components_from_desc}
@@ -510,7 +615,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 components = [{"name": "Розмір", "options": list(dict.fromkeys(sizes_from_param))}]
             else:
                 components = None
-            # ------------------------------------------------------------------
 
             product = {
                 "name": name or offer_id,
@@ -525,64 +629,50 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 "components": components
             }
 
-            # prepare searchable forms
+            # search logic: exact matches priority
             offer_low = (offer_id or "").lower()
             sku_low = (vendor_code or "").lower()
             name_low = (name or "").lower()
             desc_low = (desc_text or "").lower()
 
-            # 1) exact id/sku/name match
+            # 1) exact id/sku/name
             if q and (q == offer_low or (vendor_code and q == sku_low) or (name and q == name_low)):
                 elem.clear()
-                logger.debug("check_article_or_name: exact match by id/sku/name (%s) -> %s", q_raw, product["sku"])
+                logger.debug("check_article_or_name: exact match by id/sku/name (%s) -> %s (price_source=%s)", q_raw, product["sku"], price_source)
                 return product
 
-            # 2) numeric matching: check digits in offer/sku/name/description
+            # 2) numeric matching
             if q_digits:
-                # build digit-strings from available fields
                 offer_digits = re.sub(r'\D', '', offer_id or "")
                 sku_digits = re.sub(r'\D', '', vendor_code or "")
                 name_digits = re.sub(r'\D', '', name or "")
                 desc_digits = re.sub(r'\D', '', desc_text or "")
 
                 if offer_digits and q_digits == offer_digits:
-                    elem.clear()
-                    logger.debug("check_article_or_name: digits exact in offer_id: %s -> %s", q_digits, offer_id)
-                    return product
+                    elem.clear(); logger.debug("digits exact in offer_id"); return product
                 if sku_digits and q_digits == sku_digits:
-                    elem.clear()
-                    logger.debug("check_article_or_name: digits exact in sku: %s -> %s", q_digits, vendor_code)
-                    return product
-                # substring numeric match across fields
+                    elem.clear(); logger.debug("digits exact in sku"); return product
                 if offer_digits and q_digits in offer_digits:
-                    elem.clear()
-                    logger.debug("check_article_or_name: digits substring in offer_id: %s in %s", q_digits, offer_digits)
-                    return product
+                    elem.clear(); logger.debug("digits substring in offer_id"); return product
                 if sku_digits and q_digits in sku_digits:
-                    elem.clear()
-                    logger.debug("check_article_or_name: digits substring in sku: %s in %s", q_digits, sku_digits)
-                    return product
+                    elem.clear(); logger.debug("digits substring in sku"); return product
                 if name_digits and q_digits in name_digits:
-                    elem.clear()
-                    logger.debug("check_article_or_name: digits substring in name: %s in %s", q_digits, name)
-                    return product
+                    elem.clear(); logger.debug("digits substring in name"); return product
                 if desc_digits and q_digits in desc_digits:
-                    elem.clear()
-                    logger.debug("check_article_or_name: digits substring in description for query %s", q_digits)
-                    return product
+                    elem.clear(); logger.debug("digits substring in description"); return product
 
-            # 3) substring match in sku/offer/name (textual); if short query — require >=3 chars to avoid false positives
-            if q and ((vendor_code and q in sku_low) or (offer_id and q in offer_low)):
-                elem.clear()
-                logger.debug("check_article_or_name: substring match in sku/offer (%s) -> %s/%s", q_raw, offer_id, vendor_code)
-                return product
-
-            if name and q in name_low and len(q) >= 3:
-                # partial match — mark suggestion
-                product["suggestion"] = True
-                elem.clear()
-                logger.debug("check_article_or_name: suggestion by name substring (%s) -> %s", q_raw, name)
-                return product
+            # 3) textual substring match: search name and description (allow 2+ chars to be user-friendly)
+            if q and len(q) >= 2:
+                if vendor_code and q in sku_low:
+                    elem.clear(); logger.debug("substring match in sku"); return product
+                if offer_id and q in offer_low:
+                    elem.clear(); logger.debug("substring match in offer"); return product
+                if name and q in name_low:
+                    product["suggestion"] = True
+                    elem.clear(); logger.debug("suggestion by name substring"); return product
+                if desc_text and q in desc_low:
+                    product["suggestion"] = True
+                    elem.clear(); logger.debug("suggestion by description substring"); return product
 
             elem.clear()
         # end iterparse
@@ -699,6 +789,51 @@ def build_size_keyboard(component_index: int, sizes: List[str]) -> InlineKeyboar
     return kb
 
 # --- FSM: отримання артикулу або назви (updated: support component size selection) ---
+@router.message(Command("debug_find"))
+async def cmd_debug_find(msg: Message):
+    if msg.from_user.id != ADMIN_ID:
+        await msg.answer("⚠️ Тільки адміністратору.")
+        return
+    parts = (msg.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        await msg.answer("Використання: /debug_find <query>")
+        return
+    q = parts[1].strip().lower()
+    text = await load_products_export()
+    if not text:
+        await msg.answer("⚠️ Фід пустий.")
+        return
+    found = []
+    try:
+        it = ET.iterparse(io.StringIO(text), events=("end",))
+        for event, elem in it:
+            tag = local(elem.tag).lower()
+            if tag not in ("offer", "item", "product"):
+                elem.clear(); continue
+            offer_id = (elem.attrib.get("id") or "").strip()
+            sku = (elem.findtext("vendorCode") or elem.findtext("sku") or "").strip()
+            name = (elem.findtext("name") or elem.findtext("title") or "").strip()
+            desc = (elem.findtext("description") or "").strip()
+            summary = f"id={offer_id} | sku={sku} | name={name}"
+            searchable = " ".join([offer_id.lower(), sku.lower(), name.lower(), desc.lower()])
+            if q in searchable:
+                # collect a short debug dump of child tags -> text (localname)
+                child_map = []
+                for c in list(elem):
+                    ln = local(c.tag)
+                    txt = (c.text or "").strip()
+                    child_map.append(f"{ln}={txt[:80]}")
+                found.append(summary + "\n" + "; ".join(child_map))
+                if len(found) >= 10:
+                    break
+            elem.clear()
+    except Exception:
+        logger.exception("debug_find failed")
+    if not found:
+        await msg.answer("No matches")
+    else:
+        await msg.answer("Matches:\n\n" + "\n\n".join(found))
+
 @router.message(OrderForm.article)
 async def state_article(msg: Message, state: FSMContext):
     query = msg.text.strip()
