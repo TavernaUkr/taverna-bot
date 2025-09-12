@@ -18,6 +18,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 import re
+import io
 
 import aiohttp
 from dotenv import load_dotenv
@@ -117,12 +118,25 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
+from aiogram.types import BotCommand
+
+async def setup_commands():
+    commands = [
+        BotCommand(command="start", description="Почати роботу з ботом"),
+        BotCommand(command="publish_test", description="Опублікувати тестовий пост (адмін)"),
+        BotCommand(command="refresh_cache", description="Оновити кеш вигрузки (адмін)"),
+    ]
+    try:
+        await bot.set_my_commands(commands)
+    except Exception as e:
+        logger.exception("Cannot set bot commands: %s", e)
 
 # ---------------- FSM ----------------
 class OrderForm(StatesGroup):
     pib = State()
     phone = State()
     article = State()
+    amount = State()
     delivery = State()
     address = State()
     payment = State()
@@ -180,6 +194,9 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
 # ---------------- Test command ----------------
 @router.message(Command("publish_test"))
 async def cmd_publish_test(msg: Message):
+    if msg.from_user.id != ADMIN_ID:
+        await msg.answer("⚠️ У вас немає прав на виконання цієї команди.")
+        return
     text = (
         "🔥 <b>Тестовий пост для</b> @test_taverna\n\n"
         "Це перевірка кнопки <b>«Замовити»</b>.\n"
@@ -194,6 +211,9 @@ async def cmd_publish_test(msg: Message):
 
 @router.message(Command("refresh_cache"))
 async def cmd_refresh_cache(msg: Message):
+    if msg.from_user.id != ADMIN_ID:
+        await msg.answer("⚠️ У вас немає прав на виконання цієї команди.")
+        return
     """Примусово оновлює кеш вигрузки товарів"""
     await msg.answer("⏳ Оновлюю кеш вигрузки...")
     text = await load_products_export(force=True)
@@ -220,7 +240,7 @@ async def state_phone(msg: Message, state: FSMContext):
         await msg.answer("❌ Телефон має бути у форматі +380XXXXXXXXX.")
         return
     await state.update_data(phone=phone)
-    await msg.answer("Введіть артикул товару:")
+    await msg.answer("Введіть артикул або назву товару:")
     await state.set_state(OrderForm.article)
 
 async def load_products_export(force: bool = False) -> Optional[str]:
@@ -267,94 +287,205 @@ async def load_products_export(force: bool = False) -> Optional[str]:
 
         return None
 
-# --- Артикул ---
+# --- Артикул або назва ---
+import io
 import xml.etree.ElementTree as ET
+from typing import Optional, Dict, Any
 
-async def check_article(article: str) -> Optional[Dict[str, Any]]:
+def apply_markup(price: Optional[float]) -> Optional[int]:
+    """Додає +33% до ціни і округлює до гривні (int)."""
+    try:
+        if price is None:
+            return None
+        return int(round(float(price) * 1.33))
+    except Exception:
+        return None
+
+async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     """
-    Шукає артикул (vendorCode) у вигрузці MyDrop.
+    Шукає товар по артикулу або назві у вигрузці (MYDROP_EXPORT_URL).
+    Повертає dict з полями:
+      - name, sku, drop_price (float|None), retail_price (float|None),
+      - final_price (int|None) — клієнтська ціна = drop_price*1.33 округлено,
+      - stock (str), sizes (list[str]) або None,
+      - suggestion (bool) якщо це частковий збіг.
+    Використовує ET.iterparse для мінімального використання пам'яті.
     """
-    article = str(article).strip()
+    q = str(query or "").strip().lower()
+    if not q:
+        return None
+
     text = await load_products_export()
     if not text:
         return None
 
-    # Спробуємо JSON
     try:
-        parsed = json.loads(text)
-        if isinstance(parsed, (dict, list)):
-            candidates = []
-            if isinstance(parsed, dict):
-                candidates = parsed.get("offers") or parsed.get("products") or parsed.get("data") or []
-            elif isinstance(parsed, list):
-                candidates = parsed
-            for item in candidates:
-                sku = item.get("sku") or item.get("product_sku") or item.get("vendor_code") or item.get("vendorCode")
-                if sku and str(sku).strip() == article:
-                    name = item.get("title") or item.get("name") or article
-                    stock = item.get("stock") or item.get("stock_quantity") or item.get("amount") or "Невідомо"
-                    return {"name": name, "stock": stock}
-    except Exception:
-        pass  # якщо не JSON — парсимо XML
+        it = ET.iterparse(io.StringIO(text), events=("end",))
+        for event, elem in it:
+            # нормалізація тега (без namespace)
+            tag = elem.tag
+            if tag.endswith("offer") or tag.endswith("item") or tag.endswith("product"):
+                offer_id = (elem.attrib.get("id") or "").strip()
+                vendor_code = (elem.findtext("vendorCode") or elem.findtext("sku") or "").strip()
+                name = (elem.findtext("name") or elem.findtext("title") or "").strip()
+                price_text = elem.findtext("price") or ""
+                try:
+                    drop_price = float(price_text) if price_text.strip() else None
+                except Exception:
+                    drop_price = None
+                # retail price (RRC) може бути в різних полях
+                rrc_text = elem.findtext("rrc") or elem.findtext("retail") or elem.findtext("oldprice") or None
+                try:
+                    retail_price = float(rrc_text) if rrc_text and str(rrc_text).strip() else None
+                except Exception:
+                    retail_price = None
 
-    # Спроба XML / YML
-    try:
-        root = ET.fromstring(text.encode("utf-8"))
-        offers = list(root.findall(".//offer"))
-        for o in offers:
-            vendor_code = o.find("vendorCode")
-            if vendor_code is not None and vendor_code.text and vendor_code.text.strip() == article:
-                # Назва товару
-                name_el = o.find("name") or o.find("title") or o.find("model")
-                name = name_el.text if name_el is not None else article
+                # кількість у наявності
+                quantity_text = elem.findtext("quantity_in_stock")
+                stock_qty = None
+                if quantity_text and quantity_text.strip().isdigit():
+                    stock_qty = int(quantity_text.strip())
 
-                # Наявність
-                avail = o.attrib.get("available", "").lower()
-                stock = "Наявний" if avail in ("true", "1", "yes") else "Немає"
+                # якщо нема кількості — fallback на available
+                stock_attr = elem.attrib.get("available", "true").lower()
+                stock = "Є" if stock_attr in ("true", "1", "yes") else "Немає"
 
-                # Якщо є <stock>
-                st_el = o.find("stock")
-                if st_el is not None and st_el.text:
-                    try:
-                        stock = int(st_el.text)
-                    except Exception:
-                        stock = st_el.text
+                # size params: шукаємо param name=... які містять 'size' або 'розмір'
+                sizes = []
+                for p in elem.findall("param"):
+                    pname = p.attrib.get("name", "").lower()
+                    if "size" in pname or "розмір" in pname or "размер" in pname:
+                        if (p.text or "").strip():
+                            sizes.append(p.text.strip())
 
-                # Якщо є <param name="Кількість"> або подібне
-                for p in o.findall("param"):
-                    name_attr = p.attrib.get("name", "").lower()
-                    if name_attr in ("количество", "остаток", "stock", "amount", "кількість"):
-                        try:
-                            stock = int(p.text)
-                        except Exception:
-                            stock = p.text or stock
+                # --- 1) точний пошук по артикулу (id або vendorCode) ---
+                if q == offer_id.lower() or (vendor_code and q == vendor_code.lower()):
+                    elem.clear()
+                    return {
+                        "name": name or offer_id,
+                        "sku": vendor_code or offer_id,
+                        "drop_price": drop_price,
+                        "retail_price": retail_price,
+                        "final_price": apply_markup(drop_price) if drop_price is not None else None,
+                        "stock": stock,
+                        "stock_qty": stock_qty,
+                        "sizes": sizes or None
+                    }
 
-                return {"name": name, "stock": stock}
+                # --- 2) точний пошук по назві ---
+                if name and q == name.lower():
+                    elem.clear()
+                    return {
+                        "name": name,
+                        "sku": vendor_code or offer_id,
+                        "drop_price": drop_price,
+                        "retail_price": retail_price,
+                        "final_price": apply_markup(drop_price) if drop_price is not None else None,
+                        "stock": stock,
+                        "stock_qty": stock_qty,
+                        "sizes": sizes or None
+                    }
+
+                # --- 3) частковий пошук по назві (перший збіг) ---
+                if name and q in name.lower() and len(q) >= 3:
+                    elem.clear()
+                    return {
+                        "suggestion": True,
+                        "name": name,
+                        "sku": vendor_code or offer_id,
+                        "drop_price": drop_price,
+                        "retail_price": retail_price,
+                        "final_price": apply_markup(drop_price) if drop_price is not None else None,
+                        "stock": stock,
+                        "sizes": sizes or None
+                    }
+
+                # очищення для економії пам'яті
+                elem.clear()
+        # кінець ітерації
     except Exception as e:
-        logger.exception("XML parse error: %s", e)
+        logger.exception("XML parse error in check_article_or_name: %s", e)
 
     return None
 
-
+# --- FSM: отримання артикулу або назви ---
 @router.message(OrderForm.article)
 async def state_article(msg: Message, state: FSMContext):
-    article = msg.text.strip()
+    query = msg.text.strip()
     await msg.chat.do("typing")
-    product = await check_article(article)
+    product = await check_article_or_name(query)
+
     if not product:
-        product = await check_article(article.lower())
-    if not product:
-        await msg.answer("❌ Невірний артикул або товар недоступний у вигрузці. Спробуйте ще раз або напишіть 'підтримка'.")
+        await msg.answer("❌ Не знайдено товар. Спробуйте ще раз (артикул або частина назви) або напишіть 'підтримка'.")
         return
 
-    await state.update_data(article=article, product_name=product.get("name"), stock=product.get("stock"))
+    stock_text = (
+    f"{product['stock']} ({product['stock_qty']} шт.)"
+    if product.get("stock_qty") is not None
+    else product["stock"]
+)
+
+    # Якщо це лише пропозиція (частковий збіг)
+    if product.get("suggestion"):
+        sizes_text = f"\n📏 Розміри: {', '.join(product['sizes'])}" if product.get("sizes") else ""
+        await msg.answer(
+            f"🤔 Можливо ви мали на увазі:\n"
+            f"🔖 <b>{product['name']}</b>\n"
+            f"🆔 Артикул: <b>{product['sku']}</b>\n"
+            f"📦 Наявність: <b>{stock_text}</b>\n"
+            f"💰 Орієнтовна ціна (з націнкою): {product.get('final_price') or '—'} грн\n"
+            f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн"
+            f"{sizes_text}\n\n"
+            "Якщо це те, що треба — введіть артикул для підтвердження замовлення."
+        )
+        return
+
+    # Якщо точний збіг
+    sizes_text = f"\n📏 Розміри: {', '.join(product['sizes'])}" if product.get("sizes") else ""
+    await state.update_data(
+        article=product["sku"],
+        product_name=product["name"],
+        stock=product["stock"],
+        stock_qty=product.get("stock_qty"),
+        price=product["final_price"]
+    )
     await msg.answer(
         f"✅ Знайдено товар:\n"
-        f"🔖 <b>{product.get('name')}</b>\n"
-        f"📦 Наявність: <b>{product.get('stock')}</b>\n\n"
-        "Оберіть службу доставки:",
-        reply_markup=delivery_keyboard()
+        f"🔖 <b>{product['name']}</b>\n"
+        f"🆔 Артикул: <b>{product['sku']}</b>\n"
+        f"📦 Наявність: <b>{stock_text}</b>\n"
+        f"💰 Ціна для клієнта: {product.get('final_price') or '—'} грн\n"
+        f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн"
+        f"{sizes_text}\n\n"
+        "👉 Введіть кількість товару (число):",
     )
+    await state.set_state(OrderForm.amount)
+
+# --- Кількість товару ---
+@router.message(OrderForm.amount)
+async def state_amount(msg: Message, state: FSMContext):
+    try:
+        qty = int(msg.text.strip())
+        if qty < 1:
+            raise ValueError
+    except ValueError:
+        await msg.answer("❌ Введіть правильне число (мінімум 1).")
+        return
+
+    data = await state.get_data()
+    max_stock = data.get("stock_qty")
+
+    # якщо є реальна кількість у stock_qty
+    if max_stock is not None and qty > max_stock:
+        await msg.answer(
+            f"⚠️ Доступна кількість цього товару: <b>{max_stock} шт.</b>\n"
+            f"Будь ласка, введіть іншу кількість:"
+        )
+        return  # залишаємо у цьому ж стані
+
+    # якщо кількість доступна — зберігаємо
+    await state.update_data(amount=qty)
+    await msg.answer("Оберіть службу доставки:", reply_markup=delivery_keyboard())
     await state.set_state(OrderForm.delivery)
 
 # --- Доставка ---
@@ -403,6 +534,7 @@ async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
         f"📞 Телефон: {data.get('phone')}\n"
         f"🔖 Товар: {data.get('product_name')} (SKU: {data.get('article')})\n"
         f"📦 Наявність: {data.get('stock')} шт.\n"
+        f"🔢 Кількість: {data.get('amount', 1)} шт.\n"
         f"🚚 Служба: {data.get('delivery')}\n"
         f"📍 Адреса/відділення: {data.get('address')}\n"
         f"💳 Тип оплати: {data.get('payment')}\n"
@@ -527,6 +659,18 @@ async def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("Starting aiogram polling...")
+    await setup_commands()
+
+    # Завантажуємо кеш з файлу, якщо є
+    cache_file = Path(ORDERS_DIR) / "products_cache.xml"
+    if cache_file.exists():
+        try:
+            PRODUCTS_CACHE["data"] = cache_file.read_text(encoding="utf-8")
+            PRODUCTS_CACHE["last_update"] = datetime.fromtimestamp(cache_file.stat().st_mtime)
+            logger.info("Loaded products cache from file (size=%d)", len(PRODUCTS_CACHE['data'] or ''))
+        except Exception as e:
+            logger.exception("Failed to load products cache file: %s", e)
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
