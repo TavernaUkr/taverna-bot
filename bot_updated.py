@@ -190,9 +190,15 @@ def size_keyboard(sizes: List[str], component_index: int = 0) -> InlineKeyboardM
     return kb
 
 # ---------------- Routers / Handlers ----------------
-@router.message(CommandStart(deep_link=True))
+# замініть існуючий @router.message(CommandStart(deep_link=True)) handler на цей
+@router.message(CommandStart())
 async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
+    """
+    Підтримує як звичайний /start, так і deep link виду:
+      /start order_<mode>_<post_id>
+    """
     args = command.args or ""
+    # якщо є deep link виду order_<mode>_<post_id>
     if args.startswith("order_"):
         parts = args.split("_")
         if len(parts) == 3:
@@ -201,6 +207,8 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
             await msg.answer("🧾 Розпочнемо оформлення. Введіть ваші ПІБ:")
             await state.set_state(OrderForm.pib)
             return
+
+    # стандартна відповідь на /start без аргументів
     await msg.answer(
         "Привіт! Це бот Taverna 👋\n"
         "Натисніть кнопку «Замовити» під постом у каналі, щоб оформити замовлення."
@@ -365,8 +373,10 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     Шукає товар по артикулу або назві у вигрузці (MYDROP_EXPORT_URL).
     Повертає dict з полями, додано:
       - components: list[{"name":str, "options": [str,...]}] або None
+    Оновлено: більш стійке матчення для числових запитів (виділення цифр, підрядкове порівняння).
     """
-    q = str(query or "").strip().lower()
+    q_raw = str(query or "").strip()
+    q = q_raw.lower()
     if not q:
         return None
 
@@ -375,29 +385,25 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
         logger.warning("check_article_or_name: products feed is empty or not loaded")
         return None
 
-    # helper: parse components & sizes from description text (HTML-like)
+    # цифрова частина запиту (наприклад користувач ввів "1053")
+    q_digits = re.sub(r'\D', '', q_raw)
+
     def parse_components_from_description(desc_text: str):
         if not desc_text:
             return None
-        # strip simple html tags and unescape entities
         desc = re.sub(r'<br\s*/?>', '\n', desc_text, flags=re.I)
         desc = re.sub(r'<[^>]+>', '', desc)
         desc = unescape(desc).strip()
 
-        # split by headings like "Шапка:", "Рукавиці:", "Баф:" etc.
         parts = re.split(r'(?m)^([А-ЯЇЄІҐA-Za-z0-9\-\s]{2,60}):', desc)
         comps = []
         for i in range(1, len(parts), 2):
             name = parts[i].strip()
             content = parts[i+1].strip() if (i+1) < len(parts) else ""
             opts = []
-            # ranges e.g. 55-57, 58-60
             opts += re.findall(r'\b\d{2,3}-\d{2,3}\b', content)
-            # single numbers like 55 (rare)
             opts += re.findall(r'\b\d{2}\b', content)
-            # size letters S/M/L/XL etc.
             opts += re.findall(r'\b(?:XS|S|M|L|XL|XXL|XXXL)\b', content, flags=re.I)
-            # words like 'універсальний'
             if re.search(r'універсал', content, flags=re.I):
                 opts.append('універсальний')
             # dedupe preserving order
@@ -446,9 +452,7 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
             stock = "Є" if stock_attr in ("true", "1", "yes") else "Немає"
 
             # ------------------------------------------------------------------
-            # 1) sizes_from_param: збираємо загальні списки "розмірів"
             sizes_from_param = []
-            # 2) components_from_params: якщо param.name представляє компонент — зберемо окремі компоненти
             components_from_params = []
 
             for p in elem.findall("param"):
@@ -457,7 +461,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 ptext = (p.text or "").strip()
 
                 low = pname.lower()
-                # загальні "size" param
                 if any(x in low for x in ("size", "розмір", "размер")) and ptext:
                     parts = re.split(r'[;,/\\\n]+', ptext)
                     for part in parts:
@@ -466,7 +469,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                             sizes_from_param.append(v)
                     continue
 
-                # компоненти по імені параметра (шапка, рукавиця, баф, комплект, ...)
                 if any(kw in low for kw in COMPONENT_KEYWORDS):
                     opts = []
                     opts += re.findall(r'\b\d{2,3}-\d{2,3}\b', ptext)
@@ -474,12 +476,8 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                     opts += re.findall(r'\b\d{2}\b', ptext)
                     if re.search(r'універсал', ptext, flags=re.I):
                         opts.append('універсальний')
-
-                    # якщо немає розмірів, але є "так/є/available" — позначимо як "шт."
                     if not opts and re.search(r'\b(так|є|available|есть)\b', ptext, flags=re.I):
                         opts = ['шт.']
-
-                    # dedupe & normalize
                     seen2 = set()
                     final = []
                     for o in opts:
@@ -490,39 +488,31 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                             continue
                         seen2.add(o2.lower())
                         final.append(o2)
-                    # якщо не знайшли опцій — додаємо пустий список (щоб потім мати можливість пропустити)
                     components_from_params.append({"name": pname or "Компонент", "options": final})
 
-            # parse description for component sections
             desc_text = elem.findtext("description") or ""
             components_from_desc = parse_components_from_description(desc_text)
 
-            # Merge components:
-            # priority: description components (rich, human-made) > components_from_params > sizes_from_param
+            # Merge components
             components = None
             if components_from_desc:
-                # якщо є також компоненти з params, додамо їх тільки якщо такого компонента немає в description
                 if components_from_params:
-                    # normalize desc names for quick check
                     desc_names = {c["name"].lower(): c for c in components_from_desc}
                     merged = components_from_desc.copy()
                     for comp_p in components_from_params:
                         if comp_p["name"].lower() not in desc_names:
-                            # уникнути пустих списків, якщо опції пусті — зберігаємо як [] (пізніше пропустимо)
                             merged.append(comp_p)
                     components = merged
                 else:
                     components = components_from_desc
             elif components_from_params:
-                # якщо тільки params — використовуємо їх
                 components = components_from_params
             elif sizes_from_param:
-                components = [{"name": "Розмір", "options": list(dict.fromkeys(sizes_from_param))}]  # preserve order, dedupe
+                components = [{"name": "Розмір", "options": list(dict.fromkeys(sizes_from_param))}]
             else:
                 components = None
             # ------------------------------------------------------------------
 
-            # build product dict (same keys as before) plus components
             product = {
                 "name": name or offer_id,
                 "sku": vendor_code or offer_id,
@@ -533,37 +523,60 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 "stock_qty": stock_qty,
                 "stock_text": f"{stock} ({stock_qty} шт.)" if stock_qty is not None else stock,
                 "sizes": sizes_from_param or None,
-                "components": components  # may be None
+                "components": components
             }
 
-            # exact matches like before:
-            qlow = q.lower()
-            # match by id/sku
+            # =============================================================================
+            # Політика порівняння (додаткове, більш терпиме матчення для digits)
+            # =============================================================================
+            qlow = q  # already lower
+            # exact id/sku match (case-insensitive)
             if qlow and (qlow == (offer_id or "").lower() or (vendor_code and qlow == vendor_code.lower())):
                 elem.clear()
-                logger.debug("check_article_or_name: exact match by id/sku: %s (offer_id=%s sku=%s) components=%s",
-                             q, offer_id, vendor_code, bool(components))
+                logger.debug("check_article_or_name: exact match by id/sku: query=%s offer_id=%s sku=%s", q_raw, offer_id, vendor_code)
                 return product
 
-            # match by full name
+            # numeric-matching: якщо користувач ввів лише цифри, порівнюємо цифрові частини
+            if q_digits:
+                offer_digits = re.sub(r'\D', '', offer_id or "")
+                sku_digits = re.sub(r'\D', '', vendor_code or "")
+                # повний цифровий матч
+                if offer_digits and q_digits == offer_digits:
+                    elem.clear()
+                    logger.debug("check_article_or_name: matched by digits (offer_id): %s -> %s", q_digits, offer_id)
+                    return product
+                if sku_digits and q_digits == sku_digits:
+                    elem.clear()
+                    logger.debug("check_article_or_name: matched by digits (sku): %s -> %s", q_digits, vendor_code)
+                    return product
+                # підрядковий цифровий матч (наприклад query '1053' у 'ART-1053')
+                if offer_digits and q_digits in offer_digits:
+                    elem.clear()
+                    logger.debug("check_article_or_name: digits substring match (offer_id): %s in %s", q_digits, offer_digits)
+                    return product
+                if sku_digits and q_digits in sku_digits:
+                    elem.clear()
+                    logger.debug("check_article_or_name: digits substring match (sku): %s in %s", q_digits, sku_digits)
+                    return product
+
+            # match by full name or partial name (as suggestion)
             if name and qlow == name.lower():
                 elem.clear()
-                logger.debug("check_article_or_name: exact match by name: %s -> %s components=%s", q, name, bool(components))
+                logger.debug("check_article_or_name: exact match by name: %s -> %s", q_raw, name)
                 return product
 
-            # partial match (suggestion) if q in name (and length >=3)
             if name and qlow in name.lower() and len(qlow) >= 3:
                 product["suggestion"] = True
                 elem.clear()
-                logger.debug("check_article_or_name: suggestion for query '%s' -> '%s' (components=%s)", q, name, bool(components))
+                logger.debug("check_article_or_name: suggestion for query '%s' -> '%s'", q_raw, name)
                 return product
 
-            # free memory for this element
             elem.clear()
         # end iterparse
     except Exception as e:
         logger.exception("XML parse error in check_article_or_name: %s", e)
 
+    logger.debug("check_article_or_name: no match for query '%s'", q_raw)
     return None
 
 # ---------------- Helpers: component size search ----------------
