@@ -106,6 +106,7 @@ def index():
 
 @app.route("/healthz")
 def healthz():
+    logger.info("🔄 Healthcheck запит отримано (keepalive ping).")
     return "ok", 200
 
 def run_flask():
