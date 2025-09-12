@@ -59,7 +59,12 @@ def check_env_vars():
     for var in env_vars:
         value = os.getenv(var)
         if value:
-            print(f"✅ {var} = {str(value)[:40]}...")
+            # mask potentially sensitive values (show only first 4 chars + ...)
+            if var.upper().endswith(("KEY", "TOKEN", "SECRET", "PASSWORD")) or var in ("BOT_TOKEN", "SERVICE_ACCOUNT_JSON", "MYDROP_API_KEY", "NP_API_KEY"):
+                masked = (str(value)[:4] + "...(masked)")
+            else:
+                masked = str(value) if len(str(value)) < 60 else str(value)[:57] + "..."
+            print(f"✅ {var} = {masked}")
         else:
             print(f"⚠️ {var} is not set")
     print("=== End ENV check ===")
@@ -128,6 +133,7 @@ class OrderForm(StatesGroup):
     pib = State()
     phone = State()
     article = State()
+    size = State()
     amount = State()
     delivery = State()
     address = State()
@@ -165,6 +171,25 @@ def confirm_keyboard():
         [InlineKeyboardButton(text="✅ Підтвердити", callback_data="order:confirm")],
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")]
     ])
+
+def size_keyboard(sizes: List[str]) -> InlineKeyboardMarkup:
+    """
+    Повертає InlineKeyboardMarkup з варіантами розмірів.
+    sizes — список рядків (наприклад ["55-57", "58-60", "шт."]).
+    Кнопки формують callback_data у вигляді "size:<розмір>".
+    По 3 кнопки в ряд (підлаштовується автоматично).
+    """
+    kb_rows = []
+    row = []
+    for i, s in enumerate(sizes):
+        row.append(InlineKeyboardButton(text=str(s), callback_data=f"size:{s}"))
+        # break row кожні 3 кнопки
+        if (i + 1) % 3 == 0:
+            kb_rows.append(row)
+            row = []
+    if row:
+        kb_rows.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 # ---------------- Routers / Handlers ----------------
 @router.message(CommandStart(deep_link=True))
@@ -323,6 +348,8 @@ async def load_products_export(force: bool = False) -> Optional[str]:
 
 # --- Артикул або назва ---
 import io
+import re
+from html import unescape
 import xml.etree.ElementTree as ET
 from typing import Optional, Dict, Any
 
@@ -338,12 +365,8 @@ def apply_markup(price: Optional[float]) -> Optional[int]:
 async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     """
     Шукає товар по артикулу або назві у вигрузці (MYDROP_EXPORT_URL).
-    Повертає dict з полями:
-      - name, sku, drop_price (float|None), retail_price (float|None),
-      - final_price (int|None) — клієнтська ціна = drop_price*1.33 округлено,
-      - stock (str), sizes (list[str]) або None,
-      - suggestion (bool) якщо це частковий збіг.
-    Використовує ET.iterparse для мінімального використання пам'яті.
+    Повертає dict з полями, додано:
+      - components: list[{"name":str, "options": [str,...]}] або None
     """
     q = str(query or "").strip().lower()
     if not q:
@@ -353,10 +376,51 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
 
+    # helper: parse components & sizes from description text (HTML-like)
+    def parse_components_from_description(desc_text: str):
+        if not desc_text:
+            return None
+        # strip html tags simple way and unescape entities
+        desc = re.sub(r'<br\s*/?>', '\n', desc_text, flags=re.I)
+        desc = re.sub(r'<[^>]+>', '', desc)
+        desc = unescape(desc).strip()
+
+        # split by headings like "Шапка:", "Рукавиці:", "Баф:" etc.
+        parts = re.split(r'(?m)^([А-ЯЇЄІҐA-Za-z0-9\-\s]{2,60}):', desc)
+        # re.split will produce: ['', 'Heading1', 'content1', 'Heading2', 'content2', ...]
+        comps = []
+        for i in range(1, len(parts), 2):
+            name = parts[i].strip()
+            content = parts[i+1].strip() if (i+1) < len(parts) else ""
+            # find size-like tokens in content:
+            opts = []
+            # ranges e.g. 55-57, 58-60
+            opts += re.findall(r'\b\d{2}-\d{2}\b', content)
+            # single numbers like 55 (rare)
+            opts += re.findall(r'\b\d{2}\b', content)
+            # size letters S/M/L/XL etc.
+            opts += re.findall(r'\b(?:XS|S|M|L|XL|XXL|XXXL)\b', content, flags=re.I)
+            # words like 'універсальний', 'універсал', 'шт.' etc.
+            if re.search(r'універсал', content, flags=re.I):
+                opts.append('універсальний')
+            # dedupe preserving order
+            seen = set()
+            final_opts = []
+            for o in opts:
+                o_norm = o.strip()
+                if not o_norm:
+                    continue
+                if o_norm.lower() in seen:
+                    continue
+                seen.add(o_norm.lower())
+                final_opts.append(o_norm)
+            if final_opts:
+                comps.append({"name": name, "options": final_opts})
+        return comps or None
+
     try:
         it = ET.iterparse(io.StringIO(text), events=("end",))
         for event, elem in it:
-            # нормалізація тега (без namespace)
             tag = elem.tag
             if tag.endswith("offer") or tag.endswith("item") or tag.endswith("product"):
                 offer_id = (elem.attrib.get("id") or "").strip()
@@ -367,86 +431,185 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                     drop_price = float(price_text) if price_text.strip() else None
                 except Exception:
                     drop_price = None
-                # retail price (RRC) може бути в різних полях
                 rrc_text = elem.findtext("rrc") or elem.findtext("retail") or elem.findtext("oldprice") or None
                 try:
                     retail_price = float(rrc_text) if rrc_text and str(rrc_text).strip() else None
                 except Exception:
                     retail_price = None
 
-                # кількість у наявності
                 quantity_text = elem.findtext("quantity_in_stock")
                 stock_qty = None
                 if quantity_text and quantity_text.strip().isdigit():
                     stock_qty = int(quantity_text.strip())
 
-                # якщо нема кількості — fallback на available
                 stock_attr = elem.attrib.get("available", "true").lower()
                 stock = "Є" if stock_attr in ("true", "1", "yes") else "Немає"
 
-                # size params: шукаємо param name=... які містять 'size' або 'розмір'
-                sizes = []
+                # sizes from <param name="..."> (як у попередньому коді)
+                sizes_from_param = []
                 for p in elem.findall("param"):
                     pname = p.attrib.get("name", "").lower()
                     if "size" in pname or "розмір" in pname or "размер" in pname:
                         if (p.text or "").strip():
-                            sizes.append(p.text.strip())
+                            # може бути список через коми
+                            parts = re.split(r'[;,/\\\n]', p.text)
+                            for part in parts:
+                                v = part.strip()
+                                if v:
+                                    sizes_from_param.append(v)
 
-                # --- 1) точний пошук по артикулу (id або vendorCode) ---
-                if q == offer_id.lower() or (vendor_code and q == vendor_code.lower()):
+                # parse description for component sections
+                desc_text = elem.findtext("description") or ""
+                components = parse_components_from_description(desc_text)
+
+                # If there is a single generic sizes list from params and no components,
+                # convert it into a single unnamed component.
+                if sizes_from_param and not components:
+                    components = [{"name": "Розмір", "options": sizes_from_param}]
+
+                # build product dict (same keys as before) plus components
+                product = {
+                    "name": name or offer_id,
+                    "sku": vendor_code or offer_id,
+                    "drop_price": drop_price,
+                    "retail_price": retail_price,
+                    "final_price": apply_markup(drop_price) if drop_price is not None else None,
+                    "stock": stock,
+                    "stock_qty": stock_qty,
+                    "stock_text": f"{stock} ({stock_qty} шт.)" if stock_qty is not None else stock,
+                    "sizes": sizes_from_param or None,
+                    "components": components  # may be None
+                }
+
+                # exact matches like before:
+                qlow = q.lower()
+                if qlow == offer_id.lower() or (vendor_code and qlow == vendor_code.lower()):
                     elem.clear()
-                    return {
-                        "name": name or offer_id,
-                        "sku": vendor_code or offer_id,
-                        "drop_price": drop_price,
-                        "retail_price": retail_price,
-                        "final_price": apply_markup(drop_price) if drop_price is not None else None,
-                        "stock": stock,
-                        "stock_qty": stock_qty,
-                        "stock_text": f"{stock} ({stock_qty} шт.)" if stock_qty is not None else stock,
-                        "sizes": sizes or None
-                    }
+                    return product
 
-                # --- 2) точний пошук по назві ---
-                if name and q == name.lower():
+                if name and qlow == name.lower():
                     elem.clear()
-                    return {
-                        "name": name,
-                        "sku": vendor_code or offer_id,
-                        "drop_price": drop_price,
-                        "retail_price": retail_price,
-                        "final_price": apply_markup(drop_price) if drop_price is not None else None,
-                        "stock": stock,
-                        "stock_qty": stock_qty,
-                        "stock_text": f"{stock} ({stock_qty} шт.)" if stock_qty is not None else stock,
-                        "sizes": sizes or None
-                    }
+                    return product
 
-                # --- 3) частковий пошук по назві (перший збіг) ---
-                if name and q in name.lower() and len(q) >= 3:
+                if name and qlow in name.lower() and len(qlow) >= 3:
+                    product["suggestion"] = True
                     elem.clear()
-                    return {
-                        "suggestion": True,
-                        "name": name,
-                        "sku": vendor_code or offer_id,
-                        "drop_price": drop_price,
-                        "retail_price": retail_price,
-                        "final_price": apply_markup(drop_price) if drop_price is not None else None,
-                        "stock": stock,
-                        "stock_qty": stock_qty,
-                        "stock_text": f"{stock} ({stock_qty} шт.)" if stock_qty is not None else stock,
-                        "sizes": sizes or None
-                    }
+                    return product
 
-                # очищення для економії пам'яті
                 elem.clear()
-        # кінець ітерації
+        # end iterparse
     except Exception as e:
         logger.exception("XML parse error in check_article_or_name: %s", e)
 
     return None
 
-# --- FSM: отримання артикулу або назви ---
+# ---------------- Helpers: component size search ----------------
+COMPONENT_KEYWORDS = ["шап", "шапка", "рукав", "рукави", "рукавиц", "рукавич", "баф", "балаклав", "комплект"]
+
+async def find_component_sizes(product_name: str) -> Dict[str, List[str]]:
+    """
+    Повертає мапу компонент->list_of_sizes, наприклад:
+      { "шапка": ["55-57","58-60"], "рукавиця": ["S","M","L"] }
+    Алгоритм простий:
+      - якщо у name товару міститься ключове слово (наприклад 'шапка' або 'комплект'),
+        то скануємо весь XML і збираємо унікальні значення param, які виглядають як розміри
+        (шукаємо param name містить size/размер/Розмір/Размер і беремо їх тексти).
+    Повертає {} якщо нічого не знайдено або кеш пустий.
+    """
+    res: Dict[str, List[str]] = {}
+    text = PRODUCTS_CACHE.get("data")
+    if not text:
+        return res
+
+    name_lower = (product_name or "").lower()
+
+    # визначимо, які компоненти шукати — на основі ключових слів що є в найменуванні продукту
+    to_search = [kw for kw in COMPONENT_KEYWORDS if kw in name_lower]
+    if not to_search:
+        # Якщо без ключів у назві — все одно пробіжимося по всьому фіду
+        to_search = COMPONENT_KEYWORDS.copy()
+
+    try:
+        import xml.etree.ElementTree as ET
+        it = ET.iterparse(io.StringIO(text), events=("end",))
+        for event, elem in it:
+            tag = elem.tag
+            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
+                elem.clear()
+                continue
+
+            name = (elem.findtext("name") or elem.findtext("title") or "").strip().lower()
+            # якщо назва пустая — пропускаємо
+            if not name:
+                elem.clear()
+                continue
+
+            # перевіримо, чи назва цього оффера містить якийсь компонент з to_search
+            matched_components = [kw for kw in to_search if kw in name]
+            if not matched_components:
+                # також можна шукати по опису або param->name, але спочатку так
+                elem.clear()
+                continue
+
+            # збираємо param'и що виглядають як розмір
+            sizes = set()
+            for p in elem.findall("param"):
+                pname = (p.attrib.get("name") or "").lower()
+                if any(x in pname for x in ("size", "размер", "розмір", "разм", "размір")) or pname.strip() in ("размер", "size", "розмір"):
+                    if (p.text or "").strip():
+                        sizes.add((p.text or "").strip())
+            # деякі фіди зберігають розміри як параметри атрибутів або прямо в name (наприклад "55-57")
+            if not sizes:
+                # спробуємо знайти у name фрагменти виду "55-57" або "S, M, L"
+                import re
+                # 55-57 style
+                ranges = re.findall(r"\b\d{2,3}-\d{2,3}\b", name)
+                for r in ranges:
+                    sizes.add(r)
+                # прості буквені розміри S, M, L (кілька)
+                letters = re.findall(r"\b([XSML]{1,3})\b", name.upper())
+                for l in letters:
+                    sizes.add(l)
+
+            if sizes:
+                for comp in matched_components:
+                    if comp not in res:
+                        res[comp] = []
+                    res[comp].extend(list(sizes))
+
+            elem.clear()
+
+        # унікалізуємо і відсортуємо
+        for k, v in list(res.items()):
+            uniq = sorted(set([x.strip() for x in v if x and x.strip()]))
+            if uniq:
+                res[k] = uniq
+            else:
+                res.pop(k, None)
+
+    except Exception:
+        logger.exception("Error while scanning product feed for component sizes")
+
+    return res
+
+# ---------------- Helpers: size buttons + handlers (replace state_article + cb_size) ----------------
+def build_size_keyboard(component_index: int, sizes: List[str]) -> InlineKeyboardMarkup:
+    """
+    Повертає InlineKeyboardMarkup з кнопками розмірів.
+    callback_data: "size:<component_index>:<size_index>"
+    """
+    kb = InlineKeyboardMarkup(row_width=3)
+    buttons = [
+        InlineKeyboardButton(text=str(s), callback_data=f"size:{component_index}:{i}")
+        for i, s in enumerate(sizes)
+    ]
+    if buttons:
+        kb.add(*buttons)
+    # кнопка скасування, посилає callback який вже обробляється у order:cancel
+    kb.add(InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="order:cancel"))
+    return kb
+
+# --- FSM: отримання артикулу або назви (updated: support component size selection) ---
 @router.message(OrderForm.article)
 async def state_article(msg: Message, state: FSMContext):
     query = msg.text.strip()
@@ -474,15 +637,61 @@ async def state_article(msg: Message, state: FSMContext):
         )
         return
 
-    # Якщо точний збіг
-    sizes_text = f"\n📏 Розміри: {', '.join(product['sizes'])}" if product.get("sizes") else ""
+    # Якщо точний збіг — зберігаємо базові дані
     await state.update_data(
         article=product["sku"],
         product_name=product["name"],
         stock=product["stock"],
         stock_qty=product.get("stock_qty"),
-        price=product["final_price"]
+        price=product["final_price"],
+        components=product.get("components")  # можуть бути None або список компонентів
     )
+
+    # Якщо є компоненти => починаємо послідовно питати розміри через inline-кнопки
+    components = product.get("components")
+    if components:
+        # ініціалізуємо selected_sizes як порожній dict
+        await state.update_data(selected_sizes={})
+        # ask first component
+        comp0 = components[0]
+        opts = comp0.get("options") or []
+        if not opts:
+            # якщо немає опцій, просто переходьмо до наступного кроку (quantity)
+            await msg.answer(
+                f"✅ Знайдено товар:\n"
+                f"🔖 <b>{product['name']}</b>\n"
+                f"🆔 Артикул: <b>{product['sku']}</b>\n"
+                f"📦 Наявність: <b>{stock_text}</b>\n"
+                f"💰 Ціна для клієнта: {product.get('final_price') or '—'} грн\n"
+                f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн\n\n"
+                "👉 Введіть кількість товару (число):"
+            )
+            await state.set_state(OrderForm.amount)
+            return
+
+        # build inline keyboard for options
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=str(opt), callback_data=f"size:0:{i}")]
+                for i, opt in enumerate(opts)
+            ] + [
+                [InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")]
+            ]
+        )
+        await msg.answer(
+            f"✅ Знайдено товар:\n"
+            f"🔖 <b>{product['name']}</b>\n"
+            f"🆔 Артикул: <b>{product['sku']}</b>\n"
+            f"📦 Наявність: <b>{stock_text}</b>\n"
+            f"💰 Ціна: {product.get('final_price') or '—'} грн\n\n"
+            f"📏 Виберіть розмір для: <b>{comp0['name']}</b>",
+            reply_markup=kb
+        )
+        await state.set_state(OrderForm.size)
+        return
+
+    # Якщо немає компонентів — як раніше запитуємо кількість
+    sizes_text = f"\n📏 Розміри: {', '.join(product['sizes'])}" if product.get("sizes") else ""
     await msg.answer(
         f"✅ Знайдено товар:\n"
         f"🔖 <b>{product['name']}</b>\n"
@@ -494,6 +703,126 @@ async def state_article(msg: Message, state: FSMContext):
         "👉 Введіть кількість товару (число):",
     )
     await state.set_state(OrderForm.amount)
+
+# --- Обробник вибору розміру через inline-кнопки (оновлений UX: Continue / Edit) ---
+@router.callback_query(F.data.startswith("size:"))
+async def cb_size_select(cb: CallbackQuery, state: FSMContext):
+    """
+    callback_data: size:{comp_index}:{opt_index}
+    Зберігає вибір в state.selected_sizes, потім або питає наступний компонент,
+    або показує підсумок і показує кнопки: ✅ Продовжити | ↩️ Змінити розміри | ❌ Скасувати
+    """
+    try:
+        _, comp_idx_s, opt_idx_s = cb.data.split(":", 2)
+        comp_idx = int(comp_idx_s)
+        opt_idx = int(opt_idx_s)
+    except Exception:
+        await cb.answer("Невірні дані вибору (callback).")
+        return
+
+    data = await state.get_data()
+    components = data.get("components") or []
+    if comp_idx < 0 or comp_idx >= len(components):
+        await cb.answer("Невірний компонент.")
+        return
+
+    comp = components[comp_idx]
+    opts = comp.get("options") or []
+    if opt_idx < 0 or opt_idx >= len(opts):
+        await cb.answer("Невірний варіант розміру.")
+        return
+
+    chosen = opts[opt_idx]
+    # зберігаємо
+    selected = data.get("selected_sizes") or {}
+    selected[comp['name']] = chosen
+    await state.update_data(selected_sizes=selected)
+
+    await cb.answer(f"Вибрано: {comp['name']} — {chosen}")
+
+    # якщо є наступний компонент — питаємо його
+    next_idx = comp_idx + 1
+    if next_idx < len(components):
+        next_comp = components[next_idx]
+        next_opts = next_comp.get("options") or []
+        if not next_opts:
+            # пропускаємо компонент без опцій
+            await state.update_data(selected_sizes=selected)
+            # відправляємо повідомлення-повідомлення і пробуємо запитати наступний компонент
+            await cb.message.answer(f"📏 Перехід до наступного компонента: <b>{next_comp['name']}</b>\n(опцій не знайдено — пропускаємо)")
+            # тепер спробуємо показати наступний, якщо він має опції
+            # знаходимо наступний з опціями
+            found = False
+            for j in range(next_idx + 1, len(components)):
+                comp_j = components[j]
+                opts_j = comp_j.get("options") or []
+                if opts_j:
+                    kb = build_size_keyboard(j, opts_j)
+                    await cb.message.answer(f"📏 Виберіть розмір для: <b>{comp_j['name']}</b>", reply_markup=kb)
+                    await state.set_state(OrderForm.size)
+                    found = True
+                    break
+            if found:
+                return
+            # якщо не знайдено — будемо підсумовувати далі
+        else:
+            kb = build_size_keyboard(next_idx, next_opts)
+            await cb.message.answer(f"📏 Виберіть розмір для: <b>{next_comp['name']}</b>", reply_markup=kb)
+            await state.set_state(OrderForm.size)
+            return
+
+    # якщо це був останній компонент або інші не мають опцій — формуємо підсумок і показуємо кнопки
+    selected = await state.get_data()
+    selected_sizes = selected.get("selected_sizes") or {}
+    if selected_sizes:
+        summary = "; ".join([f"{k} — {v}" for k, v in selected_sizes.items()])
+        text = f"✅ Ви вибрали: {summary}\n\nНатисніть «✅ Продовжити», щоб ввести кількість, або «↩️ Змінити розміри»."
+    else:
+        text = "✅ Розміри не обрані (відсутні опції).\n\nНатисніть «✅ Продовжити», щоб ввести кількість."
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Продовжити", callback_data="sizes:continue")],
+        [InlineKeyboardButton(text="↩️ Змінити розміри", callback_data="sizes:edit")],
+        [InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="order:cancel")],
+    ])
+    await cb.message.answer(text, reply_markup=kb)
+    # залишаємо стан OrderForm.size до натискання 'continue'
+    await state.set_state(OrderForm.size)
+
+# --- Редагувати вибір розмірів (повторити послідовність) ---
+@router.callback_query(F.data == "sizes:edit")
+async def cb_sizes_edit(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    components = data.get("components") or []
+    if not components:
+        await cb.answer("Немає компонентів для редагування.")
+        return
+
+    # Очистимо попередні вибрані розміри
+    await state.update_data(selected_sizes={})
+    # Показуємо перший компонент (index 0)
+    first = components[0]
+    opts = first.get("options") or []
+    if not opts:
+        # якщо немає опцій — пропускаємо до наступного, знайдемо перший з опціями
+        found = False
+        for j, comp in enumerate(components):
+            opts_j = comp.get("options") or []
+            if opts_j:
+                kb = build_size_keyboard(j, opts_j)
+                await cb.message.answer(f"📏 Виберіть розмір для: <b>{comp['name']}</b>", reply_markup=kb)
+                found = True
+                break
+        if not found:
+            await cb.answer("Опцій розмірів не знайдено.")
+            return
+        await state.set_state(OrderForm.size)
+        return
+
+    kb = build_size_keyboard(0, opts)
+    await cb.message.answer(f"📏 Виберіть розмір для: <b>{first['name']}</b>", reply_markup=kb)
+    await state.set_state(OrderForm.size)
+    await cb.answer("Почніть заново вибір розмірів.")
 
 # --- Кількість товару ---
 @router.message(OrderForm.amount)
@@ -558,15 +887,23 @@ async def state_note(msg: Message, state: FSMContext):
     await msg.answer("Перевірте дані та підтвердіть замовлення:", reply_markup=confirm_keyboard())
     await state.set_state(OrderForm.confirm)
 
-# --- Підтвердження ---
+# --- Підтвердження (оновлений — показує selected_sizes якщо є) ---
 @router.callback_query(F.data == "order:confirm")
 async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    # підготуємо рядок з розмірами (якщо є)
+    selected_sizes = data.get("selected_sizes") or {}
+    if selected_sizes:
+        sizes_text = "; ".join([f"{k} — {v}" for k, v in selected_sizes.items()])
+    else:
+        sizes_text = data.get("size") or "—"
+
     order_text = (
         "📦 НОВЕ ЗАМОВЛЕННЯ\n\n"
         f"👤 ПІБ: {data.get('pib')}\n"
         f"📞 Телефон: {data.get('phone')}\n"
         f"🔖 Товар: {data.get('product_name')} (SKU: {data.get('article')})\n"
+        f"📏 Розміри: {sizes_text}\n"
         f"📦 Наявність: {data.get('stock')}\n"
         f"🔢 Кількість: {data.get('amount', 1)} шт.\n"
         f"🚚 Служба: {data.get('delivery')}\n"
@@ -575,15 +912,30 @@ async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
         f"📝 Примітка: {data.get('note')}\n"
         f"🕒 Час: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
     )
-    await cb.message.edit_text(order_text)
+    # Редагуємо повідомлення (щоб користувач бачив повний підсумок)
+    try:
+        await cb.message.edit_text(order_text, reply_markup=None)
+    except Exception:
+        # якщо edit не вдався (наприклад минуло занадто багато часу) — просто відправимо нове повідомлення
+        await cb.message.answer(order_text)
+
     await cb.answer()
 
+    # Додаємо selected_sizes в payload для MyDrop або для адміна
     if data.get("mode") == "test":
-        link = f"https://mydrop.com.ua/orders/new?prefill={json.dumps(data)}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔗 Відкрити форму MyDrop", url=link)]])
+        # Приклад: додаємо selected_sizes в prefill
+        payload_for_prefill = dict(data)
+        payload_for_prefill["selected_sizes"] = selected_sizes
+        link = f"https://mydrop.com.ua/orders/new?prefill={json.dumps(payload_for_prefill, ensure_ascii=False)}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔗 Відкрити форму MyDrop", url=link)]
+        ])
         await bot.send_message(ADMIN_ID, f"Тестове замовлення:\n{order_text}", reply_markup=kb)
     else:
-        asyncio.create_task(create_mydrop_order(data, notify_chat=ADMIN_ID))
+        # Додаємо selected_sizes в payload, щоб create_mydrop_order міг їх використати (запит admin/debug)
+        payload = dict(data)
+        payload["selected_sizes"] = selected_sizes
+        asyncio.create_task(create_mydrop_order(payload, notify_chat=ADMIN_ID))
 
     await state.clear()
 
@@ -597,8 +949,6 @@ async def cb_order_cancel(cb: CallbackQuery, state: FSMContext):
 async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int] = None):
     """
     Формує та відправляє замовлення в MyDrop (dropshipper endpoint).
-    Використовує MYDROP_ORDERS_URL (POST) і заголовок X-API-KEY = MYDROP_API_KEY
-    payload: словник зі стейту FSM (має містити pib, phone, article, product_name, stock, delivery, address, payment, note, mode)
     """
     orders_url = os.getenv("MYDROP_ORDERS_URL")
     api_key = os.getenv("MYDROP_API_KEY")
@@ -608,13 +958,10 @@ async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int
             await bot.send_message(notify_chat, "⚠️ MYDROP_ORDERS_URL або MYDROP_API_KEY не налаштовані на сервері.")
         return None
 
-    # Сформуємо products масив згідно з docs (для dropshipper endpoint)
     article = payload.get("article")
     product_name = payload.get("product_name") or payload.get("title") or article or "Товар"
     amount = int(payload.get("amount", 1) or 1)
-    # Якщо у state немає ціни — можна вказати 0 або намагатись витягти drop_price, але для безпечності ставимо 0
     price = payload.get("price") or 0
-    # vendor_name необов'язкове — можна підставити SUPPLIER_NAME
     vendor_name = os.getenv("SUPPLIER_NAME") or payload.get("vendor_name") or None
 
     product_obj = {
@@ -626,18 +973,21 @@ async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int
     if vendor_name:
         product_obj["vendor_name"] = vendor_name
 
-    # Формуємо body
+    # Формуємо body завжди (не всередині if)
     body = {
         "name": payload.get("pib"),
         "phone": payload.get("phone"),
         "products": [product_obj],
     }
 
+    # додамо вибрані розміри у body (якщо є)
+    if payload.get("selected_sizes"):
+        body["selected_sizes"] = payload.get("selected_sizes")
+
     # додаткові поля доставки
     if payload.get("delivery"):
         body["delivery_service"] = payload.get("delivery")
     if payload.get("address"):
-        # якщо NP — може бути місто + warehouse_number; тут в state address зберігається те, що ввів користувач
         body["warehouse_number"] = payload.get("address")
     if payload.get("note"):
         body["description"] = payload.get("note")
@@ -660,7 +1010,6 @@ async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int
                 if 200 <= resp.status < 300:
                     logger.info("MyDrop order created: %s", data)
                     if notify_chat:
-                        # зберемо коротку інфу для адміна
                         await bot.send_message(notify_chat, f"✅ Замовлення відправлено в MyDrop.\nВідповідь: {json.dumps(data, ensure_ascii=False)}")
                     return data
                 else:
@@ -731,18 +1080,25 @@ def run_flask():
 
 # ---------------- Main ----------------
 async def main():
-    global ASYNC_LOOP
+    global ASYNC_LOOP, WEBHOOK_URL
     ASYNC_LOOP = asyncio.get_running_loop()
 
-    # Flask окремим потоком
+    # Запускаємо Flask healthcheck/webhook endpoint в окремому потоці
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("Flask thread started (healthcheck + webhook endpoint).")
 
-    # Прогріваємо dispatcher (без polling)
+    # Dispatcher warmup: намагаємось викликати dp.startup() якщо він є
     try:
-        dp._update_handlers
-        logger.info("Dispatcher warmed up (handlers initialized).")
+        startup = getattr(dp, "startup", None)
+        if startup:
+            if asyncio.iscoroutinefunction(startup):
+                await startup()
+            else:
+                startup()
+            logger.info("Dispatcher startup() executed (if available).")
+        else:
+            logger.info("Dispatcher has no startup() method — continuing.")
     except Exception:
         logger.exception("Dispatcher warmup failed (non-fatal).")
 
@@ -752,7 +1108,7 @@ async def main():
     except Exception:
         logger.exception("setup_commands failed but continuing...")
 
-    # Завантажуємо кеш
+    # Завантажуємо кеш із файлу (якщо є)
     cache_file = Path(ORDERS_DIR) / "products_cache.xml"
     if cache_file.exists():
         try:
@@ -762,29 +1118,101 @@ async def main():
         except Exception:
             logger.exception("Failed to load products cache file")
 
-    # Видаляємо старий webhook
+    # Видаляємо старий webhook перед встановленням нового (нема гарантії але корисно)
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception:
         logger.exception("Delete webhook failed (non-fatal)")
 
-    # Ставимо новий webhook
+    # Перевірка і корекція WEBHOOK_URL
     if not WEBHOOK_URL:
         logger.error("❌ WEBHOOK_URL is not set in env. Set WEBHOOK_URL=https://<your-service>/webhook")
         sys.exit(1)
 
+    # Додаємо шлях WEBHOOK_PATH, якщо користувач вказав лише базовий URL
+    if not WEBHOOK_URL.endswith(WEBHOOK_PATH):
+        WEBHOOK_URL = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
+        logger.info("Adjusted WEBHOOK_URL to %s", WEBHOOK_URL)
+
+    # Telegram вимагає https webhook
+    if not WEBHOOK_URL.startswith("https://"):
+        logger.error("❌ WEBHOOK_URL must start with https://")
+        sys.exit(1)
+
+    # Ставимо webhook
     try:
         await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
-        logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
+        logger.info("✅ Webhook set to %s", WEBHOOK_URL)
     except Exception:
         logger.exception("Setting webhook failed (non-fatal).")
 
     logger.info("Bot ready — waiting for webhook updates...")
-    while True:
-        await asyncio.sleep(3600)
+    # Утримуємо процес запущеним (безпечний нескінченний wait)
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        logger.info("Main wait cancelled, proceeding to shutdown.")
 
+# ---------------- Graceful shutdown helper ----------------
+async def shutdown():
+    logger.info("Shutdown: starting cleanup...")
+
+    # Спробуємо видалити webhook (щоб Telegram не надсилав оновлення на недоступний URL)
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Shutdown: webhook deleted.")
+    except Exception:
+        logger.exception("Shutdown: failed to delete webhook (non-fatal).")
+
+    # Виклик shutdown для dispatcher (якщо доступний)
+    try:
+        shutdown_fn = getattr(dp, "shutdown", None)
+        if shutdown_fn:
+            if asyncio.iscoroutinefunction(shutdown_fn):
+                await shutdown_fn()
+            else:
+                shutdown_fn()
+            logger.info("Shutdown: dispatcher.shutdown() executed.")
+    except Exception:
+        logger.exception("Shutdown: dispatcher shutdown failed (non-fatal).")
+
+    # Закриваємо сесію бота / ресурсів
+    try:
+        if hasattr(bot, "session") and getattr(bot, "session", None) is not None:
+            # aiogram 3.x: bot.session exists
+            try:
+                await bot.session.close()
+                logger.info("Shutdown: bot.session closed.")
+            except Exception:
+                logger.exception("Shutdown: failed to close bot.session.")
+        else:
+            # fallback: якщо є асинхронний close()
+            close_fn = getattr(bot, "close", None)
+            if close_fn:
+                if asyncio.iscoroutinefunction(close_fn):
+                    await close_fn()
+                else:
+                    close_fn()
+                logger.info("Shutdown: bot.close() executed.")
+    except Exception:
+        logger.exception("Shutdown: failed to close bot resources (non-fatal).")
+
+    logger.info("Shutdown: cleanup finished.")
+
+# ---------------- Launcher ----------------
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
+        logger.info("Received stop signal — running graceful shutdown...")
+        try:
+            asyncio.run(shutdown())
+        except Exception:
+            logger.exception("Error during shutdown routine.")
         logger.info("Bot stopped.")
+    except Exception:
+        logger.exception("Unhandled exception in main()")
+        try:
+            asyncio.run(shutdown())
+        except Exception:
+            logger.exception("Error during shutdown routine after unhandled exception.")
