@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Bot with FSM (real & test modes)
-- Aiogram bot with FSM for orders
-- Telethon reposts supplier posts with +33% markup
-- MyDrop integration: real vs test mode
-- Nova Poshta API integration
-- Flask healthcheck
+Webhook mode (Flask) — feed raw updates into aiogram dispatcher thread-safely.
 """
 
 import os
@@ -22,7 +18,7 @@ import io
 
 import aiohttp
 from dotenv import load_dotenv
-from flask import Flask
+from flask import Flask, request
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.enums import ParseMode
@@ -36,7 +32,10 @@ from aiogram.types import (
     InlineKeyboardButton, InlineKeyboardMarkup,
 )
 
+# Telethon optional
 from telethon import TelegramClient
+
+app = Flask(__name__)
 
 # ---------------- Config & Env ----------------
 load_dotenv()
@@ -55,7 +54,7 @@ def check_env_vars():
         "TEST_CHANNEL", "MAIN_CHANNEL", "TG_API_ID", "TG_API_HASH",
         "SESSION_NAME", "SUPPLIER_CHANNEL", "SUPPLIER_NAME",
         "NP_API_KEY", "NP_API_URL", "MYDROP_API_KEY", "MYDROP_EXPORT_URL", "MYDROP_ORDERS_URL", "ORDERS_DIR", "USE_GCS", "GCS_BUCKET",
-        "SERVICE_ACCOUNT_JSON", "USE_GDRIVE", "GDRIVE_FOLDER_ID", "TEST_MODE"
+        "SERVICE_ACCOUNT_JSON", "USE_GDRIVE", "GDRIVE_FOLDER_ID", "TEST_MODE", "WEBHOOK_URL"
     ]
     for var in env_vars:
         value = os.getenv(var)
@@ -90,6 +89,9 @@ Path(ORDERS_DIR).mkdir(parents=True, exist_ok=True)
 
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
 # ---------------- Cache for MyDrop products ----------------
 PRODUCTS_CACHE = {
     "last_update": None,
@@ -97,28 +99,16 @@ PRODUCTS_CACHE = {
 }
 CACHE_TTL = 900  # 15 хвилин (900 секунд)
 
-# ---------------- Flask ----------------
-app = Flask(__name__)
-
-@app.route("/")
-def index():
-    return "Bot is running!", 200
-
-@app.route("/healthz")
-def healthz():
-    logger.info("🔄 Healthcheck запит отримано (keepalive ping).")
-    return "ok", 200
-
-def run_flask():
-    port = int(os.getenv("PORT", 10000))
-    logging.info(f"🌐 Flask healthcheck running on port {port}")
-    app.run(host="0.0.0.0", port=port)
+# ---------------- global async loop holder ----------------
+# буде заповнений в main()
+ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 # ---------------- Aiogram bot ----------------
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 router = Router()
 dp.include_router(router)
+
 from aiogram.types import BotCommand
 
 async def setup_commands():
@@ -129,8 +119,9 @@ async def setup_commands():
     ]
     try:
         await bot.set_my_commands(commands)
-    except Exception as e:
-        logger.exception("Cannot set bot commands: %s", e)
+        logger.info("✅ Bot commands set")
+    except Exception:
+        logger.exception("Cannot set bot commands (non-fatal).")
 
 # ---------------- FSM ----------------
 class OrderForm(StatesGroup):
@@ -203,7 +194,7 @@ async def cmd_publish_test(msg: Message):
         "Це перевірка кнопки <b>«Замовити»</b>.\n"
         "Натисніть і перевірте форму замовлення."
     )
-    kb = get_order_keyboard(post_id=12345, test=True)  # test=True -> order_test_xxx
+    kb = get_order_keyboard(post_id=12345, test=True)
     try:
         await bot.send_message(TEST_CHANNEL, text, reply_markup=kb)
         await msg.answer("✅ Тестовий пост опубліковано в тестовому каналі.")
@@ -215,7 +206,6 @@ async def cmd_refresh_cache(msg: Message):
     if msg.from_user.id != ADMIN_ID:
         await msg.answer("⚠️ У вас немає прав на виконання цієї команди.")
         return
-    """Примусово оновлює кеш вигрузки товарів"""
     await msg.answer("⏳ Оновлюю кеш вигрузки...")
     text = await load_products_export(force=True)
     if text:
@@ -223,26 +213,69 @@ async def cmd_refresh_cache(msg: Message):
     else:
         await msg.answer("⚠️ Помилка при оновленні кешу. Перевір логи.")
 
-# --- ПІБ ---
+# --- FSM: отримання ПІБ ---
 @router.message(OrderForm.pib)
 async def state_pib(msg: Message, state: FSMContext):
-    if len(msg.text.split()) < 3:
-        await msg.answer("❌ Введіть повне ПІБ (Прізвище Ім'я По-батькові).")
+    full_name = msg.text.strip()
+    parts = full_name.split()
+
+    if len(parts) != 3:
+        await msg.answer("❌ Введіть повністю ваше ПІБ (Прізвище Ім'я По-батькові).")
         return
-    await state.update_data(pib=msg.text)
-    await msg.answer("Введіть телефон (у форматі +380XXXXXXXXX):")
+
+    if not all(len(p) > 1 for p in parts):
+        await msg.answer("❌ Кожна частина ПІБ має містити хоча б 2 символи.")
+        return
+
+    await state.update_data(pib=full_name)
+    await msg.answer("Введіть телефон (у форматі +380XXXXXXXXX, 380XXXXXXXXX або 0XXXXXXXXX):")
     await state.set_state(OrderForm.phone)
 
-# --- Телефон ---
+# --- Телефон (validated) ---
+# Мобільні та стаціонарні коди — можна доповнювати в разі потреби
+VALID_MOBILE_CODES = {
+    "67", "68", "96", "97", "98",
+    "50", "66", "95", "99", "75",
+    "63", "73", "93",
+    "91", "92", "94",
+}
+
+VALID_LANDLINE_CODES = {
+    "44","32","48","56","57","61","43","41","38","55","54","35","31","47","37","46",
+    "372","322","342","352","362","412","432","512","522","532","562","572","642","652",
+    "0312","0372","0342","0622"
+}
+
 @router.message(OrderForm.phone)
 async def state_phone(msg: Message, state: FSMContext):
     phone = msg.text.strip()
-    if not re.match(r"^\+380\d{9}$", phone):
-        await msg.answer("❌ Телефон має бути у форматі +380XXXXXXXXX.")
+    digits = None
+
+    if m := re.fullmatch(r"^\+380(\d{9})$", phone):
+        digits = m.group(1)
+    elif m := re.fullmatch(r"^380(\d{9})$", phone):
+        digits = m.group(1)
+    elif m := re.fullmatch(r"^0(\d{9})$", phone):
+        digits = m.group(1)
+
+    if not digits:
+        await msg.answer("❌ Телефон має бути у форматі:\n+380XXXXXXXXX, 380XXXXXXXXX або 0XXXXXXXXX.")
         return
-    await state.update_data(phone=phone)
-    await msg.answer("Введіть артикул або назву товару:")
-    await state.set_state(OrderForm.article)
+
+    operator_code = digits[:2]
+    land2 = digits[:2]
+    land3 = digits[:3]
+    land4 = digits[:4]
+
+    if operator_code in VALID_MOBILE_CODES or land2 in VALID_LANDLINE_CODES or land3 in VALID_LANDLINE_CODES or land4 in VALID_LANDLINE_CODES:
+        normalized_phone = f"+380{digits}"
+        await state.update_data(phone=normalized_phone)
+        await msg.answer("Введіть артикул або назву товару:")
+        await state.set_state(OrderForm.article)
+        return
+
+    await msg.answer(f"❌ Невідомий код оператора/міста ({digits[:4]}...). Введіть дійсний український номер.")
+    return
 
 async def load_products_export(force: bool = False) -> Optional[str]:
     """
@@ -534,7 +567,7 @@ async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
         f"👤 ПІБ: {data.get('pib')}\n"
         f"📞 Телефон: {data.get('phone')}\n"
         f"🔖 Товар: {data.get('product_name')} (SKU: {data.get('article')})\n"
-        f"📦 Наявність: {data.get('stock')} шт.\n"
+        f"📦 Наявність: {data.get('stock')}\n"
         f"🔢 Кількість: {data.get('amount', 1)} шт.\n"
         f"🚚 Служба: {data.get('delivery')}\n"
         f"📍 Адреса/відділення: {data.get('address')}\n"
@@ -655,24 +688,100 @@ else:
     logger.warning("Telethon not configured (TG_API_ID/TG_API_HASH missing)")
     telethon_client = None
 
+# ---------------- Flask app & webhook endpoint ----------------
+
+@app.route(WEBHOOK_PATH, methods=["POST"])
+def webhook():
+    """
+    Приймаємо JSON від Telegram — швидко шедулемо обробку в асинхронному лупі.
+    ВАЖЛИВО: тут ми НЕ запускаємо asyncio.run, а використовуємо run_coroutine_threadsafe,
+    щоб передати обробку в головний asyncio-луп (ASYNC_LOOP).
+    """
+    global ASYNC_LOOP
+    try:
+        update = request.get_json(force=True)
+        if not ASYNC_LOOP or ASYNC_LOOP.is_closed():
+            logger.warning("⚠️ ASYNC_LOOP not ready or already closed")
+            return "loop not ready", 503
+        if not update:
+            logger.warning("⚠️ Empty update body from Telegram")
+            return "no update", 400
+
+        logger.debug("Update received: %s", update)
+        asyncio.run_coroutine_threadsafe(dp.feed_raw_update(bot, update), ASYNC_LOOP)
+        return "ok", 200
+    except Exception as e:
+        logger.exception("Webhook parsing error: %s", e)
+        return "bad request", 400
+
+@app.route("/")
+def index():
+    return "Bot is running!", 200
+
+@app.route("/healthz")
+def healthz():
+    logger.info("🔄 Healthcheck запит отримано (keepalive ping).")
+    return "ok", 200
+
+def run_flask():
+    port = int(os.getenv("PORT", "10000"))
+    logging.info(f"🌐 Flask healthcheck running on port {port}")
+    # У dev режимі this is fine; на продакшні - використайте gunicorn/uvicorn
+    app.run(host="0.0.0.0", port=port)
+
 # ---------------- Main ----------------
 async def main():
+    global ASYNC_LOOP
+    ASYNC_LOOP = asyncio.get_running_loop()
+
+    # Flask окремим потоком
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    logger.info("Starting aiogram polling...")
-    await setup_commands()
+    logger.info("Flask thread started (healthcheck + webhook endpoint).")
 
-    # Завантажуємо кеш з файлу, якщо є
+    # Прогріваємо dispatcher (без polling)
+    try:
+        dp._update_handlers
+        logger.info("Dispatcher warmed up (handlers initialized).")
+    except Exception:
+        logger.exception("Dispatcher warmup failed (non-fatal).")
+
+    # Команди бота
+    try:
+        await setup_commands()
+    except Exception:
+        logger.exception("setup_commands failed but continuing...")
+
+    # Завантажуємо кеш
     cache_file = Path(ORDERS_DIR) / "products_cache.xml"
     if cache_file.exists():
         try:
             PRODUCTS_CACHE["data"] = cache_file.read_text(encoding="utf-8")
             PRODUCTS_CACHE["last_update"] = datetime.fromtimestamp(cache_file.stat().st_mtime)
             logger.info("Loaded products cache from file (size=%d)", len(PRODUCTS_CACHE['data'] or ''))
-        except Exception as e:
-            logger.exception("Failed to load products cache file: %s", e)
+        except Exception:
+            logger.exception("Failed to load products cache file")
 
-    await dp.start_polling(bot)
+    # Видаляємо старий webhook
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception:
+        logger.exception("Delete webhook failed (non-fatal)")
+
+    # Ставимо новий webhook
+    if not WEBHOOK_URL:
+        logger.error("❌ WEBHOOK_URL is not set in env. Set WEBHOOK_URL=https://<your-service>/webhook")
+        sys.exit(1)
+
+    try:
+        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+        logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
+    except Exception:
+        logger.exception("Setting webhook failed (non-fatal).")
+
+    logger.info("Bot ready — waiting for webhook updates...")
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     try:
