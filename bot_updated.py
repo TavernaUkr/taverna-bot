@@ -370,10 +370,14 @@ def apply_markup(price: Optional[float]) -> Optional[int]:
 
 async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     """
-    Шукає товар по артикулу або назві у вигрузці (MYDROP_EXPORT_URL).
-    Повертає dict з полями, додано:
-      - components: list[{"name":str, "options": [str,...]}] або None
-    Оновлено: більш стійке матчення для числових запитів (виділення цифр, підрядкове порівняння).
+    Robust search in MYDROP export by article (id / sku) or product name.
+    Повертає словник продукту або None.
+    Поліпшене матчення:
+      - exact match по offer_id або vendor_code (sku)
+      - numeric match: порівнюємо цифрові частини у offer_id, sku, name, description
+      - substring match по name (як suggestion або точний, залежно від довжини)
+      - шукаємо digits підстроку у всіх полях
+    Logging: додає debug-логи про тип знайденого матчу.
     """
     q_raw = str(query or "").strip()
     q = q_raw.lower()
@@ -382,10 +386,10 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
 
     text = await load_products_export()
     if not text:
-        logger.warning("check_article_or_name: products feed is empty or not loaded")
+        logger.debug("check_article_or_name: feed empty")
         return None
 
-    # цифрова частина запиту (наприклад користувач ввів "1053")
+    # only digits from query (e.g. user ввів "1053")
     q_digits = re.sub(r'\D', '', q_raw)
 
     def parse_components_from_description(desc_text: str):
@@ -406,7 +410,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
             opts += re.findall(r'\b(?:XS|S|M|L|XL|XXL|XXXL)\b', content, flags=re.I)
             if re.search(r'універсал', content, flags=re.I):
                 opts.append('універсальний')
-            # dedupe preserving order
             seen = set()
             final_opts = []
             for o in opts:
@@ -432,6 +435,9 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
             offer_id = (elem.attrib.get("id") or "").strip()
             vendor_code = (elem.findtext("vendorCode") or elem.findtext("sku") or "").strip()
             name = (elem.findtext("name") or elem.findtext("title") or "").strip()
+            desc_text = elem.findtext("description") or ""
+
+            # numeric prices & stock
             price_text = elem.findtext("price") or ""
             try:
                 drop_price = float(price_text) if price_text.strip() else None
@@ -447,19 +453,16 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
             stock_qty = None
             if quantity_text and quantity_text.strip().isdigit():
                 stock_qty = int(quantity_text.strip())
-
             stock_attr = elem.attrib.get("available", "true").lower()
             stock = "Є" if stock_attr in ("true", "1", "yes") else "Немає"
 
             # ------------------------------------------------------------------
             sizes_from_param = []
             components_from_params = []
-
             for p in elem.findall("param"):
                 pname_raw = p.attrib.get("name", "") or ""
                 pname = pname_raw.strip()
                 ptext = (p.text or "").strip()
-
                 low = pname.lower()
                 if any(x in low for x in ("size", "розмір", "размер")) and ptext:
                     parts = re.split(r'[;,/\\\n]+', ptext)
@@ -489,12 +492,8 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                         seen2.add(o2.lower())
                         final.append(o2)
                     components_from_params.append({"name": pname or "Компонент", "options": final})
-
-            desc_text = elem.findtext("description") or ""
             components_from_desc = parse_components_from_description(desc_text)
-
             # Merge components
-            components = None
             if components_from_desc:
                 if components_from_params:
                     desc_names = {c["name"].lower(): c for c in components_from_desc}
@@ -526,49 +525,63 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 "components": components
             }
 
-            # =============================================================================
-            # Політика порівняння (додаткове, більш терпиме матчення для digits)
-            # =============================================================================
-            qlow = q  # already lower
-            # exact id/sku match (case-insensitive)
-            if qlow and (qlow == (offer_id or "").lower() or (vendor_code and qlow == vendor_code.lower())):
+            # prepare searchable forms
+            offer_low = (offer_id or "").lower()
+            sku_low = (vendor_code or "").lower()
+            name_low = (name or "").lower()
+            desc_low = (desc_text or "").lower()
+
+            # 1) exact id/sku/name match
+            if q and (q == offer_low or (vendor_code and q == sku_low) or (name and q == name_low)):
                 elem.clear()
-                logger.debug("check_article_or_name: exact match by id/sku: query=%s offer_id=%s sku=%s", q_raw, offer_id, vendor_code)
+                logger.debug("check_article_or_name: exact match by id/sku/name (%s) -> %s", q_raw, product["sku"])
                 return product
 
-            # numeric-matching: якщо користувач ввів лише цифри, порівнюємо цифрові частини
+            # 2) numeric matching: check digits in offer/sku/name/description
             if q_digits:
+                # build digit-strings from available fields
                 offer_digits = re.sub(r'\D', '', offer_id or "")
                 sku_digits = re.sub(r'\D', '', vendor_code or "")
-                # повний цифровий матч
+                name_digits = re.sub(r'\D', '', name or "")
+                desc_digits = re.sub(r'\D', '', desc_text or "")
+
                 if offer_digits and q_digits == offer_digits:
                     elem.clear()
-                    logger.debug("check_article_or_name: matched by digits (offer_id): %s -> %s", q_digits, offer_id)
+                    logger.debug("check_article_or_name: digits exact in offer_id: %s -> %s", q_digits, offer_id)
                     return product
                 if sku_digits and q_digits == sku_digits:
                     elem.clear()
-                    logger.debug("check_article_or_name: matched by digits (sku): %s -> %s", q_digits, vendor_code)
+                    logger.debug("check_article_or_name: digits exact in sku: %s -> %s", q_digits, vendor_code)
                     return product
-                # підрядковий цифровий матч (наприклад query '1053' у 'ART-1053')
+                # substring numeric match across fields
                 if offer_digits and q_digits in offer_digits:
                     elem.clear()
-                    logger.debug("check_article_or_name: digits substring match (offer_id): %s in %s", q_digits, offer_digits)
+                    logger.debug("check_article_or_name: digits substring in offer_id: %s in %s", q_digits, offer_digits)
                     return product
                 if sku_digits and q_digits in sku_digits:
                     elem.clear()
-                    logger.debug("check_article_or_name: digits substring match (sku): %s in %s", q_digits, sku_digits)
+                    logger.debug("check_article_or_name: digits substring in sku: %s in %s", q_digits, sku_digits)
+                    return product
+                if name_digits and q_digits in name_digits:
+                    elem.clear()
+                    logger.debug("check_article_or_name: digits substring in name: %s in %s", q_digits, name)
+                    return product
+                if desc_digits and q_digits in desc_digits:
+                    elem.clear()
+                    logger.debug("check_article_or_name: digits substring in description for query %s", q_digits)
                     return product
 
-            # match by full name or partial name (as suggestion)
-            if name and qlow == name.lower():
+            # 3) substring match in sku/offer/name (textual); if short query — require >=3 chars to avoid false positives
+            if q and ((vendor_code and q in sku_low) or (offer_id and q in offer_low)):
                 elem.clear()
-                logger.debug("check_article_or_name: exact match by name: %s -> %s", q_raw, name)
+                logger.debug("check_article_or_name: substring match in sku/offer (%s) -> %s/%s", q_raw, offer_id, vendor_code)
                 return product
 
-            if name and qlow in name.lower() and len(qlow) >= 3:
+            if name and q in name_low and len(q) >= 3:
+                # partial match — mark suggestion
                 product["suggestion"] = True
                 elem.clear()
-                logger.debug("check_article_or_name: suggestion for query '%s' -> '%s'", q_raw, name)
+                logger.debug("check_article_or_name: suggestion by name substring (%s) -> %s", q_raw, name)
                 return product
 
             elem.clear()
