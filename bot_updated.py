@@ -370,6 +370,7 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                         "final_price": apply_markup(drop_price) if drop_price is not None else None,
                         "stock": stock,
                         "stock_qty": stock_qty,
+                        "stock_text": f"{stock} ({stock_qty} шт.)" if stock_qty is not None else stock,
                         "sizes": sizes or None
                     }
 
@@ -384,6 +385,7 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                         "final_price": apply_markup(drop_price) if drop_price is not None else None,
                         "stock": stock,
                         "stock_qty": stock_qty,
+                        "stock_text": f"{stock} ({stock_qty} шт.)" if stock_qty is not None else stock,
                         "sizes": sizes or None
                     }
 
@@ -398,6 +400,8 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                         "retail_price": retail_price,
                         "final_price": apply_markup(drop_price) if drop_price is not None else None,
                         "stock": stock,
+                        "stock_qty": stock_qty,
+                        "stock_text": f"{stock} ({stock_qty} шт.)" if stock_qty is not None else stock,
                         "sizes": sizes or None
                     }
 
@@ -420,11 +424,7 @@ async def state_article(msg: Message, state: FSMContext):
         await msg.answer("❌ Не знайдено товар. Спробуйте ще раз (артикул або частина назви) або напишіть 'підтримка'.")
         return
 
-    stock_text = (
-    f"{product['stock']} ({product['stock_qty']} шт.)"
-    if product.get("stock_qty") is not None
-    else product["stock"]
-)
+    stock_text = product["stock_text"]
 
     # Якщо це лише пропозиція (частковий збіг)
     if product.get("suggestion"):
