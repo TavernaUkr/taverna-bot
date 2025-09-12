@@ -172,24 +172,22 @@ def confirm_keyboard():
         [InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")]
     ])
 
-def size_keyboard(sizes: List[str]) -> InlineKeyboardMarkup:
+# Замінити стару size_keyboard на сумісну версію (виробляє callback_data "size:<comp_idx>:<opt_idx>")
+def size_keyboard(sizes: List[str], component_index: int = 0) -> InlineKeyboardMarkup:
     """
-    Повертає InlineKeyboardMarkup з варіантами розмірів.
-    sizes — список рядків (наприклад ["55-57", "58-60", "шт."]).
-    Кнопки формують callback_data у вигляді "size:<розмір>".
-    По 3 кнопки в ряд (підлаштовується автоматично).
+    Сумісний з новим обробником callback'ів:
+    - формує callback_data у форматі "size:<component_index>:<option_index>"
+    - додає кнопку 'Скасувати'
     """
-    kb_rows = []
-    row = []
-    for i, s in enumerate(sizes):
-        row.append(InlineKeyboardButton(text=str(s), callback_data=f"size:{s}"))
-        # break row кожні 3 кнопки
-        if (i + 1) % 3 == 0:
-            kb_rows.append(row)
-            row = []
-    if row:
-        kb_rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+    kb = InlineKeyboardMarkup(row_width=3)
+    buttons = [
+        InlineKeyboardButton(text=str(s), callback_data=f"size:{component_index}:{i}")
+        for i, s in enumerate(sizes)
+    ]
+    if buttons:
+        kb.add(*buttons)
+    kb.add(InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel"))
+    return kb
 
 # ---------------- Routers / Handlers ----------------
 @router.message(CommandStart(deep_link=True))
@@ -374,40 +372,39 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
 
     text = await load_products_export()
     if not text:
+        logger.warning("check_article_or_name: products feed is empty or not loaded")
         return None
 
     # helper: parse components & sizes from description text (HTML-like)
     def parse_components_from_description(desc_text: str):
         if not desc_text:
             return None
-        # strip html tags simple way and unescape entities
+        # strip simple html tags and unescape entities
         desc = re.sub(r'<br\s*/?>', '\n', desc_text, flags=re.I)
         desc = re.sub(r'<[^>]+>', '', desc)
         desc = unescape(desc).strip()
 
         # split by headings like "Шапка:", "Рукавиці:", "Баф:" etc.
         parts = re.split(r'(?m)^([А-ЯЇЄІҐA-Za-z0-9\-\s]{2,60}):', desc)
-        # re.split will produce: ['', 'Heading1', 'content1', 'Heading2', 'content2', ...]
         comps = []
         for i in range(1, len(parts), 2):
             name = parts[i].strip()
             content = parts[i+1].strip() if (i+1) < len(parts) else ""
-            # find size-like tokens in content:
             opts = []
             # ranges e.g. 55-57, 58-60
-            opts += re.findall(r'\b\d{2}-\d{2}\b', content)
+            opts += re.findall(r'\b\d{2,3}-\d{2,3}\b', content)
             # single numbers like 55 (rare)
             opts += re.findall(r'\b\d{2}\b', content)
             # size letters S/M/L/XL etc.
             opts += re.findall(r'\b(?:XS|S|M|L|XL|XXL|XXXL)\b', content, flags=re.I)
-            # words like 'універсальний', 'універсал', 'шт.' etc.
+            # words like 'універсальний'
             if re.search(r'універсал', content, flags=re.I):
                 opts.append('універсальний')
             # dedupe preserving order
             seen = set()
             final_opts = []
             for o in opts:
-                o_norm = o.strip()
+                o_norm = str(o).strip()
                 if not o_norm:
                     continue
                 if o_norm.lower() in seen:
@@ -422,81 +419,147 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
         it = ET.iterparse(io.StringIO(text), events=("end",))
         for event, elem in it:
             tag = elem.tag
-            if tag.endswith("offer") or tag.endswith("item") or tag.endswith("product"):
-                offer_id = (elem.attrib.get("id") or "").strip()
-                vendor_code = (elem.findtext("vendorCode") or elem.findtext("sku") or "").strip()
-                name = (elem.findtext("name") or elem.findtext("title") or "").strip()
-                price_text = elem.findtext("price") or ""
-                try:
-                    drop_price = float(price_text) if price_text.strip() else None
-                except Exception:
-                    drop_price = None
-                rrc_text = elem.findtext("rrc") or elem.findtext("retail") or elem.findtext("oldprice") or None
-                try:
-                    retail_price = float(rrc_text) if rrc_text and str(rrc_text).strip() else None
-                except Exception:
-                    retail_price = None
-
-                quantity_text = elem.findtext("quantity_in_stock")
-                stock_qty = None
-                if quantity_text and quantity_text.strip().isdigit():
-                    stock_qty = int(quantity_text.strip())
-
-                stock_attr = elem.attrib.get("available", "true").lower()
-                stock = "Є" if stock_attr in ("true", "1", "yes") else "Немає"
-
-                # sizes from <param name="..."> (як у попередньому коді)
-                sizes_from_param = []
-                for p in elem.findall("param"):
-                    pname = p.attrib.get("name", "").lower()
-                    if "size" in pname or "розмір" in pname or "размер" in pname:
-                        if (p.text or "").strip():
-                            # може бути список через коми
-                            parts = re.split(r'[;,/\\\n]', p.text)
-                            for part in parts:
-                                v = part.strip()
-                                if v:
-                                    sizes_from_param.append(v)
-
-                # parse description for component sections
-                desc_text = elem.findtext("description") or ""
-                components = parse_components_from_description(desc_text)
-
-                # If there is a single generic sizes list from params and no components,
-                # convert it into a single unnamed component.
-                if sizes_from_param and not components:
-                    components = [{"name": "Розмір", "options": sizes_from_param}]
-
-                # build product dict (same keys as before) plus components
-                product = {
-                    "name": name or offer_id,
-                    "sku": vendor_code or offer_id,
-                    "drop_price": drop_price,
-                    "retail_price": retail_price,
-                    "final_price": apply_markup(drop_price) if drop_price is not None else None,
-                    "stock": stock,
-                    "stock_qty": stock_qty,
-                    "stock_text": f"{stock} ({stock_qty} шт.)" if stock_qty is not None else stock,
-                    "sizes": sizes_from_param or None,
-                    "components": components  # may be None
-                }
-
-                # exact matches like before:
-                qlow = q.lower()
-                if qlow == offer_id.lower() or (vendor_code and qlow == vendor_code.lower()):
-                    elem.clear()
-                    return product
-
-                if name and qlow == name.lower():
-                    elem.clear()
-                    return product
-
-                if name and qlow in name.lower() and len(qlow) >= 3:
-                    product["suggestion"] = True
-                    elem.clear()
-                    return product
-
+            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
                 elem.clear()
+                continue
+
+            offer_id = (elem.attrib.get("id") or "").strip()
+            vendor_code = (elem.findtext("vendorCode") or elem.findtext("sku") or "").strip()
+            name = (elem.findtext("name") or elem.findtext("title") or "").strip()
+            price_text = elem.findtext("price") or ""
+            try:
+                drop_price = float(price_text) if price_text.strip() else None
+            except Exception:
+                drop_price = None
+            rrc_text = elem.findtext("rrc") or elem.findtext("retail") or elem.findtext("oldprice") or None
+            try:
+                retail_price = float(rrc_text) if rrc_text and str(rrc_text).strip() else None
+            except Exception:
+                retail_price = None
+
+            quantity_text = elem.findtext("quantity_in_stock")
+            stock_qty = None
+            if quantity_text and quantity_text.strip().isdigit():
+                stock_qty = int(quantity_text.strip())
+
+            stock_attr = elem.attrib.get("available", "true").lower()
+            stock = "Є" if stock_attr in ("true", "1", "yes") else "Немає"
+
+            # ------------------------------------------------------------------
+            # 1) sizes_from_param: збираємо загальні списки "розмірів"
+            sizes_from_param = []
+            # 2) components_from_params: якщо param.name представляє компонент — зберемо окремі компоненти
+            components_from_params = []
+
+            for p in elem.findall("param"):
+                pname_raw = p.attrib.get("name", "") or ""
+                pname = pname_raw.strip()
+                ptext = (p.text or "").strip()
+
+                low = pname.lower()
+                # загальні "size" param
+                if any(x in low for x in ("size", "розмір", "размер")) and ptext:
+                    parts = re.split(r'[;,/\\\n]+', ptext)
+                    for part in parts:
+                        v = part.strip()
+                        if v:
+                            sizes_from_param.append(v)
+                    continue
+
+                # компоненти по імені параметра (шапка, рукавиця, баф, комплект, ...)
+                if any(kw in low for kw in COMPONENT_KEYWORDS):
+                    opts = []
+                    opts += re.findall(r'\b\d{2,3}-\d{2,3}\b', ptext)
+                    opts += re.findall(r'\b(?:XS|S|M|L|XL|XXL|XXXL)\b', ptext, flags=re.I)
+                    opts += re.findall(r'\b\d{2}\b', ptext)
+                    if re.search(r'універсал', ptext, flags=re.I):
+                        opts.append('універсальний')
+
+                    # якщо немає розмірів, але є "так/є/available" — позначимо як "шт."
+                    if not opts and re.search(r'\b(так|є|available|есть)\b', ptext, flags=re.I):
+                        opts = ['шт.']
+
+                    # dedupe & normalize
+                    seen2 = set()
+                    final = []
+                    for o in opts:
+                        o2 = str(o).strip()
+                        if not o2:
+                            continue
+                        if o2.lower() in seen2:
+                            continue
+                        seen2.add(o2.lower())
+                        final.append(o2)
+                    # якщо не знайшли опцій — додаємо пустий список (щоб потім мати можливість пропустити)
+                    components_from_params.append({"name": pname or "Компонент", "options": final})
+
+            # parse description for component sections
+            desc_text = elem.findtext("description") or ""
+            components_from_desc = parse_components_from_description(desc_text)
+
+            # Merge components:
+            # priority: description components (rich, human-made) > components_from_params > sizes_from_param
+            components = None
+            if components_from_desc:
+                # якщо є також компоненти з params, додамо їх тільки якщо такого компонента немає в description
+                if components_from_params:
+                    # normalize desc names for quick check
+                    desc_names = {c["name"].lower(): c for c in components_from_desc}
+                    merged = components_from_desc.copy()
+                    for comp_p in components_from_params:
+                        if comp_p["name"].lower() not in desc_names:
+                            # уникнути пустих списків, якщо опції пусті — зберігаємо як [] (пізніше пропустимо)
+                            merged.append(comp_p)
+                    components = merged
+                else:
+                    components = components_from_desc
+            elif components_from_params:
+                # якщо тільки params — використовуємо їх
+                components = components_from_params
+            elif sizes_from_param:
+                components = [{"name": "Розмір", "options": list(dict.fromkeys(sizes_from_param))}]  # preserve order, dedupe
+            else:
+                components = None
+            # ------------------------------------------------------------------
+
+            # build product dict (same keys as before) plus components
+            product = {
+                "name": name or offer_id,
+                "sku": vendor_code or offer_id,
+                "drop_price": drop_price,
+                "retail_price": retail_price,
+                "final_price": apply_markup(drop_price) if drop_price is not None else None,
+                "stock": stock,
+                "stock_qty": stock_qty,
+                "stock_text": f"{stock} ({stock_qty} шт.)" if stock_qty is not None else stock,
+                "sizes": sizes_from_param or None,
+                "components": components  # may be None
+            }
+
+            # exact matches like before:
+            qlow = q.lower()
+            # match by id/sku
+            if qlow and (qlow == (offer_id or "").lower() or (vendor_code and qlow == vendor_code.lower())):
+                elem.clear()
+                logger.debug("check_article_or_name: exact match by id/sku: %s (offer_id=%s sku=%s) components=%s",
+                             q, offer_id, vendor_code, bool(components))
+                return product
+
+            # match by full name
+            if name and qlow == name.lower():
+                elem.clear()
+                logger.debug("check_article_or_name: exact match by name: %s -> %s components=%s", q, name, bool(components))
+                return product
+
+            # partial match (suggestion) if q in name (and length >=3)
+            if name and qlow in name.lower() and len(qlow) >= 3:
+                product["suggestion"] = True
+                elem.clear()
+                logger.debug("check_article_or_name: suggestion for query '%s' -> '%s' (components=%s)", q, name, bool(components))
+                return product
+
+            # free memory for this element
+            elem.clear()
         # end iterparse
     except Exception as e:
         logger.exception("XML parse error in check_article_or_name: %s", e)
@@ -1088,17 +1151,17 @@ async def main():
     flask_thread.start()
     logger.info("Flask thread started (healthcheck + webhook endpoint).")
 
-    # Dispatcher warmup: намагаємось викликати dp.startup() якщо він є
+    # Спроба виклику startup() dispatcher'а — сумісно з різними версіями aiogram
     try:
-        startup = getattr(dp, "startup", None)
-        if startup:
+        if hasattr(dp, "startup"):
+            startup = getattr(dp, "startup")
             if asyncio.iscoroutinefunction(startup):
                 await startup()
             else:
                 startup()
             logger.info("Dispatcher startup() executed (if available).")
         else:
-            logger.info("Dispatcher has no startup() method — continuing.")
+            logger.info("Dispatcher has no startup() method — skipping warmup.")
     except Exception:
         logger.exception("Dispatcher warmup failed (non-fatal).")
 
