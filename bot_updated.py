@@ -191,6 +191,68 @@ def size_keyboard(sizes: List[str], component_index: int = 0) -> InlineKeyboardM
     kb.add(InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel"))
     return kb
 
+# ---------------- Cart helpers & footer button ----------------
+def format_price(v):
+    try:
+        return int(v) if v is not None else 0
+    except:
+        try:
+            return int(float(v))
+        except:
+            return 0
+
+async def add_item_to_cart(state: FSMContext, item: dict):
+    """
+    item = {
+      'sku': '4165105s2',
+      'name': 'Комплект ...',
+      'size': 'M',
+      'amount': 2,
+      'price': 745,  # price per 1 (final_price)
+      'drop_price': 560.0
+    }
+    """
+    data = await state.get_data()
+    cart = data.get("cart", [])
+    # додаємо як нову позицію (не агрегація) — можна оновити логіку по ключу sku+size
+    cart.append(item)
+    await state.update_data(cart=cart)
+
+async def get_cart_summary(state: FSMContext) -> (str, int):
+    data = await state.get_data()
+    cart = data.get("cart", [])
+    if not cart:
+        return "🛒 Кошик порожній.", 0
+    lines = []
+    total = 0
+    for i, it in enumerate(cart, 1):
+        name = it.get("name") or it.get("sku") or "Товар"
+        size = it.get("size") or "-"
+        amount = int(it.get("amount", 1))
+        price = format_price(it.get("price"))
+        subtotal = price * amount
+        total += subtotal
+        lines.append(f"{i}. {name} ({size}) — {price} грн × {amount} = {subtotal} грн")
+    text = "🧾 Ваша корзина:\n\n" + "\n".join(lines) + f"\n\n🔢 Загальна сума: {total} грн"
+    return text, total
+
+def cart_footer_keyboard(total: int) -> InlineKeyboardMarkup:
+    """
+    Кнопка, що показується внизу (постійна) з загальною сумою.
+    """
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🛒 ТУТ ЗНАХОДИТЬСЯ ВАША КОРЗИНА! Загальна сума — {total} грн", callback_data="cart:open")],
+    ])
+    return kb
+
+def cart_control_keyboard():
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="cart:checkout")],
+        [InlineKeyboardButton(text="❌ Повністю скасувати замовлення", callback_data="cart:clear")],
+        [InlineKeyboardButton(text="↩️ Повернутись", callback_data="flow:back:article")],
+    ])
+    return kb
+
 # ---------------- Routers / Handlers ----------------
 # замініть існуючий @router.message(CommandStart(deep_link=True)) handler на цей
 @router.message(CommandStart())
@@ -249,20 +311,61 @@ async def cmd_refresh_cache(msg: Message):
 # --- FSM: отримання ПІБ ---
 @router.message(OrderForm.pib)
 async def state_pib(msg: Message, state: FSMContext):
-    full_name = msg.text.strip()
-    parts = full_name.split()
+    text = (msg.text or "").strip()
+    # Якщо користувач відповідає "так" — можлива автоматична підтверджена перестановка
+    if text.lower() == "так":
+        data = await state.get_data()
+        suggested = data.get("pib_suggestion")
+        if suggested:
+            # приймаємо запропоновану перестановку
+            await state.update_data(pib=suggested)
+            await state.remove_data("pib_suggestion")
+            await msg.answer(f"✅ ПІБ прийнято: {suggested}")
+            await msg.answer("Введіть телефон (у форматі +380XXXXXXXXX, 380XXXXXXXXX або 0XXXXXXXXX):")
+            await state.set_state(OrderForm.phone)
+            return
+        else:
+            await msg.answer("Нема збереженої пропозиції для підтвердження. Будь ласка, введіть ПІБ у форматі: Прізвище Ім'я По-батькові.")
+            return
 
+    parts = text.split()
     if len(parts) != 3:
-        await msg.answer("❌ Введіть повністю ваше ПІБ (Прізвище Ім'я По-батькові).")
+        await msg.answer("❌ Введіть повністю ваше ПІБ у форматі: Прізвище Ім'я По-батькові (3 слова).")
         return
 
-    if not all(len(p) > 1 for p in parts):
-        await msg.answer("❌ Кожна частина ПІБ має містити хоча б 2 символи.")
+    # перевіряємо, чи всі частини написані кирилицею / містять принаймні 2 символи
+    if not all(is_cyrillic_word(p) for p in parts):
+        await msg.answer("❌ Кожна частина ПІБ має бути українськими літерами (дозволені дефіси та апостроф). Спробуйте ще раз.")
         return
 
-    await state.update_data(pib=full_name)
-    await msg.answer("Введіть телефон (у форматі +380XXXXXXXXX, 380XXXXXXXXX або 0XXXXXXXXX):")
-    await state.set_state(OrderForm.phone)
+    # якщо третя частина має суфікс по-батькові — приймаємо
+    if looks_like_patronymic(parts[2]):
+        # приймаємо як валідний ПІБ
+        normalized = " ".join([p.strip().title() for p in parts])
+        await state.update_data(pib=normalized)
+        await msg.answer("Введіть телефон (у форматі +380XXXXXXXXX, 380XXXXXXXXX або 0XXXXXXXXX):")
+        await state.set_state(OrderForm.phone)
+        return
+
+    # якщо третя НЕ виглядає як по-батькові, спробуємо запропонувати перестановку, якщо є ознаки по-батькові в іншому місці
+    suggested = suggest_reorder_pib(parts)
+    if suggested:
+        # збережемо пропозицію в state та запропонуємо підтвердження
+        await state.update_data(pib_suggestion=suggested)
+        await msg.answer(
+            f"⚠️ Схоже, по-батькове не на третьому місці.\n"
+            f"Ви ввели: <b>{text}</b>\n"
+            f"Можливо ви мали на увазі: <b>{suggested}</b>\n"
+            "Якщо це вірно — напишіть «так», і я збережу ПІБ. Інакше введіть ПІБ у форматі Прізвище Ім'я По-батькові."
+        )
+        return
+
+    # якщо не змогли нічого запропонувати — попросимо переформулювати
+    await msg.answer(
+        "❌ Третя частина не схожа на по-батькові. Будь ласка, введіть ПІБ у форматі: Прізвище Ім'я По-батькові.\n"
+        "Приклад: Петренко Іван Олександрович"
+    )
+    return
 
 # --- Телефон (validated) ---
 # Мобільні та стаціонарні коди — можна доповнювати в разі потреби
@@ -353,6 +456,61 @@ async def load_products_export(force: bool = False) -> Optional[str]:
             return cache_file.read_text(encoding="utf-8")
 
         return None
+# ---------------- ПІБ: валідація / евристика ----------------
+PATRONYMIC_SUFFIXES = [
+    "ович", "евич", "овна", "івна", "ївна", "овна", "ич", "івич", "ійович", "овський", "овська"
+    # додайте інші, якщо потрібно
+]
+
+def is_cyrillic_word(word: str) -> bool:
+    """Проста перевірка: слово складається з кириличних літер, дефісів або апострофа, мінімум 2 символи."""
+    if not word or len(word.strip()) < 2:
+        return False
+    return bool(re.fullmatch(r"[А-ЯҐЄІЇа-яґєії'\-]+", word.strip()))
+
+def looks_like_patronymic(word: str) -> bool:
+    """Чи слово виглядає як по-батькові (за суфіксом)"""
+    if not word:
+        return False
+    w = word.lower()
+    for suf in PATRONYMIC_SUFFIXES:
+        if w.endswith(suf):
+            return True
+    return False
+
+def suggest_reorder_pib(parts: List[str]) -> Optional[str]:
+    """
+    Якщо хочемо запропонувати перестановку для формату Прізвище Ім'я По-батькові:
+    застосуємо просту евристику — знайдемо частину, яка виглядає як по-батькові,
+    і переставимо її в кінець; якщо нічого не виявлено — повернемо None.
+    """
+    # знаходимо індекс частини, схожої на по-батькові
+    patron_idx = None
+    for i, p in enumerate(parts):
+        if looks_like_patronymic(p):
+            patron_idx = i
+            break
+    if patron_idx is None:
+        return None
+
+    # якщо по-батькові вже на третьому місці — нічого не міняємо
+    if patron_idx == 2:
+        return None
+
+    # формуємо пропозицію: помістити patronymic на третє місце
+    if patron_idx == 1:
+        # припускаємо, що порядок Name Patronymic Surname => запропонуємо Surname Name Patronymic
+        suggested = [parts[2], parts[0], parts[1]]
+    elif patron_idx == 0:
+        # Patronymic Surname Name => запропонуємо Surname Name Patronymic
+        suggested = [parts[1], parts[2], parts[0]]
+    else:
+        return None
+
+    # перевіримо чи всі частини результату виглядають прийнятно
+    if all(is_cyrillic_word(x) for x in suggested):
+        return " ".join(suggested)
+    return None
 
 # --- Артикул або назва ---
 import io
@@ -440,273 +598,228 @@ def parse_components_from_description(desc: str):
 
 async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     """
-    Robust and faster parser:
-    - шукaє query у сирому тексті фіду (точний або частковий, case-insensitive),
-    - витягує найближчий XML-block <offer...>...</offer> (або <item...>...</item>),
-    - парсить тільки цей блок і витягує name/sku/prices/stock/components.
-    Покращено: більш агресивний пошук SKU/vendor code (param[name], child tags, attributes).
+    Robust parser: шукає товар по артикулу або назві у вигрузці (MYDROP_EXPORT_URL).
+    Виправлені проблеми з ET.iterparse + додаткові heuristics для цін/sku/names.
     """
     q = str(query or "").strip()
     if not q:
         return None
-    qlower = q.lower()
+    qlow = q.lower()
 
     text = await load_products_export()
     if not text:
         return None
 
-    # --- helper functions (reuse local tag helpers already in scope) ---
-    def extract_from_elem(elem):
-        # elem is an xml.etree.ElementTree.Element
-        def find_text(el, candidates):
-            for child in el.iter():
-                name = _local_tag(child.tag).lower()
-                if any(name == c for c in candidates) or any(c in name for c in candidates):
-                    txt = (child.text or "").strip()
-                    if txt:
-                        return txt
-                # also check attributes of the child
-                for attr_key, attr_val in getattr(child, 'attrib', {}).items():
-                    if any(c in attr_key.lower() for c in candidates) and str(attr_val).strip():
-                        return str(attr_val).strip()
-            return None
+    # price_field з URL (опціонально)
+    export_url = os.getenv("MYDROP_EXPORT_URL") or ""
+    parsed = parse_qs(urlparse(export_url).query)
+    price_field_from_url = None
+    if parsed.get("price_field"):
+        price_field_from_url = parsed.get("price_field")[0].lower()
 
-        def find_number(el, candidates):
-            for child in el.iter():
-                name = _local_tag(child.tag).lower()
-                if any(c in name for c in candidates):
-                    txt = (child.text or "").strip()
-                    if not txt:
-                        txt = (child.attrib.get("value") or child.attrib.get("price") or "").strip()
-                    if txt:
-                        try:
-                            return float(txt.replace(" ", "").replace(",", "."))
-                        except Exception:
-                            t = re.sub(r"[^\d\.,\-]", "", txt).replace(",", ".")
-                            try:
-                                return float(t)
-                            except Exception:
-                                continue
-            # also check attributes on the element itself
-            for attr in ("price", "cost", "value", "amount"):
-                if attr in elem.attrib:
-                    try:
-                        return float(str(elem.attrib.get(attr)).replace(" ", "").replace(",", "."))
-                    except Exception:
-                        continue
-            return None
+    # допоміжні хелпери (локальні, але не змінюють зовнішній scope)
+    def _local_tag(tag: str) -> str:
+        if not tag:
+            return ""
+        if "}" in tag:
+            return tag.split("}", 1)[1]
+        return tag
 
-        # id and vendor code - multiple heuristics
-        offer_id = (elem.attrib.get("id") or "").strip()
-        # 1) try direct common child tags/attrs
-        vendor_code = find_text(elem, ["vendorcode", "vendor_code", "vendor", "sku", "articul", "article", "code", "vendorCode"])
-        # 2) try param-like tags with name attribute mentioning 'art' or 'sku' (many feeds use <param name="Артикул">)
-        if not vendor_code:
-            for p in elem.iter():
-                pt = _local_tag(p.tag).lower()
-                if "param" in pt or "attribute" in pt or "property" in pt or "option" in pt:
-                    pname = (p.attrib.get("name") or "").lower()
-                    if pname and re.search(r"(арт|артикул|sku|код|vendor|vendorcode|vendor_code|article|vendorid|vendor_id)", pname, flags=re.I):
-                        txt = (p.text or "").strip()
-                        if txt:
-                            vendor_code = txt
-                            break
-                    # sometimes code sits in value attribute
-                    for attr in ("value", "code", "article", "sku"):
-                        if p.attrib.get(attr):
-                            vendor_code = str(p.attrib.get(attr)).strip()
-                            break
-                if vendor_code:
-                    break
-        # 3) fallback to any child tag that looks like short alnum code
-        if not vendor_code:
-            for child in elem.iter():
+    def find_first_text(elem, candidates):
+        for child in elem.iter():
+            name = _local_tag(child.tag).lower()
+            if any(name == c or c in name for c in candidates):
                 txt = (child.text or "").strip()
-                if txt and re.fullmatch(r"[A-Za-z0-9\-\_]{3,20}", txt):
-                    # heuristic: if it's short and not russian/ukr word (no spaces) consider it candidate
-                    vendor_code = txt
-                    break
+                if txt:
+                    return txt
+        return None
 
-        name = find_text(elem, ["name", "title", "product", "model", "productname", "product_name"])
-        # price detection
-        drop_price = find_number(elem, ["drop_price", "drop", "price", "cost", "sellprice", "value", "amount"])
-        retail_price = find_number(elem, ["rrc", "retail", "oldprice", "retail_price", "msrp"])
+    def find_first_numeric(elem, candidates):
+        for child in elem.iter():
+            name = _local_tag(child.tag).lower()
+            if any(c in name for c in candidates):
+                txt = (child.text or "").strip()
+                if not txt:
+                    continue
+                try:
+                    return float(txt)
+                except Exception:
+                    t = txt.replace(" ", "").replace(",", ".")
+                    try:
+                        return float(t)
+                    except Exception:
+                        # maybe tag like <price currency="UAH">... or nested <price><value>...</value></price>
+                        # continue to next child
+                        continue
+        # fallback: search any tag containing 'price' and try to extract number from its text
+        for child in elem.iter():
+            name = _local_tag(child.tag).lower()
+            if 'price' in name or 'cost' in name or 'rrc' in name:
+                txt = (child.text or "").strip()
+                nums = re.findall(r'[\d\.,\s]+', txt)
+                for n in nums:
+                    try:
+                        return float(n.replace(" ", "").replace(",", "."))
+                    except:
+                        continue
+        return None
 
-        # stock qty
-        stock_qty = None
-        qtxt = find_text(elem, ["quantity_in_stock", "quantity", "stock_qty", "stock", "available_quantity", "count"])
-        if qtxt and qtxt.strip().isdigit():
-            stock_qty = int(qtxt.strip())
-        stock_attr = (elem.attrib.get("available") or "").lower()
-        stock = None
-        if stock_attr:
-            stock = "Є" if stock_attr in ("true", "1", "yes") else "Немає"
-
-        stock_text = None
-        if stock_qty is not None:
-            stock_text = f"Є ({stock_qty} шт.)"
-        elif stock:
-            stock_text = stock
-        else:
-            av = find_text(elem, ["available", "in_stock", "stock"])
-            if av:
-                stock_text = av
-
-        # components/params (reuse previous heuristics)
-        sizes_from_param = []
-        components_from_params = []
-        for p in elem.iter():
-            pt = _local_tag(p.tag).lower()
-            if "param" in pt or pt in ("attribute", "property", "option"):
-                pname_raw = p.attrib.get("name", "") if isinstance(p.attrib, dict) else ""
-                pname = (pname_raw or "").strip() or _local_tag(p.tag)
-                ptext = (p.text or "").strip()
-                opts = []
-                opts += re.findall(r'\b\d{2,3}-\d{2,3}\b', ptext)
-                opts += re.findall(r'\b(?:XS|S|M|L|XL|XXL|XXXL)\b', ptext, flags=re.I)
-                opts += re.findall(r'\b\d{2}\b', ptext)
-                if re.search(r'універсал', ptext, flags=re.I):
-                    opts.append('універсальний')
-                if not opts and re.search(r'\b(так|є|available|есть)\b', ptext, flags=re.I):
-                    opts = ['шт.']
-                if opts:
-                    seen = set()
-                    final = []
-                    for o in opts:
-                        o2 = str(o).strip()
-                        if not o2:
-                            continue
-                        if o2.lower() in seen:
-                            continue
-                        seen.add(o2.lower())
-                        final.append(o2)
-                    components_from_params.append({"name": pname, "options": final})
-                elif pname:
-                    components_from_params.append({"name": pname, "options": []})
-            if "size" in pt or "размер" in pt or "розмір" in pt:
-                if (p.text or "").strip():
-                    parts = re.split(r'[;,/\\\n]+', p.text or "")
-                    for part in parts:
-                        v = part.strip()
-                        if v:
-                            sizes_from_param.append(v)
-
-        desc_text = find_text(elem, ["description", "desc"]) or ""
-        components_from_desc = None
-        try:
-            components_from_desc = parse_components_from_description(desc_text)
-        except Exception:
-            components_from_desc = None
-
-        if components_from_desc:
-            components = components_from_desc
-        elif components_from_params:
-            components = components_from_params
-        elif sizes_from_param:
-            components = [{"name": "Розмір", "options": sizes_from_param}]
-        else:
-            components = None
-
-        product = {
-            "name": (name or offer_id or vendor_code or "").strip(),
-            "sku": ((vendor_code or offer_id) or "").strip(),
-            "drop_price": float(drop_price) if drop_price is not None else None,
-            "retail_price": float(retail_price) if retail_price is not None else None,
-            "final_price": apply_markup(drop_price) if drop_price is not None else None,
-            "stock": stock_text or "Немає",
-            "stock_qty": stock_qty,
-            "stock_text": stock_text or "Немає",
-            "sizes": sizes_from_param or None,
-            "components": components
-        }
-        return product
-
-    # --- 1) Try exact id attribute match in text (fast) ---
-    attr_pattern = re.compile(r'<(offer|item|product)[^>]*\bid=["\']%s["\']' % re.escape(q), flags=re.IGNORECASE)
-    m = attr_pattern.search(text)
-    if m:
-        start = text.rfind('<', 0, m.start())
-        tag = m.group(1)
-        end_tag = f'</{tag}>'
-        end = text.find(end_tag, m.end())
-        if end != -1:
-            end += len(end_tag)
-            chunk = text[start:end]
-            try:
-                elem = ET.fromstring(chunk)
-                prod = extract_from_elem(elem)
-                prod["suggestion"] = False
-                return prod
-            except Exception:
-                pass
-
-    # --- 2) Find occurrences of query in text (case-insensitive), then extract outer offer/item block and parse ---
-    found = []
-    for m in re.finditer(re.escape(q), text, flags=re.IGNORECASE):
-        idx = m.start()
-        start_offer = text.rfind('<offer', 0, idx)
-        start_item = text.rfind('<item', 0, idx)
-        start_prod = text.rfind('<product', 0, idx)
-        starts = [p for p in (start_offer, start_item, start_prod) if p != -1]
-        if not starts:
-            continue
-        start = max(starts)
-        tag_match = re.match(r'<\s*(offer|item|product)\b', text[start:start+20], flags=re.IGNORECASE)
-        tag = tag_match.group(1) if tag_match else "offer"
-        end_tag = f'</{tag}>'
-        end = text.find(end_tag, idx)
-        if end == -1:
-            continue
-        end += len(end_tag)
-        chunk = text[start:end]
-        try:
-            elem = ET.fromstring(chunk)
-            prod = extract_from_elem(elem)
-            cand_fields = " ".join([
-                (prod.get("sku") or "").lower(),
-                (prod.get("name") or "").lower(),
-                (elem.attrib.get("id") or "").lower()
-            ])
-            if qlower in cand_fields:
-                prod["suggestion"] = False if qlower == (prod.get("sku") or "").lower() or qlower == (prod.get("name") or "").lower() else True
-                return prod
-            else:
-                if len(found) < 8:
-                    prod["suggestion"] = True
-                    found.append(prod)
-        except Exception:
-            continue
-
-    # --- 3) Fallback: limited iterparse scan for substring matches ---
+    # ОБОВ'ЯЗКОВО: використовуємо iterparse, **але не очищаємо** дочірні елементи на кожному кроці.
+    # Очищаємо (elem.clear()) лише після обробки оффера, щоб вивільняти пам'ять.
     try:
         it = ET.iterparse(io.StringIO(text), events=("end",))
-        scanned = 0
         for event, elem in it:
-            tag_local = _local_tag(elem.tag).lower()
-            if not (tag_local.endswith("offer") or tag_local.endswith("item") or tag_local.endswith("product")):
-                elem.clear()
+            tag = _local_tag(elem.tag).lower()
+            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
+                # НЕ викликаємо elem.clear() тут — дочірні елементи потрібні коли
+                # потім приходить 'end' для оффера
                 continue
-            scanned += 1
-            if scanned > 2000 and not found:
-                elem.clear()
-                break
-            offer_id = (elem.attrib.get("id") or "").strip()
-            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"]) or ""
-            name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
-            searchable = " ".join([offer_id.lower(), vendor_code.lower(), name.lower()])
-            if qlower in searchable:
-                prod = extract_from_elem(elem)
-                prod["suggestion"] = False if qlower == offer_id.lower() or qlower == vendor_code.lower() or qlower == name.lower() else True
-                elem.clear()
-                return prod
-            elem.clear()
-    except Exception:
-        logger.exception("Fallback iterparse error in check_article_or_name")
 
-    if found:
-        first = found[0]
-        first["suggestion"] = True
-        return first
+            # --- extract values from this offer element ---
+            offer_id = (elem.attrib.get("id") or "").strip()
+            vendor_code = find_first_text(elem, ["vendorcode", "vendor_code", "vendor", "sku", "articul", "article", "code"])
+            # normalize vendor_code: якщо '-' або 'none' або пуста — ігноруємо
+            if vendor_code:
+                if vendor_code.strip() in ("", "-", "null", "none"):
+                    vendor_code = None
+                else:
+                    vendor_code = vendor_code.strip()
+
+            name = find_first_text(elem, ["name", "title", "product", "model", "productname", "product_name"])
+            # price: перевага полю з URL, потім кілька стандартних варіантів
+            drop_price = None
+            if price_field_from_url:
+                drop_price = find_first_numeric(elem, [price_field_from_url])
+            if drop_price is None:
+                drop_price = find_first_numeric(elem, ["price", "cost", "drop", "drop_price", "sellprice", "amount", "value", "price_uah", "priceuah"])
+
+            retail_price = find_first_numeric(elem, ["rrc", "retail", "oldprice", "retail_price", "msrp", "price_rrc"])
+
+            # stock qty
+            stock_qty = None
+            qtxt = find_first_text(elem, ["quantity_in_stock", "quantity", "stock_qty", "stock", "available_quantity", "count", "amount"])
+            if qtxt:
+                qtxt_digits = re.findall(r'\d+', qtxt.replace(" ", ""))
+                if qtxt_digits:
+                    try:
+                        stock_qty = int(qtxt_digits[0])
+                    except:
+                        stock_qty = None
+
+            stock_attr = elem.attrib.get("available", "").lower() if isinstance(elem.attrib, dict) else ""
+            stock = None
+            if stock_attr:
+                stock = "Є" if stock_attr in ("true", "1", "yes") else "Немає"
+
+            stock_text = None
+            if stock_qty is not None:
+                stock_text = f"Є ({stock_qty} шт.)"
+            elif stock:
+                stock_text = stock
+            else:
+                av = find_first_text(elem, ["available", "in_stock", "stock", "наличие"])
+                if av:
+                    stock_text = av
+
+            # sizes/components parsing (приблизно як раніше)
+            sizes_from_param = []
+            components_from_params = []
+            for p in elem.iter():
+                pt = _local_tag(p.tag).lower()
+                if "param" in pt or pt in ("attribute", "property", "option"):
+                    pname_raw = p.attrib.get("name", "") if isinstance(p.attrib, dict) else ""
+                    pname = (pname_raw or "").strip() or _local_tag(p.tag)
+                    ptext = (p.text or "").strip()
+                    opts = []
+                    opts += re.findall(r'\b\d{2,3}-\d{2,3}\b', ptext)
+                    opts += re.findall(r'\b(?:XS|S|M|L|XL|XXL|XXXL)\b', ptext, flags=re.I)
+                    opts += re.findall(r'\b\d{2}\b', ptext)
+                    if re.search(r'універсал', ptext, flags=re.I):
+                        opts.append('універсальний')
+                    if not opts and re.search(r'\b(шт\.?|шт|так|є|available|есть)\b', ptext, flags=re.I):
+                        opts = ['шт.']
+                    if opts:
+                        seen = set()
+                        final = []
+                        for o in opts:
+                            o2 = str(o).strip()
+                            if not o2:
+                                continue
+                            if o2.lower() in seen:
+                                continue
+                            seen.add(o2.lower())
+                            final.append(o2)
+                        components_from_params.append({"name": pname, "options": final})
+                    elif pname:
+                        components_from_params.append({"name": pname, "options": []})
+
+                if "size" in pt or "размер" in pt or "розмір" in pt:
+                    if (p.text or "").strip():
+                        parts = re.split(r'[;,/\\\n]+', p.text or "")
+                        for part in parts:
+                            v = part.strip()
+                            if v:
+                                sizes_from_param.append(v)
+
+            desc_text = find_first_text(elem, ["description", "desc"]) or ""
+            components_from_desc = None
+            try:
+                components_from_desc = parse_components_from_description(desc_text)
+            except Exception:
+                components_from_desc = None
+
+            if components_from_desc:
+                components = components_from_desc
+            elif components_from_params:
+                components = components_from_params
+            elif sizes_from_param:
+                components = [{"name": "Розмір", "options": sizes_from_param}]
+            else:
+                components = None
+
+            # prepare final product dict (normalize sku)
+            sku = (vendor_code or offer_id or "").strip()
+            if sku in ("", "-"):
+                sku = offer_id
+
+            product = {
+                "name": name or offer_id or vendor_code or "",
+                "sku": sku,
+                "drop_price": float(drop_price) if drop_price is not None else None,
+                "retail_price": float(retail_price) if retail_price is not None else None,
+                "final_price": apply_markup(drop_price) if drop_price is not None else None,
+                "stock": stock_text or "Немає",
+                "stock_qty": stock_qty,
+                "stock_text": stock_text or "Немає",
+                "sizes": sizes_from_param or None,
+                "components": components
+            }
+
+            logger.debug(
+                "Parsed offer id=%s | sku=%s | name=%s | drop=%s | retail=%s | stock=%s | components=%r",
+                offer_id, sku, name, drop_price, retail_price, stock_text, components
+            )
+
+            # matching logic (exact id, sku, exact name, substring)
+            if offer_id and qlow == offer_id.lower():
+                elem.clear()
+                return product
+            if product.get("sku") and qlow == product["sku"].lower():
+                elem.clear()
+                return product
+            if name and qlow == name.lower():
+                elem.clear()
+                return product
+            if name and qlow in name.lower() and len(qlow) >= 3:
+                product["suggestion"] = True
+                elem.clear()
+                return product
+
+            # free memory for processed offer
+            elem.clear()
+
+    except Exception as e:
+        logger.exception("XML parse error in check_article_or_name: %s", e)
 
     return None
 
@@ -826,33 +939,49 @@ async def cmd_debug_find(msg: Message):
         await msg.answer("Використання: /debug_find <query>")
         return
     q = parts[1].strip()
-    await msg.chat.do("typing")
-    prod = await check_article_or_name(q)
-    if not prod:
-        await msg.answer("No matches")
+    text = await load_products_export(force=True)
+    if not text:
+        await msg.answer("⚠️ Фід пустий.")
         return
 
-    # pretty print product for debug
-    lines = []
-    lines.append(f"🔖 {prod.get('name') or '—'}")
-    lines.append(f"🆔 Артикул: {prod.get('sku') or '—'}")
-    lines.append(f"📦 Наявність: {prod.get('stock') or '—'}")
-    lines.append(f"💰 Орієнтовна ціна (з націнкою): {prod.get('final_price') or '—'} грн")
-    lines.append(f"💵 Дроп ціна: {prod.get('drop_price') or '—'} грн")
-    if prod.get("components"):
-        comp_lines = []
-        for c in prod["components"]:
-            opts = ", ".join(c.get("options") or []) or "—"
-            comp_lines.append(f"{c.get('name')}: {opts}")
-        lines.append("📏 Компоненти:\n" + "\n".join(comp_lines))
-    if prod.get("suggestion"):
-        lines.append("\n(Це підказка — може бути частковий збіг.)")
-    await msg.answer("\n".join(lines))
+    found = []
+    try:
+        # використовуємо і ту ж logiку: iterparse і збір мінімального summary
+        it = ET.iterparse(io.StringIO(text), events=("end",))
+        qlow = q.lower()
+        for event, elem in it:
+            tag = _local_tag(elem.tag).lower()
+            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
+                continue
+
+            offer_id = (elem.attrib.get("id") or "").strip()
+            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"]) or ""
+            name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
+            desc = _find_first_text(elem, ["description", "desc"]) or ""
+            searchable = " ".join([offer_id.lower(), vendor_code.lower(), name.lower(), desc.lower()])
+            if qlow in searchable:
+                child_map = []
+                for c in list(elem):
+                    ln = _local_tag(c.tag)
+                    txt = (c.text or "").strip()
+                    child_map.append(f"{ln}={txt[:120]}")
+                summary = f"id={offer_id} | sku={vendor_code or '-'} | name={name or '-'}"
+                found.append(summary + "\n" + "; ".join(child_map))
+                if len(found) >= 10:
+                    elem.clear()
+                    break
+            elem.clear()
+    except Exception:
+        logger.exception("debug_find failed")
+    if not found:
+        await msg.answer("No matches")
+    else:
+        await msg.answer("Matches:\n\n" + "\n\n".join(found))
 
 @router.message(OrderForm.article)
 async def state_article(msg: Message, state: FSMContext):
-    query = msg.text.strip()
-    # якщо user написав 'так' — це означає підтвердження останньої suggestion
+    query = (msg.text or "").strip()
+    # якщо user написав 'так' — це означає підтвердження останньої suggestion (назви)
     if query.lower() == "так":
         data = await state.get_data()
         last_suggestion = data.get("last_suggestion")
@@ -862,64 +991,68 @@ async def state_article(msg: Message, state: FSMContext):
             await msg.answer("Нема запропонованого товару для підтвердження — введіть артикул або назву.")
             return
     else:
-        # звичайний шлях: викликаємо check_article_or_name і після нього зберігаємо suggestion в state
+        # звичайний шлях: викликаємо check_article_or_name (один раз)
         product = await check_article_or_name(query)
         if product and product.get("suggestion"):
             # збережемо останню підказку в state, щоб юзер міг підтвердити "так"
             await state.update_data(last_suggestion=product)
+
     await msg.chat.do("typing")
-    product = await check_article_or_name(query)
 
     if not product:
         await msg.answer("❌ Не знайдено товар. Спробуйте ще раз (артикул або частина назви) або напишіть 'підтримка'.")
         return
 
-    stock_text = product["stock_text"]
+    stock_text = product.get("stock_text", product.get("stock", "Немає"))
 
-    # Якщо це лише пропозиція (частковий збіг)
+    # --- заміна suggestion повідомлення на варіант з кнопками ---
     if product.get("suggestion"):
-        sizes_text = f"\n📏 Розміри: {', '.join(product['sizes'])}" if product.get("sizes") else ""
+        sizes_text = f"\n📏 Розміри: {', '.join(product.get('sizes') or [])}" if product.get("sizes") else ""
         sku_line = product.get("sku") or "—"
-        # якщо SKU відсутній, запропонуємо ввести 'так' для підтвердження по назві
-        confirm_hint = ("Якщо це те, що треба — введіть артикул для підтвердження замовлення."
-                        if product.get("sku") else
-                        "Якщо це те, що треба — напишіть 'так' для підтвердження (ми використаємо назву).")
+        # зберігаємо останню suggestion у state (щоб confirm callback міг її взяти)
+        await state.update_data(last_suggestion=product)
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Підтвердити", callback_data="product:confirm")],
+            [InlineKeyboardButton(text="🔍 Ввести артикул/назву", callback_data="flow:manual_search")],
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="flow:back:article")],
+        ])
+
         await msg.answer(
             f"🤔 Можливо ви мали на увазі:\n"
-            f"🔖 <b>{product['name']}</b>\n"
+            f"🔖 <b>{product.get('name')}</b>\n"
             f"🆔 Артикул: <b>{sku_line}</b>\n"
             f"📦 Наявність: <b>{stock_text}</b>\n"
             f"💰 Орієнтовна ціна (з націнкою): {product.get('final_price') or '—'} грн\n"
             f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн"
-            f"{sizes_text}\n\n"
-            f"{confirm_hint}"
+            f"{sizes_text}\n\n",
+            reply_markup=kb
         )
         return
 
     # Якщо точний збіг — зберігаємо базові дані
+    # Зберігаємо components як є (щоб callback handlers бачили ту ж структуру)
     await state.update_data(
-        article=product["sku"],
-        product_name=product["name"],
-        stock=product["stock"],
+        article=product.get("sku"),
+        product_name=product.get("name"),
+        stock=product.get("stock"),
         stock_qty=product.get("stock_qty"),
-        price=product["final_price"],
-        components=product.get("components")  # можуть бути None або список компонентів
+        price=product.get("final_price"),
+        components=product.get("components") or []
     )
 
     # Якщо є компоненти => починаємо послідовно питати розміри через inline-кнопки
-    components = product.get("components")
+    components = product.get("components") or []
     if components:
-        # ініціалізуємо selected_sizes як порожній dict
         await state.update_data(selected_sizes={})
-        # ask first component
         comp0 = components[0]
         opts = comp0.get("options") or []
         if not opts:
-            # якщо немає опцій, просто переходьмо до наступного кроку (quantity)
+            # якщо немає опцій, одразу просимо кількість
             await msg.answer(
                 f"✅ Знайдено товар:\n"
-                f"🔖 <b>{product['name']}</b>\n"
-                f"🆔 Артикул: <b>{product['sku']}</b>\n"
+                f"🔖 <b>{product.get('name')}</b>\n"
+                f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
                 f"📦 Наявність: <b>{stock_text}</b>\n"
                 f"💰 Ціна для клієнта: {product.get('final_price') or '—'} грн\n"
                 f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн\n\n"
@@ -928,33 +1061,26 @@ async def state_article(msg: Message, state: FSMContext):
             await state.set_state(OrderForm.amount)
             return
 
-        # build inline keyboard for options
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text=str(opt), callback_data=f"size:0:{i}")]
-                for i, opt in enumerate(opts)
-            ] + [
-                [InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")]
-            ]
-        )
+        # build inline keyboard for options (reuse build_size_keyboard)
+        kb = build_size_keyboard(0, opts)
         await msg.answer(
             f"✅ Знайдено товар:\n"
-            f"🔖 <b>{product['name']}</b>\n"
-            f"🆔 Артикул: <b>{product['sku']}</b>\n"
+            f"🔖 <b>{product.get('name')}</b>\n"
+            f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
             f"📦 Наявність: <b>{stock_text}</b>\n"
             f"💰 Ціна: {product.get('final_price') or '—'} грн\n\n"
-            f"📏 Виберіть розмір для: <b>{comp0['name']}</b>",
+            f"📏 Виберіть розмір для: <b>{comp0.get('name')}</b>",
             reply_markup=kb
         )
         await state.set_state(OrderForm.size)
         return
 
     # Якщо немає компонентів — як раніше запитуємо кількість
-    sizes_text = f"\n📏 Розміри: {', '.join(product['sizes'])}" if product.get("sizes") else ""
+    sizes_text = f"\n📏 Розміри: {', '.join(product.get('sizes') or [])}" if product.get("sizes") else ""
     await msg.answer(
         f"✅ Знайдено товар:\n"
-        f"🔖 <b>{product['name']}</b>\n"
-        f"🆔 Артикул: <b>{product['sku']}</b>\n"
+        f"🔖 <b>{product.get('name')}</b>\n"
+        f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
         f"📦 Наявність: <b>{stock_text}</b>\n"
         f"💰 Ціна для клієнта: {product.get('final_price') or '—'} грн\n"
         f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн"
@@ -1083,6 +1209,216 @@ async def cb_sizes_edit(cb: CallbackQuery, state: FSMContext):
     await state.set_state(OrderForm.size)
     await cb.answer("Почніть заново вибір розмірів.")
 
+# --- Confirm suggestion callback ---
+@router.callback_query(F.data == "product:confirm")
+async def cb_product_confirm(cb: CallbackQuery, state: FSMContext):
+    """
+    Підтвердження того, що suggestion — і починаємо стандартний flow як при точному збігу.
+    Беремо product з last_suggestion у state.
+    """
+    data = await state.get_data()
+    product = data.get("last_suggestion")
+    if not product:
+        await cb.answer("Нема запропонованого товару для підтвердження.")
+        return
+
+    # Позитив: зберігаємо у state як вибраний товар
+    await state.update_data(
+        article=product.get("sku"),
+        product_name=product.get("name"),
+        stock=product.get("stock"),
+        stock_qty=product.get("stock_qty"),
+        price=product.get("final_price"),
+        components=product.get("components") or []
+    )
+
+    # Видаляємо last_suggestion (необов'язково)
+    await state.remove_data("last_suggestion")
+
+    # Починаємо flow: якщо є components => size selection, інакше - quantity
+    components = product.get("components") or []
+    stock_text = product.get("stock_text") or product.get("stock") or "Немає"
+
+    if components:
+        await state.update_data(selected_sizes={})
+        comp0 = components[0]
+        opts = comp0.get("options") or []
+        if not opts:
+            await cb.message.answer(
+                f"✅ Підтверджено товар:\n"
+                f"🔖 <b>{product.get('name')}</b>\n"
+                f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
+                f"📦 Наявність: <b>{stock_text}</b>\n\n"
+                "👉 Введіть кількість товару (число):"
+            )
+            await state.set_state(OrderForm.amount)
+            await cb.answer()
+            return
+        kb = build_size_keyboard(0, opts)
+        await cb.message.answer(
+            f"✅ Підтверджено товар:\n"
+            f"🔖 <b>{product.get('name')}</b>\n"
+            f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
+            f"📦 Наявність: <b>{stock_text}</b>\n\n"
+            f"📏 Виберіть розмір для: <b>{comp0.get('name')}</b>",
+            reply_markup=kb
+        )
+        await state.set_state(OrderForm.size)
+        await cb.answer()
+        return
+
+    # якщо немає компонентів
+    await cb.message.answer(
+        f"✅ Підтверджено товар:\n"
+        f"🔖 <b>{product.get('name')}</b>\n"
+        f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
+        f"📦 Наявність: <b>{stock_text}</b>\n"
+        f"💰 Ціна для клієнта: {product.get('final_price') or '—'} грн\n"
+        f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн\n\n"
+        "👉 Введіть кількість товару (число):"
+    )
+    await state.set_state(OrderForm.amount)
+    await cb.answer()
+
+# --- manual search (перевести користувача на введення артикулу/назви) ---
+@router.callback_query(F.data == "flow:manual_search")
+async def cb_manual_search(cb: CallbackQuery, state: FSMContext):
+    await cb.message.answer("Введіть артикул або назву товару:")
+    await state.set_state(OrderForm.article)
+    await cb.answer()
+
+# --- back navigation handler: callback_data = flow:back:<state_name> (e.g. flow:back:pib) ---
+@router.callback_query(F.data.startswith("flow:back:"))
+async def cb_flow_back(cb: CallbackQuery, state: FSMContext):
+    # розбираємо куди повертатися
+    try:
+        _, _, to = cb.data.split(":", 2)
+    except:
+        await cb.answer("Невірна команда повернення.")
+        return
+
+    if to == "pib":
+        await state.set_state(OrderForm.pib)
+        await cb.message.answer("Повернулись. Введіть ваше ПІБ:")
+    elif to == "phone":
+        await state.set_state(OrderForm.phone)
+        await cb.message.answer("Повернулись. Введіть телефон:")
+    elif to == "article":
+        await state.set_state(OrderForm.article)
+        await cb.message.answer("Повернулись. Введіть артикул або назву товару:")
+    elif to == "amount":
+        await state.set_state(OrderForm.amount)
+        await cb.message.answer("Повернулись. Введіть кількість товару:")
+    else:
+        await state.set_state(OrderForm.article)
+        await cb.message.answer("Повернулись. Введіть артикул або назву товару:")
+    await cb.answer()
+
+# --- Confirm suggestion callback ---
+@router.callback_query(F.data == "product:confirm")
+async def cb_product_confirm(cb: CallbackQuery, state: FSMContext):
+    """
+    Підтвердження того, що suggestion — і починаємо стандартний flow як при точному збігу.
+    Беремо product з last_suggestion у state.
+    """
+    data = await state.get_data()
+    product = data.get("last_suggestion")
+    if not product:
+        await cb.answer("Нема запропонованого товару для підтвердження.")
+        return
+
+    # Позитив: зберігаємо у state як вибраний товар
+    await state.update_data(
+        article=product.get("sku"),
+        product_name=product.get("name"),
+        stock=product.get("stock"),
+        stock_qty=product.get("stock_qty"),
+        price=product.get("final_price"),
+        components=product.get("components") or []
+    )
+
+    # Видаляємо last_suggestion (необов'язково)
+    await state.remove_data("last_suggestion")
+
+    # Починаємо flow: якщо є components => size selection, інакше - quantity
+    components = product.get("components") or []
+    stock_text = product.get("stock_text") or product.get("stock") or "Немає"
+
+    if components:
+        await state.update_data(selected_sizes={})
+        comp0 = components[0]
+        opts = comp0.get("options") or []
+        if not opts:
+            await cb.message.answer(
+                f"✅ Підтверджено товар:\n"
+                f"🔖 <b>{product.get('name')}</b>\n"
+                f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
+                f"📦 Наявність: <b>{stock_text}</b>\n\n"
+                "👉 Введіть кількість товару (число):"
+            )
+            await state.set_state(OrderForm.amount)
+            await cb.answer()
+            return
+        kb = build_size_keyboard(0, opts)
+        await cb.message.answer(
+            f"✅ Підтверджено товар:\n"
+            f"🔖 <b>{product.get('name')}</b>\n"
+            f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
+            f"📦 Наявність: <b>{stock_text}</b>\n\n"
+            f"📏 Виберіть розмір для: <b>{comp0.get('name')}</b>",
+            reply_markup=kb
+        )
+        await state.set_state(OrderForm.size)
+        await cb.answer()
+        return
+
+    # якщо немає компонентів
+    await cb.message.answer(
+        f"✅ Підтверджено товар:\n"
+        f"🔖 <b>{product.get('name')}</b>\n"
+        f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
+        f"📦 Наявність: <b>{stock_text}</b>\n"
+        f"💰 Ціна для клієнта: {product.get('final_price') or '—'} грн\n"
+        f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн\n\n"
+        "👉 Введіть кількість товару (число):"
+    )
+    await state.set_state(OrderForm.amount)
+    await cb.answer()
+
+# --- manual search (перевести користувача на введення артикулу/назви) ---
+@router.callback_query(F.data == "flow:manual_search")
+async def cb_manual_search(cb: CallbackQuery, state: FSMContext):
+    await cb.message.answer("Введіть артикул або назву товару:")
+    await state.set_state(OrderForm.article)
+    await cb.answer()
+
+# --- back navigation handler: callback_data = flow:back:<state_name> (e.g. flow:back:pib) ---
+@router.callback_query(F.data.startswith("flow:back:"))
+async def cb_flow_back(cb: CallbackQuery, state: FSMContext):
+    # розбираємо куди повертатися
+    try:
+        _, _, to = cb.data.split(":", 2)
+    except:
+        await cb.answer("Невірна команда повернення.")
+        return
+
+    if to == "pib":
+        await state.set_state(OrderForm.pib)
+        await cb.message.answer("Повернулись. Введіть ваше ПІБ:")
+    elif to == "phone":
+        await state.set_state(OrderForm.phone)
+        await cb.message.answer("Повернулись. Введіть телефон:")
+    elif to == "article":
+        await state.set_state(OrderForm.article)
+        await cb.message.answer("Повернулись. Введіть артикул або назву товару:")
+    elif to == "amount":
+        await state.set_state(OrderForm.amount)
+        await cb.message.answer("Повернулись. Введіть кількість товару:")
+    else:
+        await state.set_state(OrderForm.article)
+        await cb.message.answer("Повернулись. Введіть артикул або назву товару:")
+    await cb.answer()
+
 # --- Кількість товару ---
 @router.message(OrderForm.amount)
 async def state_amount(msg: Message, state: FSMContext):
@@ -1107,8 +1443,207 @@ async def state_amount(msg: Message, state: FSMContext):
 
     # якщо кількість доступна — зберігаємо
     await state.update_data(amount=qty)
-    await msg.answer("Оберіть службу доставки:", reply_markup=delivery_keyboard())
+
+    # Формуємо тимчасову позицію для корзини (наприклад)
+    data = await state.get_data()
+    item = {
+        "sku": data.get("article"),
+        "name": data.get("product_name"),
+        # вибрані розміри (якщо є) або пустий рядок
+        "size": "; ".join([f"{k}:{v}" for k, v in (data.get("selected_sizes") or {}).items()]) or "-",
+        "amount": qty,
+        "price": data.get("price") or 0,
+        "drop_price": data.get("drop_price") or None
+    }
+
+    # Додаємо у корзину
+    await add_item_to_cart(state, item)
+
+    # Показуємо підтвердження і запрошуємо далі (вибрати доставку або додати ще товар)
+    await msg.answer(
+        f"✅ Товар додано до корзини:\n🔖 {item['name']} ({item['size']})\n🔢 Кількість: {item['amount']}\n💰 Ціна за 1шт: {item['price']} грн",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Вибрати ще товар на каналі", callback_data="choose:from_channel")],
+            [InlineKeyboardButton(text="Вибрати товар по назві/артикулу", callback_data="choose:by_name")],
+            [InlineKeyboardButton(text="Оберіть спосіб доставки", callback_data="flow:delivery")],
+        ])
+    )
+
+    # Показуємо футер-кнопку кошика з сумою
+    cart_text, total = await get_cart_summary(state)
+    await msg.answer(f"🛒 Ваша корзина: Загальна сума — {total} грн", reply_markup=cart_footer_keyboard(total))
+
+    # переходимо до вибору доставки (юзер може натиснути кнопку "Оберіть спосіб доставки")
     await state.set_state(OrderForm.delivery)
+
+# --- choose from channel / by name placeholders ---
+@router.callback_query(F.data == "choose:from_channel")
+async def cb_choose_from_channel(cb: CallbackQuery, state: FSMContext):
+    # Тут можна направити користувача у репостований канал або пояснити, як вибрати
+    await cb.message.answer("Щоб вибрати товар на каналі — відкрийте пост у каналі та натисніть кнопку «Замовити» під потрібним товаром. Якщо ви тут — можете обрати 'Вибрати товар по назві/артикулу'.")
+    await cb.answer()
+
+@router.callback_query(F.data == "choose:by_name")
+async def cb_choose_by_name(cb: CallbackQuery, state: FSMContext):
+    await cb.message.answer("Введіть назву або артикул товару для пошуку:")
+    await state.set_state(OrderForm.article)
+    await cb.answer()
+
+# --- cart open / clear / checkout ---
+@router.callback_query(F.data == "cart:open")
+async def cb_cart_open(cb: CallbackQuery, state: FSMContext):
+    text, total = await get_cart_summary(state)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="cart:checkout")],
+        [InlineKeyboardButton(text="❌ Повністю скасувати замовлення", callback_data="cart:clear")],
+    ])
+    await cb.message.answer(text, reply_markup=kb)
+    await cb.answer()
+
+@router.callback_query(F.data == "cart:clear")
+async def cb_cart_clear(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(cart=[])
+    await cb.message.answer("❌ Замовлення повністю скасовано. Ви можете розпочати оформлення знову.")
+    await cb.answer()
+
+@router.callback_query(F.data == "cart:checkout")
+async def cb_cart_checkout(cb: CallbackQuery, state: FSMContext):
+    # Перевірка: є товари?
+    data = await state.get_data()
+    cart = data.get("cart", [])
+    if not cart:
+        await cb.answer("Кошик порожній.")
+        return
+
+    # підсумок: показати та попросити обрати доставку/оплату (якщо ще не обрано)
+    text, total = await get_cart_summary(state)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Оберіть службу доставки", callback_data="flow:delivery")],
+        [InlineKeyboardButton(text="Оберіть тип оплати", callback_data="flow:payment")],
+        [InlineKeyboardButton(text="Підтвердити і відправити замовлення (зараз)", callback_data="cart:confirm_send")],
+        [InlineKeyboardButton(text="Назад", callback_data="flow:back:article")],
+    ])
+    await cb.message.answer(text + f"\n\n🔢 Підсумок до оплати: {total} грн", reply_markup=kb)
+    await cb.answer()
+
+@router.callback_query(F.data == "cart:confirm_send")
+async def cb_cart_confirm_send(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    cart = data.get("cart", [])
+    if not cart:
+        await cb.answer("Кошик порожній.")
+        return
+
+    # Формуємо payload для MyDrop/адміна
+    payload = {
+        "pib": data.get("pib"),
+        "phone": data.get("phone"),
+        "products": cart,
+        "delivery": data.get("delivery"),
+        "address": data.get("address"),
+        "payment": data.get("payment"),
+        "note": data.get("note"),
+        "mode": data.get("mode", "real")
+    }
+
+    # Якщо тестовий режим — НЕ відправляємо в MyDrop, а надсилаємо вам (ADMIN_ID) на перевірку
+    if data.get("mode") == "test":
+        await bot.send_message(ADMIN_ID, f"🧾 Тестове замовлення (на перевірку):\n{json.dumps(payload, ensure_ascii=False, indent=2)}")
+        await cb.message.answer("✅ Замовлення надіслано на перевірку адміністратору.")
+        # не очищаємо cart автоматично — чекаємо підтвердження адміном
+    else:
+        # відправка в MyDrop асинхронно
+        asyncio.create_task(create_mydrop_order(payload, notify_chat=ADMIN_ID))
+        await cb.message.answer("✅ Замовлення відправлено постачальнику (MyDrop).")
+        # очищаємо cart після відправки
+        await state.update_data(cart=[])
+
+    await cb.answer()
+
+# --- Обробники кнопок вибору наступного товару та корзини ---
+# --- choose from channel / by name placeholders ---
+@router.callback_query(F.data == "choose:from_channel")
+async def cb_choose_from_channel(cb: CallbackQuery, state: FSMContext):
+    # Тут можна направити користувача у репостований канал або пояснити, як вибрати
+    await cb.message.answer("Щоб вибрати товар на каналі — відкрийте пост у каналі та натисніть кнопку «Замовити» під потрібним товаром. Якщо ви тут — можете обрати 'Вибрати товар по назві/артикулу'.")
+    await cb.answer()
+
+@router.callback_query(F.data == "choose:by_name")
+async def cb_choose_by_name(cb: CallbackQuery, state: FSMContext):
+    await cb.message.answer("Введіть назву або артикул товару для пошуку:")
+    await state.set_state(OrderForm.article)
+    await cb.answer()
+
+# --- cart open / clear / checkout ---
+@router.callback_query(F.data == "cart:open")
+async def cb_cart_open(cb: CallbackQuery, state: FSMContext):
+    text, total = await get_cart_summary(state)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="cart:checkout")],
+        [InlineKeyboardButton(text="❌ Повністю скасувати замовлення", callback_data="cart:clear")],
+    ])
+    await cb.message.answer(text, reply_markup=kb)
+    await cb.answer()
+
+@router.callback_query(F.data == "cart:clear")
+async def cb_cart_clear(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(cart=[])
+    await cb.message.answer("❌ Замовлення повністю скасовано. Ви можете розпочати оформлення знову.")
+    await cb.answer()
+
+@router.callback_query(F.data == "cart:checkout")
+async def cb_cart_checkout(cb: CallbackQuery, state: FSMContext):
+    # Перевірка: є товари?
+    data = await state.get_data()
+    cart = data.get("cart", [])
+    if not cart:
+        await cb.answer("Кошик порожній.")
+        return
+
+    # підсумок: показати та попросити обрати доставку/оплату (якщо ще не обрано)
+    text, total = await get_cart_summary(state)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Оберіть службу доставки", callback_data="flow:delivery")],
+        [InlineKeyboardButton(text="Оберіть тип оплати", callback_data="flow:payment")],
+        [InlineKeyboardButton(text="Підтвердити і відправити замовлення (зараз)", callback_data="cart:confirm_send")],
+        [InlineKeyboardButton(text="Назад", callback_data="flow:back:article")],
+    ])
+    await cb.message.answer(text + f"\n\n🔢 Підсумок до оплати: {total} грн", reply_markup=kb)
+    await cb.answer()
+
+@router.callback_query(F.data == "cart:confirm_send")
+async def cb_cart_confirm_send(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    cart = data.get("cart", [])
+    if not cart:
+        await cb.answer("Кошик порожній.")
+        return
+
+    # Формуємо payload для MyDrop/адміна
+    payload = {
+        "pib": data.get("pib"),
+        "phone": data.get("phone"),
+        "products": cart,
+        "delivery": data.get("delivery"),
+        "address": data.get("address"),
+        "payment": data.get("payment"),
+        "note": data.get("note"),
+        "mode": data.get("mode", "real")
+    }
+
+    # Якщо тестовий режим — НЕ відправляємо в MyDrop, а надсилаємо вам (ADMIN_ID) на перевірку
+    if data.get("mode") == "test":
+        await bot.send_message(ADMIN_ID, f"🧾 Тестове замовлення (на перевірку):\n{json.dumps(payload, ensure_ascii=False, indent=2)}")
+        await cb.message.answer("✅ Замовлення надіслано на перевірку адміністратору.")
+        # не очищаємо cart автоматично — чекаємо підтвердження адміном
+    else:
+        # відправка в MyDrop асинхронно
+        asyncio.create_task(create_mydrop_order(payload, notify_chat=ADMIN_ID))
+        await cb.message.answer("✅ Замовлення відправлено постачальнику (MyDrop).")
+        # очищаємо cart після відправки
+        await state.update_data(cart=[])
+
+    await cb.answer()
 
 # --- Доставка ---
 @router.callback_query(F.data.startswith("delivery:"))
