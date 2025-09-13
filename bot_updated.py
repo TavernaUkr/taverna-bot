@@ -580,10 +580,13 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 "sizes": sizes_from_param or None,
                 "components": components
             }
+
+            # Правильний виклик logger.debug — перший аргумент це форматований рядок,
+            # далі — значення (без вставлених кавичок всередині рядка)
             logger.debug(
-                "Parsed offer id=%s name=%s sku=%s drop_price=%s retail=%s stock_qty=%s components=%s",stock_qty=%s components=%s",
+                "Parsed offer id=%s name=%s sku=%s drop_price=%s retail=%s stock_qty=%s components=%s",
                 offer_id, name, vendor_code, drop_price, retail_price, stock_qty, components
-)
+            )
 
             # matching logic
             qlow = q.lower()
