@@ -1670,94 +1670,72 @@ async def resolve_callback_chat_id(cb: CallbackQuery, state: Optional[FSMContext
 
     return chat_id
 
-async def add_product_to_cart(
-    state: FSMContext,
-    product: dict,
-    size_text: str,
-    qty: int,
-    chat_id: Optional[int] = None
-):
-    """
-    Безпечне додавання товару до корзини в state + оновлення/створення 'footer' повідомлення з підсумком.
+async def add_product_to_cart(state: FSMContext, product: dict, size_text: str, qty: int, chat_id: Optional[int] = None):
+    """Додає товар у кошик, зберігає у state і оновлює (або створює) footer-повідомлення з підсумком.
 
-    - product: dict (має ключі 'sku','name','final_price' або 'drop_price' і т.д.)
-    - size_text: рядок із вибраними розмірами/компонентами
+    - state: FSMContext поточного користувача
+    - product: dict (має містити принаймні 'sku','name','final_price')
+    - size_text: текст розмірів/опцій для цієї позиції
     - qty: кількість (int)
-    - chat_id: необов'язково — якщо передати, бот відправить footer саме в цей чат. Інакше
-      ми намагаємось взяти chat_id з state (cart_chat_id, chat_id, pib_chat, user_chat_id).
+    - chat_id: необов'язково — chat id для редагування/створення footer; якщо не передано, спробуємо взяти з state
     """
-    data = await state.get_data() or {}
+    data = await state.get_data()
+    # знайдемо chat_id: найперше від переданого параметру, інакше з state
+    chat_id = chat_id or data.get("chat_id") or data.get("user_chat_id") or data.get("pib_chat")
 
-    # поточна корзина в state
     cart = data.get("cart_items") or []
-
-    # нормалізація ціни в ціле число (грн)
-    raw_price = product.get("final_price") if product.get("final_price") is not None else product.get("drop_price") or 0
     try:
-        unit_price = int(raw_price)
+        unit_price = int(round(float(product.get("final_price") or 0)))
     except Exception:
-        try:
-            unit_price = int(float(str(raw_price).replace(",", ".")))
-        except Exception:
-            unit_price = 0
+        unit_price = 0
 
     item = {
-        "sku": product.get("sku"),
-        "name": product.get("name") or "Товар",
+        "sku": product.get("sku") or "",
+        "name": product.get("name") or product.get("title") or "Товар",
         "size_text": size_text or "—",
         "qty": int(qty or 1),
-        "unit_price": int(unit_price)
+        "unit_price": unit_price
     }
     cart.append(item)
     await state.update_data(cart_items=cart)
 
-    # підрахунок підсумку
+    # підсумок
     total = sum(int(it.get("unit_price", 0)) * int(it.get("qty", 1)) for it in cart)
 
-    # розв'язуємо куди відправляти footer (порядок пріоритету)
-    resolved_chat = chat_id \
-        or data.get("cart_chat_id") \
-        or data.get("chat_id") \
-        or data.get("pib_chat") \
-        or data.get("user_chat_id")
-
-    # якщо chat не знайдено — збережемо cart у state, але не шлемо footer
-    if not resolved_chat:
-        # зберігаємо корзину і виходимо
-        await state.update_data(cart_items=cart)
-        return
-
-    footer_msg_id = data.get("cart_footer_msg_id")
-    footer_text = f"🧾 ТУТ ВАША КОРЗИНА — Загальна: {total} грн."
-
-    # якщо в state є id footer-повідомлення — намагаємось його відредагувати
-    if footer_msg_id:
-        try:
-            await bot.edit_message_text(
-                chat_id=resolved_chat,
-                message_id=footer_msg_id,
-                text=footer_text,
-                reply_markup=cart_footer_kb(total)
-            )
-            # оновимо час/маркер останнього оновлення (необов'язково)
-            await state.update_data(cart_last_updated=datetime.now().isoformat())
-            return
-        except Exception:
-            # якщо редагування не вдалось — відправимо нове повідомлення і замінимо id
-            pass
-
-    # відправляємо новий footer і зберігаємо його id
+    # Оновлюємо футер: пріоритет - ensure_or_update_cart_footer(chat_id) (якщо визначена),
+    # інакше робимо fallback з USER_CART_MSG / cart_footer_kb.
     try:
-        msg = await bot.send_message(
-            resolved_chat,
-            text=footer_text,
-            reply_markup=cart_footer_kb(total)
-        )
-        await state.update_data(cart_footer_msg_id=msg.message_id, cart_chat_id=resolved_chat)
+        if chat_id is None:
+            logger.warning("add_product_to_cart: chat_id not found in state or args — footer не буде відредаговано")
+            return
+
+        # якщо в коді є функція ensure_or_update_cart_footer — використовуємо її
+        if "ensure_or_update_cart_footer" in globals():
+            await ensure_or_update_cart_footer(chat_id)
+            return
+
+        # fallback: вручну створюємо/редагуємо footer
+        kb = cart_footer_kb(total) if "cart_footer_kb" in globals() else InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"🧾 ТУТ ВАША КОРЗИНА — Загальна: {total} грн", callback_data="cart:view")],
+        ])
+
+        meta = USER_CART_MSG.get(chat_id)
+        if meta:
+            try:
+                await bot.edit_message_text(
+                    f"🧾 Ваша корзина — Загальна сума: {total} грн",
+                    chat_id=meta["chat_id"],
+                    message_id=meta["message_id"],
+                    reply_markup=kb
+                )
+                return
+            except Exception:
+                USER_CART_MSG.pop(chat_id, None)
+
+        sent = await bot.send_message(chat_id, f"🧾 Ваша корзина — Загальна сума: {total} грн", reply_markup=kb)
+        USER_CART_MSG[chat_id] = {"chat_id": sent.chat.id, "message_id": sent.message_id}
     except Exception:
-        # якщо і відправити не вдалось — просто зберігаємо cart і викидаємо лог (не фатально)
-        logger.exception("Failed to send/update cart footer message")
-        await state.update_data(cart_items=cart)
+        logger.exception("add_product_to_cart: failed to update/send footer")
 
 # --- Обробник вибору розміру через inline-кнопки (оновлений UX: Continue / Edit) ---
 @router.callback_query(F.data == "sizes:continue")
