@@ -441,10 +441,10 @@ def parse_components_from_description(desc: str):
 async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     """
     Robust and faster parser:
-    1) шукaє query у сирому тексті фіду (точний або частковий, case-insensitive),
-    2) витягує найближчий XML-block <offer...>...</offer> (або <item...>...</item>),
-    3) парсить тільки цей блок і витягує name/sku/prices/stock/components.
-    Повертає product dict або None.
+    - шукaє query у сирому тексті фіду (точний або частковий, case-insensitive),
+    - витягує найближчий XML-block <offer...>...</offer> (або <item...>...</item>),
+    - парсить тільки цей блок і витягує name/sku/prices/stock/components.
+    Покращено: більш агресивний пошук SKU/vendor code (param[name], child tags, attributes).
     """
     q = str(query or "").strip()
     if not q:
@@ -458,7 +458,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     # --- helper functions (reuse local tag helpers already in scope) ---
     def extract_from_elem(elem):
         # elem is an xml.etree.ElementTree.Element
-        # find text by many candidate names
         def find_text(el, candidates):
             for child in el.iter():
                 name = _local_tag(child.tag).lower()
@@ -466,6 +465,10 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                     txt = (child.text or "").strip()
                     if txt:
                         return txt
+                # also check attributes of the child
+                for attr_key, attr_val in getattr(child, 'attrib', {}).items():
+                    if any(c in attr_key.lower() for c in candidates) and str(attr_val).strip():
+                        return str(attr_val).strip()
             return None
 
         def find_number(el, candidates):
@@ -474,13 +477,11 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 if any(c in name for c in candidates):
                     txt = (child.text or "").strip()
                     if not txt:
-                        # maybe attribute 'value' or 'price' on child
                         txt = (child.attrib.get("value") or child.attrib.get("price") or "").strip()
                     if txt:
                         try:
                             return float(txt.replace(" ", "").replace(",", "."))
                         except Exception:
-                            # try extract digits
                             t = re.sub(r"[^\d\.,\-]", "", txt).replace(",", ".")
                             try:
                                 return float(t)
@@ -495,14 +496,39 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                         continue
             return None
 
-        # id and vendor code
+        # id and vendor code - multiple heuristics
         offer_id = (elem.attrib.get("id") or "").strip()
-        vendor_code = find_text(elem, ["vendorcode", "vendor_code", "vendor", "sku", "articul", "article", "code"])
-        name = find_text(elem, ["name", "title", "product", "model", "productname", "product_name"])
+        # 1) try direct common child tags/attrs
+        vendor_code = find_text(elem, ["vendorcode", "vendor_code", "vendor", "sku", "articul", "article", "code", "vendorCode"])
+        # 2) try param-like tags with name attribute mentioning 'art' or 'sku' (many feeds use <param name="Артикул">)
+        if not vendor_code:
+            for p in elem.iter():
+                pt = _local_tag(p.tag).lower()
+                if "param" in pt or "attribute" in pt or "property" in pt or "option" in pt:
+                    pname = (p.attrib.get("name") or "").lower()
+                    if pname and re.search(r"(арт|артикул|sku|код|vendor|vendorcode|vendor_code|article|vendorid|vendor_id)", pname, flags=re.I):
+                        txt = (p.text or "").strip()
+                        if txt:
+                            vendor_code = txt
+                            break
+                    # sometimes code sits in value attribute
+                    for attr in ("value", "code", "article", "sku"):
+                        if p.attrib.get(attr):
+                            vendor_code = str(p.attrib.get(attr)).strip()
+                            break
+                if vendor_code:
+                    break
+        # 3) fallback to any child tag that looks like short alnum code
+        if not vendor_code:
+            for child in elem.iter():
+                txt = (child.text or "").strip()
+                if txt and re.fullmatch(r"[A-Za-z0-9\-\_]{3,20}", txt):
+                    # heuristic: if it's short and not russian/ukr word (no spaces) consider it candidate
+                    vendor_code = txt
+                    break
 
+        name = find_text(elem, ["name", "title", "product", "model", "productname", "product_name"])
         # price detection
-        drop_price = None
-        # look for common candidates
         drop_price = find_number(elem, ["drop_price", "drop", "price", "cost", "sellprice", "value", "amount"])
         retail_price = find_number(elem, ["rrc", "retail", "oldprice", "retail_price", "msrp"])
 
@@ -511,7 +537,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
         qtxt = find_text(elem, ["quantity_in_stock", "quantity", "stock_qty", "stock", "available_quantity", "count"])
         if qtxt and qtxt.strip().isdigit():
             stock_qty = int(qtxt.strip())
-        # attribute available
         stock_attr = (elem.attrib.get("available") or "").lower()
         stock = None
         if stock_attr:
@@ -527,7 +552,7 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
             if av:
                 stock_text = av
 
-        # components/params
+        # components/params (reuse previous heuristics)
         sizes_from_param = []
         components_from_params = []
         for p in elem.iter():
@@ -545,7 +570,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 if not opts and re.search(r'\b(так|є|available|есть)\b', ptext, flags=re.I):
                     opts = ['шт.']
                 if opts:
-                    # dedupe
                     seen = set()
                     final = []
                     for o in opts:
@@ -567,7 +591,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                         if v:
                             sizes_from_param.append(v)
 
-        # description parse
         desc_text = find_text(elem, ["description", "desc"]) or ""
         components_from_desc = None
         try:
@@ -599,13 +622,10 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
         return product
 
     # --- 1) Try exact id attribute match in text (fast) ---
-    # pattern: <offer ... id="QUERY"
     attr_pattern = re.compile(r'<(offer|item|product)[^>]*\bid=["\']%s["\']' % re.escape(q), flags=re.IGNORECASE)
     m = attr_pattern.search(text)
     if m:
-        # find block boundaries
         start = text.rfind('<', 0, m.start())
-        # find end tag for that element
         tag = m.group(1)
         end_tag = f'</{tag}>'
         end = text.find(end_tag, m.end())
@@ -618,14 +638,12 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 prod["suggestion"] = False
                 return prod
             except Exception:
-                # fallthrough to chunk-based search below
                 pass
 
     # --- 2) Find occurrences of query in text (case-insensitive), then extract outer offer/item block and parse ---
     found = []
     for m in re.finditer(re.escape(q), text, flags=re.IGNORECASE):
         idx = m.start()
-        # find nearest preceding '<offer' or '<item' or '<product'
         start_offer = text.rfind('<offer', 0, idx)
         start_item = text.rfind('<item', 0, idx)
         start_prod = text.rfind('<product', 0, idx)
@@ -633,20 +651,17 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
         if not starts:
             continue
         start = max(starts)
-        # determine tag name at start
         tag_match = re.match(r'<\s*(offer|item|product)\b', text[start:start+20], flags=re.IGNORECASE)
         tag = tag_match.group(1) if tag_match else "offer"
         end_tag = f'</{tag}>'
         end = text.find(end_tag, idx)
         if end == -1:
-            # try find next closing '>' for self-closing or skip
             continue
         end += len(end_tag)
         chunk = text[start:end]
         try:
             elem = ET.fromstring(chunk)
             prod = extract_from_elem(elem)
-            # check if this is a real candidate: sku/name/id contains q
             cand_fields = " ".join([
                 (prod.get("sku") or "").lower(),
                 (prod.get("name") or "").lower(),
@@ -656,16 +671,13 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 prod["suggestion"] = False if qlower == (prod.get("sku") or "").lower() or qlower == (prod.get("name") or "").lower() else True
                 return prod
             else:
-                # accumulate a few suggestions (limit)
                 if len(found) < 8:
                     prod["suggestion"] = True
                     found.append(prod)
         except Exception:
-            # skip unparsable chunk
             continue
 
-    # --- 3) If not found exact, try substring search across simpler fields by iterating feed but stopping early ---
-    # (fallback for edge cases) — iterate top-level offers but limit to first N scanned to avoid long runs
+    # --- 3) Fallback: limited iterparse scan for substring matches ---
     try:
         it = ET.iterparse(io.StringIO(text), events=("end",))
         scanned = 0
@@ -676,7 +688,6 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 continue
             scanned += 1
             if scanned > 2000 and not found:
-                # avoid a full scan if nothing found (safety)
                 elem.clear()
                 break
             offer_id = (elem.attrib.get("id") or "").strip()
@@ -692,13 +703,11 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     except Exception:
         logger.exception("Fallback iterparse error in check_article_or_name")
 
-    # --- 4) If we accumulated suggestions, return first suggestion (with suggestion=True) ---
     if found:
         first = found[0]
         first["suggestion"] = True
         return first
 
-    # nothing found
     return None
 
 # ---------------- Helpers: component size search ----------------
@@ -816,47 +825,48 @@ async def cmd_debug_find(msg: Message):
     if len(parts) < 2:
         await msg.answer("Використання: /debug_find <query>")
         return
-    q = parts[1].strip().lower()
-    text = await load_products_export()
-    if not text:
-        await msg.answer("⚠️ Фід пустий.")
-        return
-    found = []
-    try:
-        it = ET.iterparse(io.StringIO(text), events=("end",))
-        for event, elem in it:
-            tag = _local_tag(elem.tag).lower()
-            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
-                elem.clear()
-                continue
-            offer_id = (elem.attrib.get("id") or "").strip()
-            sku = (_find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"]) or "").strip()
-            name = (_find_first_text(elem, ["name", "title", "product", "model"]) or "").strip()
-            desc = (_find_first_text(elem, ["description", "desc"]) or "").strip()
-            summary = f"id={offer_id} | sku={sku} | name={name}"
-            searchable = " ".join([offer_id.lower(), sku.lower(), name.lower(), desc.lower()])
-            if q in searchable:
-                # collect a short debug dump of child tags -> text (localname)
-                child_map = []
-                for c in list(elem):
-                    ln = _local_tag(c.tag)
-                    txt = (c.text or "").strip()
-                    child_map.append(f"{ln}={txt[:120]}")
-                found.append(summary + "\n" + "; ".join(child_map))
-                if len(found) >= 10:
-                    elem.clear()
-                    break
-            elem.clear()
-    except Exception:
-        logger.exception("debug_find failed")
-    if not found:
+    q = parts[1].strip()
+    await msg.chat.do("typing")
+    prod = await check_article_or_name(q)
+    if not prod:
         await msg.answer("No matches")
-    else:
-        await msg.answer("Matches:\n\n" + "\n\n".join(found))
+        return
+
+    # pretty print product for debug
+    lines = []
+    lines.append(f"🔖 {prod.get('name') or '—'}")
+    lines.append(f"🆔 Артикул: {prod.get('sku') or '—'}")
+    lines.append(f"📦 Наявність: {prod.get('stock') or '—'}")
+    lines.append(f"💰 Орієнтовна ціна (з націнкою): {prod.get('final_price') or '—'} грн")
+    lines.append(f"💵 Дроп ціна: {prod.get('drop_price') or '—'} грн")
+    if prod.get("components"):
+        comp_lines = []
+        for c in prod["components"]:
+            opts = ", ".join(c.get("options") or []) or "—"
+            comp_lines.append(f"{c.get('name')}: {opts}")
+        lines.append("📏 Компоненти:\n" + "\n".join(comp_lines))
+    if prod.get("suggestion"):
+        lines.append("\n(Це підказка — може бути частковий збіг.)")
+    await msg.answer("\n".join(lines))
 
 @router.message(OrderForm.article)
 async def state_article(msg: Message, state: FSMContext):
     query = msg.text.strip()
+    # якщо user написав 'так' — це означає підтвердження останньої suggestion
+    if query.lower() == "так":
+        data = await state.get_data()
+        last_suggestion = data.get("last_suggestion")
+        if last_suggestion:
+            product = last_suggestion
+        else:
+            await msg.answer("Нема запропонованого товару для підтвердження — введіть артикул або назву.")
+            return
+    else:
+        # звичайний шлях: викликаємо check_article_or_name і після нього зберігаємо suggestion в state
+        product = await check_article_or_name(query)
+        if product and product.get("suggestion"):
+            # збережемо останню підказку в state, щоб юзер міг підтвердити "так"
+            await state.update_data(last_suggestion=product)
     await msg.chat.do("typing")
     product = await check_article_or_name(query)
 
@@ -869,15 +879,20 @@ async def state_article(msg: Message, state: FSMContext):
     # Якщо це лише пропозиція (частковий збіг)
     if product.get("suggestion"):
         sizes_text = f"\n📏 Розміри: {', '.join(product['sizes'])}" if product.get("sizes") else ""
+        sku_line = product.get("sku") or "—"
+        # якщо SKU відсутній, запропонуємо ввести 'так' для підтвердження по назві
+        confirm_hint = ("Якщо це те, що треба — введіть артикул для підтвердження замовлення."
+                        if product.get("sku") else
+                        "Якщо це те, що треба — напишіть 'так' для підтвердження (ми використаємо назву).")
         await msg.answer(
             f"🤔 Можливо ви мали на увазі:\n"
             f"🔖 <b>{product['name']}</b>\n"
-            f"🆔 Артикул: <b>{product['sku']}</b>\n"
+            f"🆔 Артикул: <b>{sku_line}</b>\n"
             f"📦 Наявність: <b>{stock_text}</b>\n"
             f"💰 Орієнтовна ціна (з націнкою): {product.get('final_price') or '—'} грн\n"
             f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн"
             f"{sizes_text}\n\n"
-            "Якщо це те, що треба — введіть артикул для підтвердження замовлення."
+            f"{confirm_hint}"
         )
         return
 
