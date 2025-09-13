@@ -477,7 +477,7 @@ async def update_or_send_cart_footer(chat_id: int, bot_instance=None):
 # ---------------- Cart storage & helpers ----------------
 # chat_id -> list[ {name, sku, price, qty, sizes (dict)} ]
 USER_CARTS: Dict[int, List[Dict[str, Any]]] = {}
-USER_CART_MSG: Dict[int, Dict[str, int]] = {}
+USER_CART_MSG: Dict[int, Dict[str, Any]] = {}
 
 def ensure_cart(chat_id: int):
     if chat_id not in USER_CARTS:
@@ -532,12 +532,12 @@ async def cart_clear(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 def add_to_cart(chat_id: int, item: Dict[str, Any]) -> None:
-    """Додає item до USER_CARTS[chat_id]. item must have keys: name, sku, price, qty, sizes"""
+    """Додає item до USER_CARTS[chat_id]. item keys: name, sku, price, qty, sizes"""
     USER_CARTS.setdefault(chat_id, []).append(item)
 
 def clear_cart(chat_id: int) -> None:
     USER_CARTS.pop(chat_id, None)
-    # також видалимо запис про footer, якщо є
+    # також видаляємо запис про footer, якщо є
     USER_CART_MSG.pop(chat_id, None)
 
 def get_cart_items(chat_id: int) -> List[Dict[str, Any]]:
@@ -553,7 +553,8 @@ def cart_total(cart_items: List[Dict[str, Any]]) -> int:
         except Exception:
             try:
                 total += int(float(price)) * qty
-            except:
+            except Exception:
+                # якщо не вдалося перетворити — ігноруємо
                 pass
     return total
 
@@ -563,14 +564,23 @@ def format_cart_contents(cart_items: List[Dict[str, Any]]) -> str:
     lines = ["🧾 Вміст корзини:"]
     for i, it in enumerate(cart_items, 1):
         sizes = it.get("sizes") or {}
-        sizes_txt = ", ".join([f"{k}:{v}" for k, v in sizes.items()]) if sizes else "—"
+        if isinstance(sizes, dict):
+            sizes_txt = ", ".join([f"{k}: {v}" for k, v in sizes.items()]) if sizes else "—"
+        else:
+            sizes_txt = str(sizes) if sizes else "—"
         price = it.get("price") or "—"
-        qty = it.get("qty") or 1
-        subtotal = (int(price) if isinstance(price, (int, float, str)) and str(price).isdigit() else price)
-        lines.append(f"{i}. {it.get('name','Товар')} ({sizes_txt}) — {price} грн × {qty} = {int(price)*int(qty) if isinstance(price,(int,float)) or str(price).isdigit() else '—'}")
+        qty = int(it.get("qty") or 1)
+        try:
+            subtotal = int(price) * qty
+        except Exception:
+            try:
+                subtotal = int(float(price)) * qty
+            except Exception:
+                subtotal = "—"
+        lines.append(f"{i}. {it.get('name','Товар')} ({sizes_txt}) — {price} грн × {qty} = {subtotal}")
     total = cart_total(cart_items)
     lines.append(f"\n💰 Загальна сума: {total} грн.")
-    lines.append("\nДля повного скасування натисніть: ❌ Повністю скасувати замовлення")
+    lines.append("\n❌ Для повного скасування натисніть: /clear_cart (або відповідну кнопку в інтерфейсі)")
     return "\n".join(lines)
 
 # ---------------- Routers / Handlers ----------------
@@ -1599,10 +1609,10 @@ def render_cart_text(cart_items: list):
     return "\n".join(lines)
 
 def cart_footer_kb(total: int):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🧾 ТУТ ВАША КОРЗИНА — Загальна: {total} грн", callback_data="cart:view")],
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🛒 ВАША КОРЗИНА — Загальна: {total} грн", callback_data="cart:show")],
+        [InlineKeyboardButton(text="❌ Повністю скасувати замовлення", callback_data="cart:clear")]
     ])
-    return kb
 
 # Add small handlers:
 @router.callback_query(F.data == "cart:view")
@@ -1629,37 +1639,125 @@ async def cb_cart_continue(cb: CallbackQuery, state: FSMContext):
     await state.set_state(OrderForm.delivery)
     await cb.answer()
 
-async def add_product_to_cart(state: FSMContext, product: dict, size_text: str, qty: int):
-    data = await state.get_data()
+async def resolve_callback_chat_id(cb: CallbackQuery, state: Optional[FSMContext] = None) -> Optional[int]:
+    """
+    Безпечний спосіб дістати chat_id у callback'ах.
+    Перевага: намагаємось взяти з state.data['chat_id'], якщо нема — беремо cb.from_user.id, якщо і цього нема — cb.message.chat.id.
+    Повертає None якщо нічого не вдалось дістати.
+    """
+    data = {}
+    try:
+        if state is not None:
+            data = await state.get_data() or {}
+    except Exception:
+        # state може бути None або недоступний у цьому контексті
+        data = {}
+
+    chat_id = data.get("chat_id")
+    if not chat_id:
+        # пріоритет — відправник callback (звичайний випадок)
+        try:
+            chat_id = cb.from_user.id
+        except Exception:
+            chat_id = None
+
+    # fallback — якщо callback прив'язаний до повідомлення в чаті
+    if not chat_id:
+        try:
+            chat_id = cb.message.chat.id
+        except Exception:
+            chat_id = None
+
+    return chat_id
+
+async def add_product_to_cart(
+    state: FSMContext,
+    product: dict,
+    size_text: str,
+    qty: int,
+    chat_id: Optional[int] = None
+):
+    """
+    Безпечне додавання товару до корзини в state + оновлення/створення 'footer' повідомлення з підсумком.
+
+    - product: dict (має ключі 'sku','name','final_price' або 'drop_price' і т.д.)
+    - size_text: рядок із вибраними розмірами/компонентами
+    - qty: кількість (int)
+    - chat_id: необов'язково — якщо передати, бот відправить footer саме в цей чат. Інакше
+      ми намагаємось взяти chat_id з state (cart_chat_id, chat_id, pib_chat, user_chat_id).
+    """
+    data = await state.get_data() or {}
+
+    # поточна корзина в state
     cart = data.get("cart_items") or []
-    unit_price = product.get("final_price") or 0
-    cart.append({
+
+    # нормалізація ціни в ціле число (грн)
+    raw_price = product.get("final_price") if product.get("final_price") is not None else product.get("drop_price") or 0
+    try:
+        unit_price = int(raw_price)
+    except Exception:
+        try:
+            unit_price = int(float(str(raw_price).replace(",", ".")))
+        except Exception:
+            unit_price = 0
+
+    item = {
         "sku": product.get("sku"),
-        "name": product.get("name"),
-        "size_text": size_text,
-        "qty": int(qty),
+        "name": product.get("name") or "Товар",
+        "size_text": size_text or "—",
+        "qty": int(qty or 1),
         "unit_price": int(unit_price)
-    })
+    }
+    cart.append(item)
     await state.update_data(cart_items=cart)
-    # update footer message - here we simply send/edit the footer in chat: get total
-    total = sum([it["unit_price"] * it["qty"] for it in cart])
-    # try to edit a stored footer message id if you store it in state, else send new
+
+    # підрахунок підсумку
+    total = sum(int(it.get("unit_price", 0)) * int(it.get("qty", 1)) for it in cart)
+
+    # розв'язуємо куди відправляти footer (порядок пріоритету)
+    resolved_chat = chat_id \
+        or data.get("cart_chat_id") \
+        or data.get("chat_id") \
+        or data.get("pib_chat") \
+        or data.get("user_chat_id")
+
+    # якщо chat не знайдено — збережемо cart у state, але не шлемо footer
+    if not resolved_chat:
+        # зберігаємо корзину і виходимо
+        await state.update_data(cart_items=cart)
+        return
+
     footer_msg_id = data.get("cart_footer_msg_id")
+    footer_text = f"🧾 ТУТ ВАША КОРЗИНА — Загальна: {total} грн."
+
+    # якщо в state є id footer-повідомлення — намагаємось його відредагувати
     if footer_msg_id:
         try:
             await bot.edit_message_text(
-                chat_id=cb_from := data.get("chat_id") or cb.from_user.id,
+                chat_id=resolved_chat,
                 message_id=footer_msg_id,
-                text=f"🧾 ТУТ ВАША КОРЗИНА — Загальна: {total} грн"
+                text=footer_text,
+                reply_markup=cart_footer_kb(total)
             )
+            # оновимо час/маркер останнього оновлення (необов'язково)
+            await state.update_data(cart_last_updated=datetime.now().isoformat())
+            return
         except Exception:
+            # якщо редагування не вдалось — відправимо нове повідомлення і замінимо id
             pass
-    else:
-        # send footer
-        msg = await bot.send_message(data.get("pib_chat") or data.get("user_chat_id") or (await state.get_data()).get("chat_id") or 0,
-                                     text=f"🧾 ТУТ ВАША КОРЗИНА — Загальна: {total} грн",
-                                     reply_markup=cart_footer_kb(total))
-        await state.update_data(cart_footer_msg_id=msg.message_id)
+
+    # відправляємо новий footer і зберігаємо його id
+    try:
+        msg = await bot.send_message(
+            resolved_chat,
+            text=footer_text,
+            reply_markup=cart_footer_kb(total)
+        )
+        await state.update_data(cart_footer_msg_id=msg.message_id, cart_chat_id=resolved_chat)
+    except Exception:
+        # якщо і відправити не вдалось — просто зберігаємо cart і викидаємо лог (не фатально)
+        logger.exception("Failed to send/update cart footer message")
+        await state.update_data(cart_items=cart)
 
 # --- Обробник вибору розміру через inline-кнопки (оновлений UX: Continue / Edit) ---
 @router.callback_query(F.data == "sizes:continue")
@@ -2256,18 +2354,35 @@ async def cb_cart_open(cb: CallbackQuery, state: FSMContext):
 # ---------------- Cart: clear ----------------
 @router.callback_query(F.data == "cart:clear")
 async def cart_clear(cb: CallbackQuery, state: FSMContext):
-    chat_id = cb.from_user.id
-    clear_cart(chat_id)
-    # видаляємо footer якщо був
-    meta = USER_CART_MSG.pop(chat_id, None)
-    if meta:
+    # Беремо chat id з cb (надійно), не використовуємо walrus
+    chat_id = None
+    try:
+        data = await state.get_data()
+    except Exception:
+        data = {}
+
+    chat_id = data.get("chat_id") or (cb.from_user.id if hasattr(cb, "from_user") else None)
+    if chat_id is None:
+        # fallback: якщо не вдалось визначити - використаємо cb.message.chat.id
         try:
-            await bot.delete_message(meta["chat_id"], meta["message_id"])
-        except:
-            pass
+            chat_id = cb.message.chat.id
+        except Exception:
+            chat_id = None
+
+    if chat_id is not None:
+        clear_cart(chat_id)
+
+        # видаляємо footer повідомлення, якщо воно збережено
+        meta = USER_CART_MSG.pop(chat_id, None)
+        if meta:
+            try:
+                await bot.delete_message(meta.get("chat_id", chat_id), meta.get("message_id"))
+            except Exception:
+                # не критично — ігноруємо
+                pass
+
     await cb.message.answer("❌ Замовлення повністю скасовано. Можете почати оформлення заново.")
     await cb.answer()
-
 
 def add_to_cart(chat_id: int, item: Dict[str, Any]) -> None:
     """Додає item до USER_CARTS[chat_id]. item must have keys: name, sku, price, qty, sizes"""
