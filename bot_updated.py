@@ -152,6 +152,7 @@ def build_products_index_from_xml(text: str):
       - by_sku: normalized sku -> product dict
       - by_name: token -> [product dicts]
       - all_products: список усіх товарів
+    Також враховуємо <param name="..."> для артикула, ціни, розмірів.
     """
     global PRODUCTS_INDEX
     PRODUCTS_INDEX = {"by_sku": {}, "by_name": {}, "all_products": []}
@@ -160,15 +161,11 @@ def build_products_index_from_xml(text: str):
         for event, elem in it:
             tag = _local_tag(elem.tag).lower()
             if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
-                elem.clear(); continue
+                elem.clear()
+                continue
 
             offer_id = (elem.attrib.get("id") or "").strip()
             vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"])
-
-            # SKU: якщо немає vendor_code → беремо offer_id
-            sku_raw = vendor_code or offer_id or ""
-            sku = normalize_sku(sku_raw)
-
             name = _find_first_text(elem, ["name", "title", "product", "model", "productname", "product_name"]) or offer_id
             drop_price = _find_first_numeric(elem, ["price", "drop", "cost", "value", "price_uah"])
             retail_price = _find_first_numeric(elem, ["rrc", "retail", "msrp", "oldprice"])
@@ -184,23 +181,30 @@ def build_products_index_from_xml(text: str):
                     except:
                         stock_qty = None
 
-            availability_param = elem.find(".//param[@name='Наявність']")
-            if availability_param is not None and availability_param.text:
-                if availability_param.text.strip().lower() in ["так", "yes", "true", "1"]:
-                    stock_qty = stock_qty or 1
-                    available = True
-                else:
-                    stock_qty = 0
-                    available = False
-            else:
-                available = (elem.attrib.get("available") or "").lower() in ["true", "1", "yes", "да"]
+            available = (elem.attrib.get("available") or "").lower() in ["true", "1", "yes", "да"]
 
-            # Опис, фото, розміри
+            # Опис, фото
             description = _find_first_text(elem, ["description"])
             pictures = [p.text.strip() for p in elem.findall(".//picture") if p.text]
-            sizes = [p.text.strip() for p in elem.findall(".//param[@name='Розмір']") if p.text] \
-                    or [p.text.strip() for p in elem.findall(".//param[@name='Размер']") if p.text]
+            sizes = []
 
+            # 🔥 NEW: обробка <param>
+            for p in elem.findall(".//param"):
+                pname = (p.attrib.get("name") or "").lower()
+                pval = (p.text or "").strip()
+                if not pval:
+                    continue
+                if "артикул" in pname and not vendor_code:
+                    vendor_code = pval
+                elif "цена" in pname or "дроп" in pname:
+                    try:
+                        drop_price = float(pval.replace(",", ".").replace(" ", ""))
+                    except:
+                        pass
+                elif "размер" in pname:
+                    sizes.append(pval)
+
+            sku = normalize_sku(vendor_code or offer_id or "")
             product = {
                 "offer_id": offer_id,
                 "sku": sku,
@@ -214,33 +218,28 @@ def build_products_index_from_xml(text: str):
                 "stock_qty": stock_qty,
                 "available": available,
             }
-
             PRODUCTS_INDEX["all_products"].append(product)
-
             if sku:
                 PRODUCTS_INDEX["by_sku"][sku] = product
-            if offer_id and offer_id != sku:
-                PRODUCTS_INDEX["by_sku"][normalize_sku(offer_id)] = product
-
-            # index name tokens
             for tok in re.findall(r'\w{3,}', (name or "").lower()):
                 PRODUCTS_INDEX["by_name"].setdefault(tok, []).append(product)
-
             elem.clear()
-    except Exception:
-        logger.exception("Failed to build products index")
 
-    # після завершення парсингу — дамо більше інформації у debug
-    try:
+        # ✅ Логуємо один раз після завершення парсингу
         total = len(PRODUCTS_INDEX["all_products"])
         sample = [p.get("sku") for p in PRODUCTS_INDEX["all_products"][:5]]
         logger.debug("Product index built: %s products total. First 5 SKUs: %s", total, sample)
-    except Exception as e:
-        logger.warning("Could not log product index summary: %s", e)
 
-def find_product_by_sku(sku: str) -> Optional[dict]:
+    except Exception:
+        logger.exception("Failed to build products index")
+
+def find_product_by_sku(sku: str) -> Tuple[Optional[dict], str]:
+    """
+    Пошук товару за SKU.
+    Повертає (product, method), де method = direct | candidate | linear | not_found
+    """
     if not sku:
-        return None
+        return None, "not_found"
     norm = normalize_sku(sku) or sku.strip().lower()
     by_sku = PRODUCTS_INDEX.get("by_sku", {})
 
@@ -250,7 +249,7 @@ def find_product_by_sku(sku: str) -> Optional[dict]:
     prod = by_sku.get(norm)
     if prod:
         logger.debug("Found product by direct match: %s", prod)
-        return prod
+        return prod, "direct"
 
     # пробуємо різні варіації (без нулів і т.п.)
     candidates = [norm, sku.strip().lower(), sku.strip().lstrip("0")]
@@ -263,17 +262,17 @@ def find_product_by_sku(sku: str) -> Optional[dict]:
         p = by_sku.get(c)
         if p:
             logger.debug("Found product by candidate '%s': %s", c, p)
-            return p
+            return p, f"candidate:{c}"
 
     # запасний варіант — лінійний пошук по всіх продуктах
     logger.debug("Fallback linear search for SKU='%s'", sku)
     for p in PRODUCTS_INDEX.get("all_products", []):
         if sku.strip().lower() in (p.get("sku") or "").lower() or sku.strip().lower() in (p.get("offer_id") or "").lower():
             logger.debug("Found product in linear search: %s", p)
-            return p
+            return p, "linear"
 
     logger.debug("Product not found for SKU='%s'", sku)
-    return None
+    return None, "not_found"
 
 # ---------------- global async loop holder ----------------
 # буде заповнений в main()
@@ -746,41 +745,14 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
         # якщо є автопrefill sku — запускаємо flow як ніби користувач ввів SKU
         if sku:
             sku_norm = normalize_sku(sku)
-            product = find_product_by_sku(sku_norm) or find_product_by_sku((sku_norm or "").lstrip("0"))
+            product, method = find_product_by_sku(sku_norm)
+            logger.debug(
+                "Deep link lookup result. SKU=%s (norm=%s), method=%s, product=%s",
+                sku, sku_norm, method, product
+            )
 
             if product:
-                drop_price = product.get("drop_price")
-                markup_price = None
-                if drop_price:
-                    raw_price = drop_price * 1.33  # +33% націнка
-                    markup_price = aggressive_round(raw_price)
-
-                sizes = ", ".join(product.get("sizes", [])) if product.get("sizes") else "—"
-                stock_qty = product.get("stock_qty") or 0
-                stock_text = "Є ✅" if stock_qty > 0 else "Немає ❌"
-                sku_line = product.get("sku") or product.get("offer_id") or "—"
-                article_line = product.get("vendor_code") or product.get("offer_id") or sku_line
-
-                text = (
-                    "🧾 Розпочнемо оформлення. Ось вибраний товар:\n"
-                    "✅ Знайдено товар:\n"
-                    f"📌 {sku_line}\n"
-                    f"🆔 Артикул: {article_line}\n"
-                    f"📛 Назва: {product.get('name')}\n"
-                    f"📦 Наявність: {stock_text} (кількість: {stock_qty})\n"
-                    f"📏 Розміри: {sizes}\n"
-                )
-
-                # показуємо ціни залежно від режиму
-                if mode == "test":
-                    text += (
-                        f"💵 Дроп ціна: {drop_price if drop_price else '—'} грн\n"
-                        f"💰 Орієнтовна ціна (з націнкою): {markup_price if markup_price else '—'} грн\n"
-                    )
-                else:
-                    text += f"💰 Ціна для клієнта: {markup_price if markup_price else '—'} грн\n"
-
-                text += "\n👉 Введіть кількість товару (число):"
+                text = render_product_text(product, mode, include_intro=True) + "\n👉 Введіть кількість товару (число):"
 
                 if product.get("pictures"):
                     await msg.answer_photo(product["pictures"][0], caption=text)
@@ -1480,19 +1452,23 @@ def aggressive_round(price: float) -> int:
 async def state_article(msg: Message, state: FSMContext):
     query = msg.text.strip()
 
-    # support confirmation "так"
+    product = None
+    method = None
+
+    # підтримка підтвердження "так"
     if query.lower() == "так":
         data = await state.get_data()
         last_suggestion = data.get("last_suggestion")
         if last_suggestion:
             product = last_suggestion
+            method = "last_suggestion"
         else:
             await msg.answer("Нема запропонованого товару для підтвердження — введіть артикул або назву.")
             return
     else:
-        product = await check_article_or_name(query)
+        # пробуємо знайти по SKU/назві
+        product, method = find_product_by_sku(query)
         if product and product.get("suggestion"):
-            # save for confirm
             await state.update_data(last_suggestion=product)
 
     # показуємо typing
@@ -1506,28 +1482,10 @@ async def state_article(msg: Message, state: FSMContext):
     state_data = await state.get_data()
     mode = state_data.get("mode", "client")
 
-    def price_block(prod, mode: str):
-        drop_price = prod.get("drop_price")
-        markup_price = None
-        if drop_price:
-            raw_price = drop_price * 1.33  # +33% націнка
-            markup_price = aggressive_round(raw_price)
-
-        if mode == "test":
-            logger.debug("Product debug (article search): %s", product)
-            return (
-                f"💵 Дроп ціна: {drop_price if drop_price else '—'} грн\n"
-                f"💰 Орієнтовна ціна (з націнкою): {markup_price if markup_price else '—'} грн\n"
-            )
-        else:
-            return f"💰 Ціна для клієнта: {markup_price if markup_price else '—'} грн\n"
+    logger.debug("Product debug (article search). Method=%s. Product=%s", method, product)
 
     # --- suggestion case ---
     if product.get("suggestion"):
-        sizes = ", ".join(product.get("sizes", [])) if product.get("sizes") else "—"
-        stock_text = "Є ✅" if product.get("stock_qty", 0) > 0 else "Немає ❌"
-        sku_line = product.get("sku") or "—"
-
         confirm_hint = (
             "Якщо це те, що треба — натисніть ✅ Підтвердити."
             if product.get("sku") else
@@ -1539,47 +1497,62 @@ async def state_article(msg: Message, state: FSMContext):
             [InlineKeyboardButton("⬅️ Назад", callback_data="flow:back_to_start")]
         ])
 
-        text = (
-            "🤔 Можливо ви мали на увазі:\n"
-            f"📌 {sku_line}\n"
-            f"🆔 Артикул: {product.get('vendor_code') or sku_line}\n"
-            f"📛 Назва: {product.get('name')}\n"
-            f"📦 Наявність: {stock_text} (кількість: {product.get('stock_qty') or 0})\n"
-            f"📏 Розміри: {sizes}\n"
-            f"{price_block(product, mode)}\n"
-            f"{confirm_hint}"
-        )
+        text = render_product_text(product, mode, include_intro=False) + f"\n\n{confirm_hint}"
 
         if product.get("pictures"):
             await msg.answer_photo(product["pictures"][0], caption=text, reply_markup=kb)
         else:
             await msg.answer(text, reply_markup=kb)
-
         return
 
     # --- якщо товар знайдено напряму ---
+    text = render_product_text(product, mode, include_intro=True) + "\n👉 Введіть кількість товару (число):"
+
+    if product.get("pictures"):
+        await msg.answer_photo(product["pictures"][0], caption=text)
+    else:
+        await msg.answer(text)
+
+    await state.set_state(OrderForm.amount)
+
+def render_product_text(product: dict, mode: str = "client", include_intro: bool = False) -> str:
+    """
+    Формуємо текст для показу товару користувачу.
+    - mode = "test" → показує дроп + націнку
+    - mode = "client" → тільки кінцеву ціну
+    - include_intro=True → додати шапку "🧾 Розпочнемо оформлення..."
+    """
+    drop_price = product.get("drop_price")
+    markup_price = None
+    if drop_price:
+        raw_price = drop_price * 1.33
+        markup_price = aggressive_round(raw_price)
+
     sizes = ", ".join(product.get("sizes", [])) if product.get("sizes") else "—"
     stock_qty = product.get("stock_qty") or 0
     stock_text = "Є ✅" if stock_qty > 0 else "Немає ❌"
     sku_line = product.get("sku") or "—"
 
-    text = (
-        "✅ Знайдено товар:\n"
+    if mode == "test":
+        price_block = (
+            f"💵 Дроп ціна: {drop_price if drop_price else '—'} грн\n"
+            f"💰 Орієнтовна ціна (з націнкою): {markup_price if markup_price else '—'} грн\n"
+        )
+    else:
+        price_block = f"💰 Ціна для клієнта: {markup_price if markup_price else '—'} грн\n"
+
+    intro = "🧾 Розпочнемо оформлення. Ось вибраний товар:\n" if include_intro else ""
+
+    return (
+        f"{intro}"
+        f"✅ Знайдено товар:\n"
         f"📌 {sku_line}\n"
         f"🆔 Артикул: {product.get('vendor_code') or sku_line}\n"
         f"📛 Назва: {product.get('name')}\n"
         f"📦 Наявність: {stock_text} (кількість: {stock_qty})\n"
         f"📏 Розміри: {sizes}\n"
-        f"{price_block(product, mode)}\n"
-        "👉 Введіть кількість товару (число):"
+        f"{price_block}"
     )
-
-    if product.get("pictures"):
-        await msg.answer_photo(product["pictures"][0], caption=text, reply_markup=kb)
-    else:
-        await msg.answer(text, reply_markup=kb)
-
-    await state.set_state(OrderForm.amount)
 
 @router.callback_query(F.data == "suggest:back")
 async def cb_suggest_back(cb: CallbackQuery, state: FSMContext):
