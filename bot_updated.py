@@ -1024,14 +1024,27 @@ def _find_first_numeric_text(elem, candidates):
                     continue
     return None
 
-def _find_first_text(elem, candidates):
-    """Шукає перший під-елемент з тегом в candidates та повертає його текст."""
-    for child in elem.iter():
-        name = _local_tag(child.tag).lower()
-        if any(name == c for c in candidates) or any(c in name for c in candidates):
-            txt = (child.text or "").strip()
-            if txt:
-                return txt
+def _find_first_text(elem, tags: list[str]) -> Optional[str]:
+    for t in tags:
+        for child in elem.findall(f".//{t}"):
+            if child.text:
+                return child.text.strip()
+    return None
+
+
+def _find_first_numeric(elem, tags: list[str]) -> Optional[float]:
+    """
+    Шукає перший тег з числами (float) серед можливих назв.
+    Повертає float або None.
+    """
+    for t in tags:
+        for child in elem.findall(f".//{t}"):
+            if child.text:
+                txt = child.text.strip().replace(",", ".").replace(" ", "")
+                try:
+                    return float(txt)
+                except ValueError:
+                    continue
     return None
 
 def parse_components_from_description(desc: str):
