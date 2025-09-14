@@ -708,7 +708,6 @@ return
 # fallback: не відомий формат args — запит стандартний
 await msg.answer("Невідомий deep link. Розпочнемо звичайне оформлення.\nВведіть ваші ПІБ:")
 await state.set_state(OrderForm.pib)
-        return
 
     # fallback: не відомий формат args — запит стандартний
     await msg.answer("Невідомий deep link. Розпочнемо звичайне оформлення.\nВведіть ваші ПІБ:")
