@@ -1311,9 +1311,8 @@ COMPONENT_KEYWORDS = ["шап", "шапка", "рукав", "рукави", "р�
 
 async def show_product_and_ask_quantity(msg: Message, state: FSMContext, product: Dict[str, Any]):
     """
-    Показує фото і назву товару, показує блок цін згідно mode,
-    показує клавіатуру розмірів якщо є components (перший компонент),
-    або запитує кількість товару.
+    Показує фото, назву товару, ціни (дроп і з націнкою),
+    доступні розміри або запитує кількість.
     Зберігає у state базову інформацію про product.
     """
     # збережемо в state основні поля
@@ -1331,34 +1330,39 @@ async def show_product_and_ask_quantity(msg: Message, state: FSMContext, product
     mode = sdata.get("mode", "client")
 
     def _price_block(prod):
+        drop_price = prod.get("drop_price")
+        final_price = prod.get("final_price") or (apply_markup(drop_price) if drop_price else None)
+
         if mode == "test":
             return (
-                f"💰 Орієнтовна ціна (з націнкою): {prod.get('final_price') or '—'} грн\n"
-                f"💵 Дроп ціна: {prod.get('drop_price') or '—'} грн\n"
+                f"💰 Орієнтовна ціна (з націнкою): {final_price or '—'} грн\n"
+                f"💵 Дроп ціна: {drop_price or '—'} грн\n"
             )
         else:
-            return f"💰 Ціна для клієнта: {prod.get('final_price') or '—'} грн\n"
+            return f"💰 Ціна для клієнта: {final_price or '—'} грн\n"
 
-    # Надішлемо фото, якщо є (product['picture'] може бути URL або список)
+    # Надішлемо фото, якщо є
     pic = product.get("picture")
     try:
         if pic:
-            if isinstance(pic, (list, tuple)):
-                pic_url = pic[0]
-            else:
-                pic_url = pic
-            # спробуємо відправити як photo
-            await bot.send_photo(msg.chat.id, photo=pic_url,
-                                 caption=f"🔖 <b>{product.get('name') or 'Товар'}</b>\n🆔 {product.get('sku') or '—'}",
-                                 parse_mode=ParseMode.HTML)
+            pic_url = pic[0] if isinstance(pic, (list, tuple)) else pic
+            await bot.send_photo(
+                msg.chat.id,
+                photo=pic_url,
+                caption=(
+                    f"📌 <b>{product.get('name') or 'Товар'}</b>\n"
+                    f"🆔 Артикул: <b>{product.get('sku') or '—'}</b>"
+                ),
+                parse_mode=ParseMode.HTML
+            )
     except Exception:
-        # якщо не вдалось фото — ігноруєм
-        pass
+        pass  # якщо не вдалось фото — ігноруєм
 
     stock_text = product.get("stock_text") or "—"
     components = product.get("components")
+    sizes = product.get("sizes") or []
 
-    # Якщо є компоненти — покажемо перший і кнопки вибору розміру
+    # Якщо є компоненти (наприклад, розміри з опціями)
     if components:
         first = components[0]
         opts = first.get("options") or []
@@ -1366,22 +1370,21 @@ async def show_product_and_ask_quantity(msg: Message, state: FSMContext, product
             kb = build_size_keyboard(0, opts)
             await msg.answer(
                 f"✅ Знайдено товар:\n"
-                f"🔖 <b>{product.get('name')}</b>\n"
+                f"📌 <b>{product.get('name')}</b>\n"
                 f"🆔 Артикул: <b>{product.get('sku') or '—'}</b>\n"
                 f"📦 Наявність: <b>{stock_text}</b>\n"
-                f"{_price_block(product)}\n\n"
+                f"{_price_block(product)}\n"
                 f"📏 Виберіть розмір для: <b>{first.get('name') or 'Розмір'}</b>",
                 reply_markup=kb
             )
             await state.set_state(OrderForm.size)
             return
-        # якщо компонент без опцій — просто запитуємо кількість далі
 
-    # якщо нема компонентів або опцій — просто показуємо і просимо кількість
-    sizes_text = f"\n📏 Розміри: {', '.join(product.get('sizes') or [])}" if product.get("sizes") else ""
+    # Якщо немає компонентів — просто показуємо і просимо кількість
+    sizes_text = f"\n📏 Розміри: {', '.join(sizes)}" if sizes else ""
     await msg.answer(
         f"✅ Знайдено товар:\n"
-        f"🔖 <b>{product.get('name')}</b>\n"
+        f"📌 <b>{product.get('name')}</b>\n"
         f"🆔 Артикул: <b>{product.get('sku') or '—'}</b>\n"
         f"📦 Наявність: <b>{stock_text}</b>\n"
         f"{_price_block(product)}"
@@ -1389,8 +1392,6 @@ async def show_product_and_ask_quantity(msg: Message, state: FSMContext, product
         "👉 Введіть кількість товару (число):"
     )
     await state.set_state(OrderForm.amount)
-
-
 
 async def find_component_sizes(product_name: str) -> Dict[str, List[str]]:
     """
