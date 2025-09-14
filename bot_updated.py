@@ -684,16 +684,21 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
         logger.info("Start deep link: mode=%s post_id=%s sku=%s", mode, post_id, sku)
 
         # якщо є автопrefill sku — запускаємо flow як ніби користувач ввів SKU
-        if sku:
-            sku_norm = normalize_sku(sku)
-product = await check_article_or_name(sku_norm) or await check_article_or_name(sku_norm.lstrip("0"))
-            if product:
-                await msg.answer("🧾 Розпочнемо оформлення. Ось вибраний товар:")
-                await show_product_and_ask_quantity(msg, state, product)
-            else:
-                await msg.answer("⚠️ Товар з таким артикулом не знайдено. Введіть артикул або назву вручну.")
-                await state.set_state(OrderForm.article)
-                return
+if sku:
+    sku_norm = normalize_sku(sku)
+    product = await check_article_or_name(sku_norm) or await check_article_or_name(sku_norm.lstrip("0"))
+    if product:
+        await msg.answer("🧾 Розпочнемо оформлення. Ось вибраний товар:")
+        await show_product_and_ask_quantity(msg, state, product)
+    else:
+        await msg.answer("⚠️ Товар з таким артикулом не знайдено. Введіть артикул або назву вручну.")
+        await state.set_state(OrderForm.article)
+        return
+
+    # одразу переходимо до ПІБ після показу товару
+    await msg.answer("✍️ Введіть ваші ПІБ:")
+    await state.set_state(OrderForm.pib)
+    return
 
             # одразу переходимо до ПІБ після показу товару
             await msg.answer("✍️ Введіть ваші ПІБ:")
