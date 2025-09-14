@@ -132,20 +132,6 @@ def normalize_sku(s: Optional[str]) -> Optional[str]:
     # keep alnum + - _
     return re.sub(r'[^a-z0-9\-_]', '', s)
 
-def _find_first_numeric(elem: Any, tags: list[str]) -> Optional[float]:
-    """
-    Шукає перший числовий тег у XML-елементі.
-    Повертає float або None.
-    """
-    for tag in tags:
-        child = elem.find(tag)
-        if child is not None and child.text:
-            try:
-                return float(child.text.strip())
-            except ValueError:
-                continue
-    return None
-
 def build_products_index_from_xml(text: str):
     """
     Парсимо XML і будуємо індекс товарів:
@@ -204,10 +190,14 @@ def build_products_index_from_xml(text: str):
                 elif "размер" in pname:
                     sizes.append(pval)
 
-            sku = normalize_sku(vendor_code or offer_id or "")
+            # ✅ Тепер зберігаємо і raw, і нормалізований артикул
+            raw_sku = vendor_code or offer_id or ""
+            norm_sku = normalize_sku(raw_sku)
+
             product = {
                 "offer_id": offer_id,
-                "sku": sku,
+                "sku": norm_sku,          # нормалізований
+                "raw_sku": raw_sku,       # оригінальний
                 "vendor_code": vendor_code,
                 "name": name,
                 "description": description,
@@ -219,15 +209,15 @@ def build_products_index_from_xml(text: str):
                 "available": available,
             }
             PRODUCTS_INDEX["all_products"].append(product)
-            if sku:
-                PRODUCTS_INDEX["by_sku"][sku] = product
+            if norm_sku:
+                PRODUCTS_INDEX["by_sku"][norm_sku] = product
             for tok in re.findall(r'\w{3,}', (name or "").lower()):
                 PRODUCTS_INDEX["by_name"].setdefault(tok, []).append(product)
             elem.clear()
 
-        # ✅ Логуємо один раз після завершення парсингу
+        # ✅ Логуємо з raw_sku і norm_sku
         total = len(PRODUCTS_INDEX["all_products"])
-        sample = [p.get("sku") for p in PRODUCTS_INDEX["all_products"][:5]]
+        sample = [(p.get("raw_sku"), p.get("sku")) for p in PRODUCTS_INDEX["all_products"][:5]]
         logger.debug("Product index built: %s products total. First 5 SKUs: %s", total, sample)
 
     except Exception:
@@ -235,20 +225,22 @@ def build_products_index_from_xml(text: str):
 
 def find_product_by_sku(sku: str) -> Tuple[Optional[dict], str]:
     """
-    Пошук товару за SKU.
-    Повертає (product, method), де method = direct | candidate | linear | not_found
+    Шукаємо товар за SKU (артикулом).
+    Повертає (product, method), де method = спосіб пошуку.
     """
     if not sku:
-        return None, "not_found"
+        return None, "empty"
+
     norm = normalize_sku(sku) or sku.strip().lower()
     by_sku = PRODUCTS_INDEX.get("by_sku", {})
 
-    logger.debug("Searching for SKU='%s' (normalized='%s')", sku, norm)
+    logger.debug("Searching product: input='%s', normalized='%s'", sku, norm)
 
     # прямий збіг
     prod = by_sku.get(norm)
     if prod:
-        logger.debug("Found product by direct match: %s", prod)
+        logger.debug("Found by direct match: input='%s', raw_sku='%s', norm_sku='%s'",
+                     sku, prod.get("raw_sku"), prod.get("sku"))
         return prod, "direct"
 
     # пробуємо різні варіації (без нулів і т.п.)
@@ -258,20 +250,22 @@ def find_product_by_sku(sku: str) -> Tuple[Optional[dict], str]:
         if not c or c in seen:
             continue
         seen.add(c)
-        logger.debug("Trying candidate SKU='%s'", c)
+        logger.debug("Trying candidate='%s'", c)
         p = by_sku.get(c)
         if p:
-            logger.debug("Found product by candidate '%s': %s", c, p)
+            logger.debug("Found by candidate: input='%s', candidate='%s', raw_sku='%s', norm_sku='%s'",
+                         sku, c, p.get("raw_sku"), p.get("sku"))
             return p, f"candidate:{c}"
 
     # запасний варіант — лінійний пошук по всіх продуктах
-    logger.debug("Fallback linear search for SKU='%s'", sku)
+    logger.debug("Fallback linear search for input='%s'", sku)
     for p in PRODUCTS_INDEX.get("all_products", []):
-        if sku.strip().lower() in (p.get("sku") or "").lower() or sku.strip().lower() in (p.get("offer_id") or "").lower():
-            logger.debug("Found product in linear search: %s", p)
+        if sku.strip().lower() in (p.get("sku") or "").lower() or sku.strip().lower() in (p.get("raw_sku") or "").lower():
+            logger.debug("Found in linear search: input='%s', raw_sku='%s', norm_sku='%s'",
+                         sku, p.get("raw_sku"), p.get("sku"))
             return p, "linear"
 
-    logger.debug("Product not found for SKU='%s'", sku)
+    logger.debug("❌ Product not found: input='%s', normalized='%s'", sku, norm)
     return None, "not_found"
 
 # ---------------- global async loop holder ----------------
@@ -1517,21 +1511,27 @@ async def state_article(msg: Message, state: FSMContext):
 
 def render_product_text(product: dict, mode: str = "client", include_intro: bool = False) -> str:
     """
-    Формуємо текст для показу товару користувачу.
-    - mode = "test" → показує дроп + націнку
-    - mode = "client" → тільки кінцеву ціну
-    - include_intro=True → додати шапку "🧾 Розпочнемо оформлення..."
+    Формує красивий текст для товару.
+    mode="test" -> показуємо дроп + клієнтську ціну
+    mode="client" -> тільки клієнтську ціну
     """
+    intro = "🧾 Розпочнемо оформлення. Ось вибраний товар:\n\n" if include_intro else ""
+
+    sku_line = product.get("sku") or "—"
+    vendor_code = product.get("vendor_code") or sku_line
+    name = product.get("name") or "Без назви"
+
+    stock_qty = product.get("stock_qty") or 0
+    stock_text = "Є ✅" if stock_qty > 0 else "Немає ❌"
+
+    sizes = ", ".join(product.get("sizes", [])) if product.get("sizes") else "—"
+
+    # ціни
     drop_price = product.get("drop_price")
     markup_price = None
     if drop_price:
         raw_price = drop_price * 1.33
         markup_price = aggressive_round(raw_price)
-
-    sizes = ", ".join(product.get("sizes", [])) if product.get("sizes") else "—"
-    stock_qty = product.get("stock_qty") or 0
-    stock_text = "Є ✅" if stock_qty > 0 else "Немає ❌"
-    sku_line = product.get("sku") or "—"
 
     if mode == "test":
         price_block = (
@@ -1541,18 +1541,26 @@ def render_product_text(product: dict, mode: str = "client", include_intro: bool
     else:
         price_block = f"💰 Ціна для клієнта: {markup_price if markup_price else '—'} грн\n"
 
-    intro = "🧾 Розпочнемо оформлення. Ось вибраний товар:\n" if include_intro else ""
+    # опис (обрізаємо, щоб Telegram не порізав)
+    desc = product.get("description") or ""
+    if desc:
+        desc = re.sub(r"\s+", " ", desc).strip()
+        if len(desc) > 500:
+            desc = desc[:500] + "..."
 
-    return (
+    description_block = f"\n📝 Опис:\n{desc}\n" if desc else ""
+
+    text = (
         f"{intro}"
-        f"✅ Знайдено товар:\n"
-        f"📌 {sku_line}\n"
-        f"🆔 Артикул: {product.get('vendor_code') or sku_line}\n"
-        f"📛 Назва: {product.get('name')}\n"
+        f"📌 Артикул: {vendor_code}\n"
+        f"📛 Назва: {name}\n"
         f"📦 Наявність: {stock_text} (кількість: {stock_qty})\n"
         f"📏 Розміри: {sizes}\n"
         f"{price_block}"
+        f"{description_block}"
     )
+
+    return text
 
 @router.callback_query(F.data == "suggest:back")
 async def cb_suggest_back(cb: CallbackQuery, state: FSMContext):
