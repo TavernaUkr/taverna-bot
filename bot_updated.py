@@ -128,7 +128,13 @@ INDEX_TTL = 1800  # 30 хвилин — перевобудовувати пер�
 def normalize_sku(s: Optional[str]) -> Optional[str]:
     if not s:
         return None
-    return str(s).strip().lstrip("0").upper()
+    s = str(s).strip().lower()
+    # remove spaces and leading zeros for numeric-like skus
+    s = re.sub(r'\s+', '', s)
+    if s.isdigit():
+        return str(int(s))  # "0099" -> "99"
+    # keep alnum + - _
+    return re.sub(r'[^a-z0-9\-_]', '', s)
 
 def build_products_index_from_xml(text: str):
     """
@@ -867,13 +873,6 @@ async def build_products_index(xml_text: str):
     Build quick in-memory index for fast searches.
     Each product_dict contains keys: name, sku, offer_id, drop_price, final_price, stock_text, stock_qty, components, pictures (list)
     """
-    global PRODUCTS_INDEX
-    PRODUCTS_INDEX = {
-        "by_sku": {},
-        "by_offer": {},
-        "by_name_tokens": defaultdict(set),
-        "items": []
-    }
     try:
         it = ET.iterparse(io.StringIO(xml_text), events=("end",))
         for event, elem in it:
@@ -1173,14 +1172,14 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     if prod:
         return prod
 
-     # 2. точний пошук по SKU (враховуємо 0999 vs 999)
-     candidates = [qlow]
-     if qlow.isdigit():
-         candidates.append(qlow.lstrip("0"))  # "0999" -> "999"
-     for cand in candidates:
-         prod = PRODUCTS_INDEX["by_sku"].get(cand)
-         if prod:
-             return prod
+    # 2. точний пошук по SKU (враховуємо 0999 vs 999)
+    candidates = [qlow]
+    if qlow.isdigit():
+        candidates.append(qlow.lstrip("0"))  # "0999" -> "999"
+    for cand in candidates:
+        prod = PRODUCTS_INDEX["by_sku"].get(cand)
+        if prod:
+            return prod
 
     # 3) numeric query -> try sku by stripped numeric
     if re.fullmatch(r"\d{2,}", qlow):
