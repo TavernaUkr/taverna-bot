@@ -685,30 +685,29 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
 
         # якщо є автопrefill sku — запускаємо flow як ніби користувач ввів SKU
 # усередині async функції, яка обробляє deep link
-if sku:
-    sku_norm = normalize_sku(sku)
-    product = await check_article_or_name(sku_norm) or await check_article_or_name(sku_norm.lstrip("0"))
-    if product:
-        await msg.answer("🧾 Розпочнемо оформлення. Ось вибраний товар:")
-        await show_product_and_ask_quantity(msg, state, product)
+        # якщо є автопrefill sku — запускаємо flow як ніби користувач ввів SKU
+        if sku:
+            sku_norm = normalize_sku(sku)
+            # пробуємо спочатку з нормалізованим, потім з версією без ведучих нулів
+            product = await check_article_or_name(sku_norm) or await check_article_or_name((sku_norm or "").lstrip("0"))
 
-        # одразу переходимо до ПІБ після показу товару
-        await msg.answer("✍️ Введіть ваші ПІБ:")
+            if product:
+                await msg.answer("🧾 Розпочнемо оформлення. Ось вибраний товар:")
+                await show_product_and_ask_quantity(msg, state, product)
+
+                # одразу переходимо до ПІБ після показу товару
+                await msg.answer("✍️ Введіть ваші ПІБ:")
+                await state.set_state(OrderForm.pib)
+                return
+            else:
+                await msg.answer("⚠️ Товар з таким артикулом не знайдено. Введіть артикул або назву вручну.")
+                await state.set_state(OrderForm.article)
+                return
+
+        # якщо SKU немає — просимо ПІБ як зазвичай
+        await msg.answer("🧾 Розпочнемо оформлення. Введіть ваші ПІБ:")
         await state.set_state(OrderForm.pib)
         return
-    else:
-        await msg.answer("⚠️ Товар з таким артикулом не знайдено. Введіть артикул або назву вручну.")
-        await state.set_state(OrderForm.article)
-        return
-else:
-    # якщо SKU немає — просимо ПІБ як зазвичай
-    await msg.answer("🧾 Розпочнемо оформлення. Введіть ваші ПІБ:")
-    await state.set_state(OrderForm.pib)
-    return
-
-# fallback: не відомий формат args — запит стандартний
-await msg.answer("Невідомий deep link. Розпочнемо звичайне оформлення.\nВведіть ваші ПІБ:")
-await state.set_state(OrderForm.pib)
 
 # ---------------- Test command ----------------
 @router.message(Command("publish_test"))
