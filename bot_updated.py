@@ -141,24 +141,39 @@ def build_products_index_from_xml(text: str):
     Проходимо весь xml і будуємо простий індекс:
       - by_sku: normalized sku -> product dict
       - by_name: token -> [product dicts]
-
-    Викликається один раз після load_products_export.
+      - all_products: список всіх товарів
     """
     global PRODUCTS_INDEX
-    PRODUCTS_INDEX = {"by_sku": {}, "by_name": {}, "all_products": []}
+    PRODUCTS_INDEX = {"by_sku": {}, "by_offer": {}, "by_name": {}, "all_products": []}
+
     try:
         it = ET.iterparse(io.StringIO(text), events=("end",))
         for event, elem in it:
             tag = _local_tag(elem.tag).lower()
             if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
-                elem.clear(); continue
+                elem.clear()
+                continue
 
+            # базові атрибути
             offer_id = (elem.attrib.get("id") or "").strip()
             vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"])
             name = _find_first_text(elem, ["name", "title", "product", "model", "productname", "product_name"]) or offer_id
-            drop_price = _find_first_numeric(elem, ["price","drop","cost","value","price_uah"])  # helper, see below
-            retail_price = _find_first_numeric(elem, ["rrc","retail","msrp","oldprice"])
+
+            # ціни
+            drop_price = _find_first_numeric(elem, ["price", "drop", "cost", "value", "price_uah"])
+            retail_price = _find_first_numeric(elem, ["rrc", "retail", "msrp", "oldprice"])
+
+            # якщо нема final_price – рахуємо від дроп ціни
+            final_price = None
+            if drop_price is not None:
+                try:
+                    final_price = apply_markup(float(drop_price))
+                except Exception:
+                    final_price = float(drop_price)
+
+            # кількість/наявність
             stock_qty = None
+            stock_text = None
             qtxt = _find_first_text(elem, ["quantity", "quantity_in_stock", "stock", "available_quantity", "count"])
             if qtxt:
                 m = re.search(r'\d+', qtxt.replace(" ", ""))
@@ -167,7 +182,22 @@ def build_products_index_from_xml(text: str):
                         stock_qty = int(m.group(0))
                     except:
                         stock_qty = None
+                stock_text = "Є" if (not stock_qty or stock_qty > 0) else "Немає"
+
+            # фото
+            pictures = [p.text for p in elem.findall("picture") if p.text]
+
+            # розміри (param name="Размер")
+            sizes = []
+            for p in elem.findall("param"):
+                if p.get("name") and "размер" in p.get("name").lower():
+                    if p.text and p.text.strip():
+                        sizes.append(p.text.strip())
+
+            # SKU
             sku = normalize_sku(vendor_code or offer_id or "")
+
+            # формуємо продукт
             product = {
                 "offer_id": offer_id,
                 "sku": sku,
@@ -175,16 +205,25 @@ def build_products_index_from_xml(text: str):
                 "name": name,
                 "drop_price": float(drop_price) if drop_price is not None else None,
                 "retail_price": float(retail_price) if retail_price is not None else None,
+                "final_price": final_price,
                 "stock_qty": stock_qty,
-                "components": None  # keep raw for now; you can re-run your components extractor if needed
+                "stock_text": stock_text or ("Є" if sizes else "Немає"),
+                "picture": pictures,
+                "sizes": sizes,
+                "components": None,  # на майбутнє
             }
+
+            # додаємо в індекси
             PRODUCTS_INDEX["all_products"].append(product)
             if sku:
                 PRODUCTS_INDEX["by_sku"][sku] = product
-            # index name tokens
+            if offer_id:
+                PRODUCTS_INDEX["by_offer"][offer_id.lower()] = product
             for tok in re.findall(r'\w{3,}', (name or "").lower()):
                 PRODUCTS_INDEX["by_name"].setdefault(tok, []).append(product)
+
             elem.clear()
+
     except Exception:
         logger.exception("Failed to build products index")
 
