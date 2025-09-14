@@ -110,6 +110,8 @@ PRODUCTS_CACHE = {
 }
 CACHE_TTL = 900  # 15 хвилин (900 секунд)
 
+PRODUCTS_EXPORT_CACHE: Optional[str] = None
+
 # ---------------- Index for fast lookup ----------------
 PRODUCTS_INDEX = {
     "by_sku": {},
@@ -884,18 +886,15 @@ async def load_products_export(force: bool = False) -> Optional[str]:
         return PRODUCTS_EXPORT_CACHE
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(EXPORT_URL) as resp:
+            async with session.get(MYDROP_EXPORT_URL) as resp:   # 🔄 тут заміна
                 text = await resp.text()
                 if not text:
                     raise RuntimeError("Empty export")
                 PRODUCTS_EXPORT_CACHE = text
-
-                # логування
+                PRODUCTS_CACHE["last_update"] = datetime.utcnow()   # 🔄 оновлення кешу
+                PRODUCTS_CACHE["data"] = text
                 logger.info("✅ Завантажено нову вигрузку (%d символів)", len(text))
-
-                # будуємо індекс (синхронна функція)
                 build_products_index_from_xml(text)
-
                 return text
     except Exception:
         logger.exception("Помилка завантаження вигрузки")
@@ -1052,7 +1051,7 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     qlow = q.lower().strip()
 
     # ensure we have index
-    if not PRODUCTS_INDEX.get("items"):
+    if not PRODUCTS_INDEX.get("all_products"):
         text = await load_products_export(force=False)
         if not text:
             return None
@@ -1086,7 +1085,7 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
         # try to find products that contain all tokens (intersection)
         sets = []
         for t in qtokens:
-            s = PRODUCTS_INDEX["by_name_tokens"].get(t)
+            s = PRODUCTS_INDEX["by_name"].get(t)
             if s:
                 sets.append(s)
         if sets:
