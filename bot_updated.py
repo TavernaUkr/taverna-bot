@@ -1878,16 +1878,80 @@ async def cb_sizes_edit(cb: CallbackQuery, state: FSMContext):
     await state.set_state(OrderForm.size)
     await cb.answer("Почніть заново вибір розмірів.")
 
-# після збереження amount у state_amount, замість direct order:
-cart = await add_to_cart(msg.from_user.id, product_dict, qty, data.get("selected_sizes") or {})
-await send_or_update_cart_footer(msg.chat.id, msg.from_user.id, bot, state)
-# і показати options
-kb = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton("Вибрати товар на каналі", callback_data="choose:channel")],
-    [InlineKeyboardButton("Вибрати товар по назві/артикулу", callback_data="choose:search")],
-    [InlineKeyboardButton("Вибрати спосіб доставки", callback_data="choose:delivery")],
-])
-await msg.answer("Товар додано до кошика. Що робимо далі?", reply_markup=kb)
+def load_cart(chat_id: int) -> Dict[str, Any]:
+    """Повертає dict {'items': [...]}. Якщо немає — повертає {'items':[]}."""
+    try:
+        f = Path(ORDERS_DIR) / f"cart_{chat_id}.json"
+        if f.exists():
+            return json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        logger.exception("load_cart failed for %s", chat_id)
+    return {"items": []}
+
+def save_cart(chat_id: int, cart_obj: Dict[str, Any]) -> None:
+    try:
+        f = Path(ORDERS_DIR) / f"cart_{chat_id}.json"
+        f.write_text(json.dumps(cart_obj, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        logger.exception("save_cart failed for %s", chat_id)
+
+# ---------- Unified async function to add product to cart ----------
+async def add_product_to_cart(state: FSMContext, product: Dict[str, Any], size_text: str, qty: int, chat_id: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Додає товар у корзину користувача.
+    - state: FSMContext (щоб працювати з даними сесії)
+    - product: dict із ключами name, sku, final_price (або price)
+    - size_text: рядок/опис розмірів (наприклад: "Штани: 48, Футболка: M")
+    - qty: кількість (int)
+    - chat_id: необов'язково — якщо не переданий, спробуємо знайти у state.data
+    Повертає оновлений cart dict (structure {'items': [...]})
+    """
+    data = await state.get_data()
+    # визначаємо chat_id
+    c_id = chat_id or data.get("chat_id") or data.get("user_chat_id") or (data.get("from_user_id") if data.get("from_user_id") else None)
+    if not c_id:
+        # на випадок, коли немає chat_id — від user object з state або помилка
+        # спробуємо з message context з state (зазвичай хендлери викликають цю функцію всередині message/callback, тому має бути доступ)
+        # якщо немає — кидаємо ValueError
+        raise ValueError("chat_id not found: передайте chat_id у виклик add_product_to_cart або збережіть його у state")
+
+    # сформуємо item
+    unit_price = product.get("final_price") or product.get("price") or 0
+    try:
+        unit_price = int(unit_price)
+    except Exception:
+        try:
+            unit_price = int(float(unit_price))
+        except Exception:
+            unit_price = 0
+
+    item = {
+        "sku": product.get("sku") or "",
+        "name": product.get("name") or "",
+        "sizes": size_text or "—",
+        "qty": int(qty),
+        "unit_price": unit_price,
+        "drop_price": product.get("drop_price"),
+        "added_at": datetime.now().isoformat()
+    }
+
+    # завантажимо існуючу корзину, додамо позицію, збережемо
+    cart_obj = load_cart(c_id)
+    items = cart_obj.get("items") or []
+    items.append(item)
+    cart_obj["items"] = items
+    save_cart(c_id, cart_obj)
+
+    # оновлюємо в state (щоб інші частини коду бачили поточну корзину)
+    await state.update_data(cart_items=items)
+
+    # оновлюємо/створюємо футер-кнопку корзини в чаті
+    try:
+        await ensure_or_update_cart_footer(c_id)
+    except Exception:
+        logger.exception("Failed to update_or_send_cart_footer after add_product_to_cart for %s", c_id)
+
+    return cart_obj
 
 @router.callback_query(F.data == "suggest:confirm")
 async def suggest_confirm(cb: CallbackQuery, state: FSMContext):
