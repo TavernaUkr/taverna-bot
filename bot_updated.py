@@ -148,41 +148,28 @@ def _find_first_numeric(elem: Any, tags: list[str]) -> Optional[float]:
 
 def build_products_index_from_xml(text: str):
     """
-    Побудова індексу товарів з XML:
+    Парсимо XML і будуємо індекс товарів:
       - by_sku: normalized sku -> product dict
-      - by_offer: offer_id -> product dict
       - by_name: token -> [product dicts]
-      - all_products: список усіх продуктів
+      - all_products: список усіх товарів
     """
     global PRODUCTS_INDEX
-    PRODUCTS_INDEX = {"by_sku": {}, "by_offer": {}, "by_name": {}, "all_products": []}
-
+    PRODUCTS_INDEX = {"by_sku": {}, "by_name": {}, "all_products": []}
     try:
         it = ET.iterparse(io.StringIO(text), events=("end",))
         for event, elem in it:
             tag = _local_tag(elem.tag).lower()
             if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
-                elem.clear()
-                continue
+                elem.clear(); continue
 
-            # --- основні дані ---
             offer_id = (elem.attrib.get("id") or "").strip()
             vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"])
             name = _find_first_text(elem, ["name", "title", "product", "model", "productname", "product_name"]) or offer_id
+            drop_price = _find_first_numeric(elem, ["price","drop","cost","value","price_uah"])
+            retail_price = _find_first_numeric(elem, ["rrc","retail","msrp","oldprice"])
 
-            # --- ціни ---
-            drop_price = _find_first_numeric(elem, ["price", "drop", "cost", "value", "price_uah"])
-            retail_price = _find_first_numeric(elem, ["rrc", "retail", "msrp", "oldprice"])
-            final_price = None
-            if drop_price is not None:
-                try:
-                    final_price = apply_markup(float(drop_price))
-                except Exception:
-                    final_price = float(drop_price)
-
-            # --- наявність ---
+            # Наявність і кількість
             stock_qty = None
-            stock_text = None
             qtxt = _find_first_text(elem, ["quantity", "quantity_in_stock", "stock", "available_quantity", "count"])
             if qtxt:
                 m = re.search(r'\d+', qtxt.replace(" ", ""))
@@ -191,48 +178,35 @@ def build_products_index_from_xml(text: str):
                         stock_qty = int(m.group(0))
                     except:
                         stock_qty = None
-                stock_text = "Є" if (not stock_qty or stock_qty > 0) else "Немає"
 
-            # --- фото ---
-            pictures = [p.text for p in elem.findall("picture") if p.text]
+            available = (elem.attrib.get("available") or "").lower() in ["true", "1", "yes", "да"]
 
-            # --- розміри ---
-            sizes = []
-            for p in elem.findall("param"):
-                if p.get("name") and "размер" in p.get("name").lower():
-                    if p.text and p.text.strip():
-                        sizes.append(p.text.strip())
+            # Опис, фото, розміри
+            description = _find_first_text(elem, ["description"])
+            pictures = [p.text.strip() for p in elem.findall(".//picture") if p.text]
+            sizes = [p.text.strip() for p in elem.findall(".//param[@name='Размер']") if p.text]
 
-            # --- SKU ---
             sku = normalize_sku(vendor_code or offer_id or "")
-
-            # --- фінальний product ---
             product = {
                 "offer_id": offer_id,
                 "sku": sku,
                 "vendor_code": vendor_code,
                 "name": name,
+                "description": description,
+                "pictures": pictures,
+                "sizes": sizes,
                 "drop_price": float(drop_price) if drop_price is not None else None,
                 "retail_price": float(retail_price) if retail_price is not None else None,
-                "final_price": final_price,
                 "stock_qty": stock_qty,
-                "stock_text": stock_text or ("Є" if sizes else "Немає"),
-                "picture": pictures,
-                "sizes": sizes,
-                "components": None,
+                "available": available,
             }
-
-            # --- індексація ---
             PRODUCTS_INDEX["all_products"].append(product)
             if sku:
                 PRODUCTS_INDEX["by_sku"][sku] = product
-            if offer_id:
-                PRODUCTS_INDEX["by_offer"][offer_id.lower()] = product
+            # index name tokens
             for tok in re.findall(r'\w{3,}', (name or "").lower()):
                 PRODUCTS_INDEX["by_name"].setdefault(tok, []).append(product)
-
             elem.clear()
-
     except Exception:
         logger.exception("Failed to build products index")
 
@@ -708,6 +682,7 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
     mode == "test" -> тестовий (admin/publish_test)
     """
     args = (command.args or "").strip()
+
     # default behaviour (no deep link)
     if not args:
         await msg.answer(
@@ -732,20 +707,50 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
         logger.info("Start deep link: mode=%s post_id=%s sku=%s", mode, post_id, sku)
 
         # якщо є автопrefill sku — запускаємо flow як ніби користувач ввів SKU
-# усередині async функції, яка обробляє deep link
-        # якщо є автопrefill sku — запускаємо flow як ніби користувач ввів SKU
         if sku:
             sku_norm = normalize_sku(sku)
-            # пробуємо спочатку з нормалізованим, потім з версією без ведучих нулів
             product = find_product_by_sku(sku_norm) or find_product_by_sku((sku_norm or "").lstrip("0"))
 
             if product:
-                await msg.answer("🧾 Розпочнемо оформлення. Ось вибраний товар:")
-                await show_product_and_ask_quantity(msg, state, product)
+                # розрахунок ціни
+                drop_price = product.get("drop_price")
+                markup_price = None
+                if drop_price:
+                    raw_price = drop_price * 1.33  # +33% націнка
+                    markup_price = aggressive_round(raw_price)
 
-                # одразу переходимо до ПІБ після показу товару
-                await msg.answer("✍️ Введіть ваші ПІБ:")
-                await state.set_state(OrderForm.pib)
+                sizes = ", ".join(product.get("sizes", [])) if product.get("sizes") else "—"
+                stock_qty = product.get("stock_qty") or 0
+                stock_text = "Є ✅" if stock_qty > 0 else "Немає ❌"
+                sku_line = product.get("sku") or "—"
+
+                # вибір блоку ціни залежно від режиму
+                if mode == "test":
+                    price_text = (
+                        f"💵 Дроп ціна: {drop_price if drop_price else '—'} грн\n"
+                        f"💰 Орієнтовна ціна (з націнкою): {markup_price if markup_price else '—'} грн\n"
+                    )
+                else:
+                    price_text = f"💰 Ціна для клієнта: {markup_price if markup_price else '—'} грн\n"
+
+                text = (
+                    "🧾 Розпочнемо оформлення. Ось вибраний товар:\n"
+                    "✅ Знайдено товар:\n"
+                    f"📌 {sku_line}\n"
+                    f"🆔 Артикул: {product.get('vendor_code') or sku_line}\n"
+                    f"📛 Назва: {product.get('name')}\n"
+                    f"📦 Наявність: {stock_text} (кількість: {stock_qty})\n"
+                    f"📏 Розміри: {sizes}\n"
+                    f"{price_text}"
+                    "\n👉 Введіть кількість товару (число):"
+                )
+
+                if product.get("pictures"):
+                    await msg.answer_photo(product["pictures"][0], caption=text)
+                else:
+                    await msg.answer(text)
+
+                await state.set_state(OrderForm.amount)
                 return
             else:
                 await msg.answer("⚠️ Товар з таким артикулом не знайдено. Введіть артикул або назву вручну.")
@@ -1420,6 +1425,20 @@ async def cmd_debug_find(msg: Message):
     else:
         await msg.answer("Matches:\n\n" + "\n\n".join(found))
 
+def aggressive_round(price: float) -> int:
+    """
+    Агресивне округлення ціни в більшу сторону.
+    """
+    if price < 500:
+        step = 5
+    elif price < 2000:
+        step = 10
+    elif price < 5000:
+        step = 50
+    else:
+        step = 100
+    return int((price + step - 1) // step * step)
+
 @router.message(OrderForm.article)
 async def state_article(msg: Message, state: FSMContext):
     query = msg.text.strip()
@@ -1450,37 +1469,79 @@ async def state_article(msg: Message, state: FSMContext):
     state_data = await state.get_data()
     mode = state_data.get("mode", "client")
 
-    def price_block(prod):
+    def price_block(prod, mode: str):
+        drop_price = prod.get("drop_price")
+        markup_price = None
+        if drop_price:
+            raw_price = drop_price * 1.33  # +33% націнка
+            markup_price = aggressive_round(raw_price)
+
         if mode == "test":
             return (
-                f"💰 Орієнтовна ціна (з націнкою): {prod.get('final_price') or '—'} грн\n"
-                f"💵 Дроп ціна: {prod.get('drop_price') or '—'} грн\n"
+                f"💵 Дроп ціна: {drop_price if drop_price else '—'} грн\n"
+                f"💰 Орієнтовна ціна (з націнкою): {markup_price if markup_price else '—'} грн\n"
             )
         else:
-            return f"💰 Ціна для клієнта: {prod.get('final_price') or '—'} грн\n"
+            return f"💰 Ціна для клієнта: {markup_price if markup_price else '—'} грн\n"
 
     # --- suggestion case ---
     if product.get("suggestion"):
-        sizes_text = f"\n📏 Розміри: {', '.join(product['sizes'])}" if product.get("sizes") else ""
+        sizes = ", ".join(product.get("sizes", [])) if product.get("sizes") else "—"
+        stock_text = "Є ✅" if product.get("stock_qty", 0) > 0 else "Немає ❌"
         sku_line = product.get("sku") or "—"
-        confirm_hint = ("Якщо це те, що треба — натисніть ✅ Підтвердити."
-                        if product.get("sku") else
-                        "Якщо це те, що треба — натисніть ✅ Підтвердити (буде використано назву).")
+
+        confirm_hint = (
+            "Якщо це те, що треба — натисніть ✅ Підтвердити."
+            if product.get("sku") else
+            "Якщо це те, що треба — натисніть ✅ Підтвердити (буде використано назву)."
+        )
+
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton("✅ Підтвердити", callback_data="article:confirm")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="flow:back_to_start")]
         ])
-        await msg.answer(
+
+        text = (
             "🤔 Можливо ви мали на увазі:\n"
-            f"🔖 <b>{product['name']}</b>\n"
-            f"🆔 Артикул: <b>{sku_line}</b>\n"
-            f"📦 Наявність: <b>{product.get('stock_text') or '—'}</b>\n"
-            f"{price_block(product)}"
-            f"{sizes_text}\n\n"
-            f"{confirm_hint}",
-            reply_markup=kb
+            f"📌 {sku_line}\n"
+            f"🆔 Артикул: {product.get('vendor_code') or sku_line}\n"
+            f"📛 Назва: {product.get('name')}\n"
+            f"📦 Наявність: {stock_text} (кількість: {product.get('stock_qty') or 0})\n"
+            f"📏 Розміри: {sizes}\n"
+            f"{price_block(product, mode)}\n"
+            f"{confirm_hint}"
         )
+
+        if product.get("pictures"):
+            await msg.answer_photo(product["pictures"][0], caption=text)
+        else:
+            await msg.answer(text, reply_markup=kb)
+
         return
+
+    # --- якщо товар знайдено напряму ---
+    sizes = ", ".join(product.get("sizes", [])) if product.get("sizes") else "—"
+    stock_qty = product.get("stock_qty") or 0
+    stock_text = "Є ✅" if stock_qty > 0 else "Немає ❌"
+    sku_line = product.get("sku") or "—"
+
+    text = (
+        "✅ Знайдено товар:\n"
+        f"📌 {sku_line}\n"
+        f"🆔 Артикул: {product.get('vendor_code') or sku_line}\n"
+        f"📛 Назва: {product.get('name')}\n"
+        f"📦 Наявність: {stock_text} (кількість: {stock_qty})\n"
+        f"📏 Розміри: {sizes}\n"
+        f"{price_block(product, mode)}\n"
+        "👉 Введіть кількість товару (число):"
+    )
+
+    if product.get("pictures"):
+        await msg.answer_photo(product["pictures"][0], caption=text)
+    else:
+        await msg.answer(text)
+
+    await state.set_state(OrderForm.amount)
 
 @router.callback_query(F.data == "suggest:back")
 async def cb_suggest_back(cb: CallbackQuery, state: FSMContext):
