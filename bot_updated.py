@@ -190,14 +190,12 @@ def build_products_index_from_xml(text: str):
                 elif "размер" in pname:
                     sizes.append(pval)
 
-            # ✅ Тепер зберігаємо і raw, і нормалізований артикул
             raw_sku = vendor_code or offer_id or ""
-            norm_sku = normalize_sku(raw_sku)
-
+            sku = normalize_sku(raw_sku)
             product = {
                 "offer_id": offer_id,
-                "sku": norm_sku,          # нормалізований
-                "raw_sku": raw_sku,       # оригінальний
+                "sku": sku,
+                "raw_sku": raw_sku,
                 "vendor_code": vendor_code,
                 "name": name,
                 "description": description,
@@ -209,13 +207,13 @@ def build_products_index_from_xml(text: str):
                 "available": available,
             }
             PRODUCTS_INDEX["all_products"].append(product)
-            if norm_sku:
-                PRODUCTS_INDEX["by_sku"][norm_sku] = product
+            if sku:
+                PRODUCTS_INDEX["by_sku"][sku] = product
             for tok in re.findall(r'\w{3,}', (name or "").lower()):
                 PRODUCTS_INDEX["by_name"].setdefault(tok, []).append(product)
             elem.clear()
 
-        # ✅ Логуємо з raw_sku і norm_sku
+        # ✅ Логуємо один раз після завершення парсингу
         total = len(PRODUCTS_INDEX["all_products"])
         sample = [(p.get("raw_sku"), p.get("sku")) for p in PRODUCTS_INDEX["all_products"][:5]]
         logger.debug("Product index built: %s products total. First 5 SKUs: %s", total, sample)
@@ -1025,12 +1023,15 @@ def _find_first_numeric_text(elem, candidates):
     return None
 
 def _find_first_text(elem, tags: list[str]) -> Optional[str]:
+    """
+    Шукає перший тег з текстом серед можливих назв.
+    Повертає текст або None.
+    """
     for t in tags:
-        for child in elem.findall(f".//{t}"):
-            if child.text:
-                return child.text.strip()
+        child = elem.find(f".//{t}")
+        if child is not None and child.text:
+            return child.text.strip()
     return None
-
 
 def _find_first_numeric(elem, tags: list[str]) -> Optional[float]:
     """
