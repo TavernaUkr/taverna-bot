@@ -125,16 +125,15 @@ PRODUCTS_INDEX = {
 }
 INDEX_TTL = 1800  # 30 хвилин — перевобудовувати періодично
 
-def normalize_sku(s: Optional[str]) -> Optional[str]:
-    if not s:
-        return None
-    s = str(s).strip().lower()
-    # remove spaces and leading zeros for numeric-like skus
-    s = re.sub(r'\s+', '', s)
-    if s.isdigit():
-        return str(int(s))  # "0099" -> "99"
-    # keep alnum + - _
-    return re.sub(r'[^a-z0-9\-_]', '', s)
+ def normalize_sku(s: Optional[str]) -> Optional[str]:
+     """Приводить артикул до нормальної форми без втрати ведучих нулів."""
+     if not s:
+         return None
+     s = str(s).strip().lower()
+     # прибираємо пробіли
+     s = re.sub(r'\s+', '', s)
+     # залишаємо тільки дозволені символи
+     return re.sub(r'[^a-z0-9\-_]', '', s)
 
 def build_products_index_from_xml(text: str):
     """
@@ -1179,10 +1178,14 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     if prod:
         return prod
 
-    # 2) exact sku match
-    prod = PRODUCTS_INDEX["by_sku"].get(qlow)
-    if prod:
-        return prod
+     # 2. точний пошук по SKU (враховуємо 0999 vs 999)
+     candidates = [qlow]
+     if qlow.isdigit():
+         candidates.append(qlow.lstrip("0"))  # "0999" -> "999"
+     for cand in candidates:
+         prod = PRODUCTS_INDEX["by_sku"].get(cand)
+         if prod:
+             return prod
 
     # 3) numeric query -> try sku by stripped numeric
     if re.fullmatch(r"\d{2,}", qlow):
