@@ -112,16 +112,10 @@ CACHE_TTL = 900  # 15 хвилин (900 секунд)
 
 # ---------------- Index for fast lookup ----------------
 PRODUCTS_INDEX = {
-    "built_at": None,
-    "by_offer": {},   # offer_id -> product_summary
-    "by_sku": {},     # sku -> product_summary
-    "by_name": {},    # normalized name -> list[product_summary]
-}
-PRODUCTS_INDEX = {
     "by_sku": {},
     "by_offer": {},
-    "by_name_tokens": defaultdict(set),
-    "items": []
+    "by_name": {},
+    "all_products": []
 }
 INDEX_TTL = 1800  # 30 хвилин — перевобудовувати періодично
 
@@ -138,10 +132,11 @@ def normalize_sku(s: Optional[str]) -> Optional[str]:
 
 def build_products_index_from_xml(text: str):
     """
-    Проходимо весь xml і будуємо простий індекс:
+    Побудова індексу товарів з XML:
       - by_sku: normalized sku -> product dict
+      - by_offer: offer_id -> product dict
       - by_name: token -> [product dicts]
-      - all_products: список всіх товарів
+      - all_products: список усіх продуктів
     """
     global PRODUCTS_INDEX
     PRODUCTS_INDEX = {"by_sku": {}, "by_offer": {}, "by_name": {}, "all_products": []}
@@ -154,16 +149,14 @@ def build_products_index_from_xml(text: str):
                 elem.clear()
                 continue
 
-            # базові атрибути
+            # --- основні дані ---
             offer_id = (elem.attrib.get("id") or "").strip()
             vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"])
             name = _find_first_text(elem, ["name", "title", "product", "model", "productname", "product_name"]) or offer_id
 
-            # ціни
+            # --- ціни ---
             drop_price = _find_first_numeric(elem, ["price", "drop", "cost", "value", "price_uah"])
             retail_price = _find_first_numeric(elem, ["rrc", "retail", "msrp", "oldprice"])
-
-            # якщо нема final_price – рахуємо від дроп ціни
             final_price = None
             if drop_price is not None:
                 try:
@@ -171,7 +164,7 @@ def build_products_index_from_xml(text: str):
                 except Exception:
                     final_price = float(drop_price)
 
-            # кількість/наявність
+            # --- наявність ---
             stock_qty = None
             stock_text = None
             qtxt = _find_first_text(elem, ["quantity", "quantity_in_stock", "stock", "available_quantity", "count"])
@@ -184,20 +177,20 @@ def build_products_index_from_xml(text: str):
                         stock_qty = None
                 stock_text = "Є" if (not stock_qty or stock_qty > 0) else "Немає"
 
-            # фото
+            # --- фото ---
             pictures = [p.text for p in elem.findall("picture") if p.text]
 
-            # розміри (param name="Размер")
+            # --- розміри ---
             sizes = []
             for p in elem.findall("param"):
                 if p.get("name") and "размер" in p.get("name").lower():
                     if p.text and p.text.strip():
                         sizes.append(p.text.strip())
 
-            # SKU
+            # --- SKU ---
             sku = normalize_sku(vendor_code or offer_id or "")
 
-            # формуємо продукт
+            # --- фінальний product ---
             product = {
                 "offer_id": offer_id,
                 "sku": sku,
@@ -210,10 +203,10 @@ def build_products_index_from_xml(text: str):
                 "stock_text": stock_text or ("Є" if sizes else "Немає"),
                 "picture": pictures,
                 "sizes": sizes,
-                "components": None,  # на майбутнє
+                "components": None,
             }
 
-            # додаємо в індекси
+            # --- індексація ---
             PRODUCTS_INDEX["all_products"].append(product)
             if sku:
                 PRODUCTS_INDEX["by_sku"][sku] = product
@@ -250,7 +243,7 @@ def find_product_by_sku(sku: str) -> Optional[dict]:
             return p
 
     # fallback linear scan
-    for p in PRODUCTS_INDEX.get("items", []):
+    for p in PRODUCTS_INDEX.get("all_products", []):
         if sku.strip().lower() in (p.get("sku") or "").lower() or sku.strip().lower() in (p.get("offer_id") or "").lower():
             return p
     return None
@@ -728,7 +721,7 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
         if sku:
             sku_norm = normalize_sku(sku)
             # пробуємо спочатку з нормалізованим, потім з версією без ведучих нулів
-            product = await check_article_or_name(sku_norm) or await check_article_or_name((sku_norm or "").lstrip("0"))
+            product = find_product_by_sku(sku_norm) or find_product_by_sku((sku_norm or "").lstrip("0"))
 
             if product:
                 await msg.answer("🧾 Розпочнемо оформлення. Ось вибраний товар:")
@@ -937,149 +930,6 @@ async def load_products_export(force: bool = False) -> Optional[str]:
             await build_products_index(text)
             return text
         return None
-
-async def build_products_index(xml_text: str):
-    """
-    Build quick in-memory index for fast searches.
-    Each product_dict contains keys: name, sku, offer_id, drop_price, final_price, stock_text, stock_qty, components, pictures (list)
-    """
-    try:
-        it = ET.iterparse(io.StringIO(xml_text), events=("end",))
-        for event, elem in it:
-            tag = _local_tag(elem.tag).lower()
-            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
-                elem.clear()
-                continue
-
-            offer_id = (elem.attrib.get("id") or "").strip()
-            # helper functions from existing code: find_first_text, find_first_numeric are available
-            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"]) or ""
-            name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
-            drop_price = None
-            try:
-                dp = _find_first_numeric(elem, ["price", "cost", "drop", "drop_price", "sellprice", "price_uah"])
-                if dp is not None:
-                    drop_price = float(dp)
-            except:
-                drop_price = None
-
-            retail_price = None
-            try:
-                rp = _find_first_numeric(elem, ["rrc", "retail", "oldprice", "retail_price", "msrp"])
-                if rp is not None:
-                    retail_price = float(rp)
-            except:
-                retail_price = None
-
-            stock_qty = None
-            qtxt = _find_first_text(elem, ["quantity_in_stock", "quantity", "stock_qty", "stock", "available_quantity", "count", "amount"])
-            if qtxt:
-                qdigits = re.findall(r'\d+', qtxt.replace(" ", ""))
-                if qdigits:
-                    try:
-                        stock_qty = int(qdigits[0])
-                    except:
-                        stock_qty = None
-
-            stock_attr = elem.attrib.get("available", "").lower() if isinstance(elem.attrib, dict) else ""
-            stock_text = None
-            if stock_qty is not None:
-                stock_text = f"Є ({stock_qty} шт.)"
-            elif stock_attr:
-                stock_text = "Є" if stock_attr in ("true", "1", "yes") else "Немає"
-            else:
-                stock_text = _find_first_text(elem, ["available", "in_stock", "stock", "наличие"]) or "Немає"
-
-            # pictures (first)
-            pictures = []
-            for child in elem.iter():
-                if _local_tag(child.tag).lower() in ("picture", "image", "img"):
-                    if (child.text or "").strip():
-                        pictures.append((child.text or "").strip())
-
-            # components/sizes (reuse existing parsing logic)
-            components = None
-            sizes_from_param = []
-            components_from_params = []
-            for p in elem.iter():
-                pt = _local_tag(p.tag).lower()
-                if "param" in pt or pt in ("attribute", "property", "option"):
-                    pname_raw = p.attrib.get("name", "") if isinstance(p.attrib, dict) else ""
-                    pname = (pname_raw or "").strip() or _local_tag(p.tag)
-                    ptext = (p.text or "").strip() or ""
-                    opts = []
-                    opts += re.findall(r'\b\d{2,3}-\d{2,3}\b', ptext)
-                    opts += re.findall(r'\b(?:XS|S|M|L|XL|XXL|XXXL)\b', ptext, flags=re.I)
-                    opts += re.findall(r'\b\d{2}\b', ptext)
-                    if re.search(r'універсал', ptext, flags=re.I):
-                        opts.append('універсальний')
-                    if not opts and re.search(r'\b(шт\.?|шт|так|є|available|есть)\b', ptext, flags=re.I):
-                        opts = ['шт.']
-                    if opts:
-                        seen=set(); final=[]
-                        for o in opts:
-                            o2=str(o).strip()
-                            if not o2: continue
-                            if o2.lower() in seen: continue
-                            seen.add(o2.lower()); final.append(o2)
-                        components_from_params.append({"name": pname, "options": final})
-                    elif pname:
-                        components_from_params.append({"name": pname, "options": []})
-                if "size" in pt or "размер" in pt or "розмір" in pt:
-                    if (p.text or "").strip():
-                        parts = re.split(r'[;,/\\\n]+', p.text or "")
-                        for part in parts:
-                            v = part.strip()
-                            if v:
-                                sizes_from_param.append(v)
-
-            desc_text = _find_first_text(elem, ["description", "desc"]) or ""
-            components_from_desc = parse_components_from_description(desc_text) if desc_text else None
-            if components_from_desc:
-                components = components_from_desc
-            elif components_from_params:
-                components = components_from_params
-            elif sizes_from_param:
-                components = [{"name": "Розмір", "options": sizes_from_param}]
-            else:
-                components = None
-
-            sku = (vendor_code or offer_id or "").strip()
-            if sku in ("", "-"): sku = offer_id
-
-            final_price = apply_markup(drop_price) if drop_price is not None else (apply_markup(retail_price) if retail_price is not None else None)
-
-            product = {
-                "name": name or offer_id or vendor_code or "",
-                "sku": sku,
-                "offer_id": offer_id,
-                "drop_price": drop_price,
-                "retail_price": retail_price,
-                "final_price": final_price,
-                "stock_text": stock_text,
-                "stock_qty": stock_qty,
-                "components": components,
-                "pictures": pictures
-            }
-
-            # index inserts
-            key_sku = normalize_sku(sku)
-            key_offer = normalize_sku(offer_id)  # теж нормалізуємо, щоб не було розбіжностей
-            if key_sku:
-                PRODUCTS_INDEX["by_sku"][key_sku] = product
-            if key_offer:
-                PRODUCTS_INDEX["by_offer"][key_offer] = product
-
-            # tokenise name for name index
-            tokens = re.findall(r"[0-9A-Za-z\u0400-\u04FF\-\+]{2,}", (product["name"] or "").lower())
-            for t in tokens:
-                PRODUCTS_INDEX["by_name_tokens"][t].add(key_sku or key_offer or product["name"])
-
-            PRODUCTS_INDEX["items"].append(product)
-            elem.clear()
-    except Exception:
-        logger.exception("Error building products index")
-    logger.info("✅ Built products index (offers=%d, sku=%d)", len(PRODUCTS_INDEX["items"]), len(PRODUCTS_INDEX["by_sku"]))
 
 # ---------------- ПІБ: валідація / евристика ----------------
 PATRONYMIC_SUFFIXES = [
@@ -1293,7 +1143,7 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
 
     # 5) fallback: full-text scan of name substrings (cheap)
     qshort = qlow
-    for p in PRODUCTS_INDEX["items"]:
+    for p in PRODUCTS_INDEX["all_products"]:
         name = (p.get("name") or "").lower()
         if qshort == name or (qshort in name and len(qshort) >= 3):
             p["suggestion"] = True if qshort not in (p.get("sku","").lower(), p.get("offer_id","").lower()) else False
