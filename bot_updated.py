@@ -132,6 +132,20 @@ def normalize_sku(s: Optional[str]) -> Optional[str]:
     # keep alnum + - _
     return re.sub(r'[^a-z0-9\-_]', '', s)
 
+def _find_first_numeric(elem: Any, tags: list[str]) -> Optional[float]:
+    """
+    Шукає перший числовий тег у XML-елементі.
+    Повертає float або None.
+    """
+    for tag in tags:
+        child = elem.find(tag)
+        if child is not None and child.text:
+            try:
+                return float(child.text.strip())
+            except ValueError:
+                continue
+    return None
+
 def build_products_index_from_xml(text: str):
     """
     Побудова індексу товарів з XML:
