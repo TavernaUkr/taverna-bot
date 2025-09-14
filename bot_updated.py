@@ -125,15 +125,10 @@ PRODUCTS_INDEX = {
 }
 INDEX_TTL = 1800  # 30 хвилин — перевобудовувати періодично
 
- def normalize_sku(s: Optional[str]) -> Optional[str]:
-     """Приводить артикул до нормальної форми без втрати ведучих нулів."""
-     if not s:
-         return None
-     s = str(s).strip().lower()
-     # прибираємо пробіли
-     s = re.sub(r'\s+', '', s)
-     # залишаємо тільки дозволені символи
-     return re.sub(r'[^a-z0-9\-_]', '', s)
+def normalize_sku(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return None
+    return str(s).strip().lstrip("0").upper()
 
 def build_products_index_from_xml(text: str):
     """
