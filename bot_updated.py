@@ -188,6 +188,11 @@ def build_products_index_from_xml(text: str):
     except Exception:
         logger.exception("Failed to build products index")
 
+def find_product_by_sku(sku: str) -> Optional[dict]:
+    if not sku:
+        return None
+    return PRODUCTS_INDEX.get("by_sku", {}).get(normalize_sku(sku))
+
 # ---------------- global async loop holder ----------------
 # буде заповнений в main()
 ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
