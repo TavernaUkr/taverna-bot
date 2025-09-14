@@ -191,7 +191,30 @@ def build_products_index_from_xml(text: str):
 def find_product_by_sku(sku: str) -> Optional[dict]:
     if not sku:
         return None
-    return PRODUCTS_INDEX.get("by_sku", {}).get(normalize_sku(sku))
+    norm = normalize_sku(sku) or sku.strip().lower()
+    # fast lookup in index
+    by_sku = PRODUCTS_INDEX.get("by_sku", {})
+    by_offer = PRODUCTS_INDEX.get("by_offer", {})
+    prod = by_sku.get(norm) or by_offer.get(norm)
+    if prod:
+        return prod
+
+    # try alternative representations
+    candidates = [norm, sku.strip().lower(), sku.strip().lstrip("0")]
+    seen = set()
+    for c in candidates:
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        p = by_sku.get(c) or by_offer.get(c)
+        if p:
+            return p
+
+    # fallback linear scan
+    for p in PRODUCTS_INDEX.get("items", []):
+        if sku.strip().lower() in (p.get("sku") or "").lower() or sku.strip().lower() in (p.get("offer_id") or "").lower():
+            return p
+    return None
 
 # ---------------- global async loop holder ----------------
 # буде заповнений в main()
@@ -662,7 +685,7 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
 
         # якщо є автопrefill sku — запускаємо flow як ніби користувач ввів SKU
         if sku:
-            product = find_product_by_sku(sku)
+            product = await check_article_or_name(sku)
             if product:
                 await msg.answer("🧾 Розпочнемо оформлення. Ось вибраний товар:")
                 await show_product_and_ask_quantity(msg, state, product)
@@ -1000,7 +1023,7 @@ async def build_products_index(xml_text: str):
             }
 
             # index inserts
-            key_sku = (sku or "").strip().lower()
+            key_sku = normalize_sku(sku) or (sku or "").strip().lower()
             key_offer = (offer_id or "").strip().lower()
             if key_sku:
                 PRODUCTS_INDEX["by_sku"][key_sku] = product
