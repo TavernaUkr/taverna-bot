@@ -685,7 +685,8 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
 
         # якщо є автопrefill sku — запускаємо flow як ніби користувач ввів SKU
         if sku:
-            product = await check_article_or_name(sku)
+            sku_norm = normalize_sku(sku)
+product = await check_article_or_name(sku_norm) or await check_article_or_name(sku_norm.lstrip("0"))
             if product:
                 await msg.answer("🧾 Розпочнемо оформлення. Ось вибраний товар:")
                 await show_product_and_ask_quantity(msg, state, product)
@@ -1023,8 +1024,8 @@ async def build_products_index(xml_text: str):
             }
 
             # index inserts
-            key_sku = normalize_sku(sku) or (sku or "").strip().lower()
-            key_offer = (offer_id or "").strip().lower()
+            key_sku = normalize_sku(sku)
+            key_offer = normalize_sku(offer_id)  # теж нормалізуємо, щоб не було розбіжностей
             if key_sku:
                 PRODUCTS_INDEX["by_sku"][key_sku] = product
             if key_offer:
