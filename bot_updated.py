@@ -224,25 +224,25 @@ def find_product_by_sku(sku: str) -> Optional[dict]:
     if not sku:
         return None
     norm = normalize_sku(sku) or sku.strip().lower()
-    # fast lookup in index
     by_sku = PRODUCTS_INDEX.get("by_sku", {})
-    by_offer = PRODUCTS_INDEX.get("by_offer", {})
-    prod = by_sku.get(norm) or by_offer.get(norm)
+
+    # прямий збіг
+    prod = by_sku.get(norm)
     if prod:
         return prod
 
-    # try alternative representations
+    # пробуємо різні варіації (без нулів і т.п.)
     candidates = [norm, sku.strip().lower(), sku.strip().lstrip("0")]
     seen = set()
     for c in candidates:
         if not c or c in seen:
             continue
         seen.add(c)
-        p = by_sku.get(c) or by_offer.get(c)
+        p = by_sku.get(c)
         if p:
             return p
 
-    # fallback linear scan
+    # запасний варіант — лінійний пошук по всіх продуктах
     for p in PRODUCTS_INDEX.get("all_products", []):
         if sku.strip().lower() in (p.get("sku") or "").lower() or sku.strip().lower() in (p.get("offer_id") or "").lower():
             return p
@@ -879,56 +879,26 @@ async def state_phone(msg: Message, state: FSMContext):
     return
 
 async def load_products_export(force: bool = False) -> Optional[str]:
-    global PRODUCTS_CACHE, PRODUCTS_INDEX
-    now = datetime.now()
-    if not force and PRODUCTS_CACHE.get("last_update") and (now - PRODUCTS_CACHE["last_update"]).seconds < CACHE_TTL:
-        # already fresh
-        if PRODUCTS_CACHE.get("data") and PRODUCTS_INDEX and PRODUCTS_INDEX.get("items"):
-            return PRODUCTS_CACHE["data"]
-        # if index missing, rebuild below
-
-    export_url = os.getenv("MYDROP_EXPORT_URL")
-    if not export_url:
-        logger.error("❌ MYDROP_EXPORT_URL не налаштований")
-        return None
+    global PRODUCTS_EXPORT_CACHE
+    if PRODUCTS_EXPORT_CACHE and not force:
+        return PRODUCTS_EXPORT_CACHE
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(export_url, timeout=30) as resp:
-                if resp.status != 200:
-                    logger.warning("⚠️ Export URL error %s", resp.status)
-                    # fallback to file
-                    break_flag = True
-                    text = None
-                else:
-                    text = await resp.text()
-        if not text:
-            # fallback to local cache file
-            cache_file = Path(ORDERS_DIR) / "products_cache.xml"
-            if cache_file.exists():
-                text = cache_file.read_text(encoding="utf-8")
-            else:
-                logger.error("No export text available")
-                return None
+            async with session.get(EXPORT_URL) as resp:
+                text = await resp.text()
+                if not text:
+                    raise RuntimeError("Empty export")
+                PRODUCTS_EXPORT_CACHE = text
 
-        PRODUCTS_CACHE["last_update"] = now
-        PRODUCTS_CACHE["data"] = text
-        # save backup
-        cache_file = Path(ORDERS_DIR) / "products_cache.xml"
-        cache_file.write_text(text, encoding="utf-8")
-        logger.info("✅ Завантажено нову вигрузку (%d символів)", len(text))
+                # логування
+                logger.info("✅ Завантажено нову вигрузку (%d символів)", len(text))
 
-        # build index (async)
-        await build_products_index(text)
-        return text
-    except Exception as e:
-        logger.exception("Помилка завантаження вигрузки: %s", e)
-        # try fallback file
-        cache_file = Path(ORDERS_DIR) / "products_cache.xml"
-        if cache_file.exists():
-            text = cache_file.read_text(encoding="utf-8")
-            # try to build index from file
-            await build_products_index(text)
-            return text
+                # будуємо індекс (синхронна функція)
+                build_products_index_from_xml(text)
+
+                return text
+    except Exception:
+        logger.exception("Помилка завантаження вигрузки")
         return None
 
 # ---------------- ПІБ: валідація / евристика ----------------
