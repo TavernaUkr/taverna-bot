@@ -712,6 +712,8 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
             product = find_product_by_sku(sku_norm) or find_product_by_sku((sku_norm or "").lstrip("0"))
 
             if product:
+                # debug log
+                logger.debug("Product debug (found by SKU): %s", product)
                 # розрахунок ціни
                 drop_price = product.get("drop_price")
                 markup_price = None
@@ -1477,6 +1479,7 @@ async def state_article(msg: Message, state: FSMContext):
             markup_price = aggressive_round(raw_price)
 
         if mode == "test":
+            logger.debug("Product debug (article search): %s", product)
             return (
                 f"💵 Дроп ціна: {drop_price if drop_price else '—'} грн\n"
                 f"💰 Орієнтовна ціна (з націнкою): {markup_price if markup_price else '—'} грн\n"
