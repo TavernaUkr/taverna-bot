@@ -422,6 +422,7 @@ class OrderForm(StatesGroup):
 class OrderFSM(StatesGroup):
     awaiting_name = State()
     awaiting_phone = State()
+    awaiting_city = State()      
     awaiting_branch = State()
     awaiting_payment = State()
     awaiting_note = State()
