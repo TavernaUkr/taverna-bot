@@ -18,6 +18,7 @@ import collections
 import aiohttp
 import xml.etree.ElementTree as ET
 import math
+import traceback
 from typing import Optional, List, Tuple, Dict, Any
 from collections import defaultdict
 from dotenv import load_dotenv
@@ -32,7 +33,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand, FSInputFile
 
 # Telethon optional
 from telethon import TelegramClient
@@ -78,6 +79,7 @@ BOT_USERNAME = os.getenv("BOT_USERNAME")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TEST_CHANNEL = int(os.getenv("TEST_CHANNEL"))
 MAIN_CHANNEL = os.getenv("MAIN_CHANNEL")
+TEST_CHANNEL_URL = os.getenv("TEST_CHANNEL_URL")
 
 api_id = int(os.getenv("TG_API_ID", "0") or 0)
 api_hash = os.getenv("TG_API_HASH", "")
@@ -322,62 +324,6 @@ def find_product_by_sku(sku: str) -> Tuple[Optional[Dict[str, Any]], str]:
 
     return None, "not_found"
 
-# ---------------- Cache for MyDrop products ----------------
-CART_TTL_SECONDS = 15 * 60  # 15 хвилин
-
-def _cart_blob(user_id: int):
-    client = storage.Client()
-    bucket = client.bucket(BUCKET_NAME)
-    return bucket.blob(f"carts/{user_id}.json")
-
-
-def load_cart(user_id: int) -> dict:
-    """
-    Завантажує кошик користувача з GCS.
-    Якщо кошик прострочений або його немає → повертає порожній.
-    """
-    blob = _cart_blob(user_id)
-    if not blob.exists():
-        return {"created_at": datetime.now(timezone.utc).isoformat(), "items": []}
-
-    data = json.loads(blob.download_as_text())
-    created_at = datetime.fromisoformat(data.get("created_at"))
-
-    if datetime.now(timezone.utc) - created_at > timedelta(seconds=CART_TTL_SECONDS):
-        # кошик прострочений — видаляємо
-        blob.delete()
-        return {"created_at": datetime.now(timezone.utc).isoformat(), "items": []}
-
-    return data
-
-def save_cart(user_id: int, cart: dict):
-    """
-    Зберігає кошик у GCS.
-    """
-    blob = _cart_blob(user_id)
-    blob.upload_from_string(json.dumps(cart, ensure_ascii=False), content_type="application/json")
-
-def add_to_cart(user_id: int, product: dict, size: str, amount: int):
-    """
-    Додає товар у кошик користувача.
-    """
-    cart = load_cart(user_id)
-
-    item = {
-        "sku": product.get("sku"),
-        "name": product.get("name"),
-        "size": size,
-        "amount": amount,
-        "unit_price": product.get("drop_price") or 0,
-        "line_total": (product.get("drop_price") or 0) * amount
-    }
-
-    cart["items"].append(item)
-    cart["created_at"] = datetime.now(timezone.utc).isoformat()
-
-    save_cart(user_id, cart)
-    return cart
-
 # ---------------- global async loop holder ----------------
 # буде заповнений в main()
 ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
@@ -535,213 +481,228 @@ def size_keyboard(sizes: List[str], component_index: int = 0) -> InlineKeyboardM
     kb.add(InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel"))
     return kb
 
-# ---------------- Cart helpers & footer button ----------------
-def cart_path_for_user(user_id):
-    return Path(ORDERS_DIR) / f"cart_{user_id}.json"
-
-def load_cart(user_id):
-    p = cart_path_for_user(user_id)
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except:
-            return {"items": []}
-    return {"items": []}
-
-def save_cart(user_id, cart):
-    p = cart_path_for_user(user_id)
-    p.write_text(json.dumps(cart, ensure_ascii=False), encoding="utf-8")
-
-async def add_to_cart(user_id: int, product: dict, amount: int, selected_sizes: dict):
-    cart = load_cart(user_id)
-    # структура item: {sku, name, price, drop_price, amount, sizes}
-    item = {
-        "sku": product.get("sku") or product.get("offer_id"),
-        "name": product.get("name"),
-        "price": product.get("final_price") or product.get("retail_price") or 0,
-        "drop_price": product.get("drop_price"),
-        "amount": amount,
-        "sizes": selected_sizes or {}
-    }
-    cart["items"].append(item)
-    save_cart(user_id, cart)
-    return cart
-
-async def build_cart_summary_text(cart):
-    lines = []
-    total = 0
-    for i, it in enumerate(cart.get("items", []), start=1):
-        price = it.get("price") or 0
-        qty = int(it.get("amount") or 1)
-        subtotal = price * qty
-        total += subtotal
-        sizes = "; ".join([f"{k}:{v}" for k,v in (it.get("sizes") or {}).items()]) or "-"
-        lines.append(f"{i}. {it['name']} ({it['sku']})\n   Розміри: {sizes}\n   Ціна за 1: {price} грн • Кількість: {qty} • Сума: {subtotal} грн")
-    body = "\n\n".join(lines) if lines else "Поки що кошик порожній."
-    body += f"\n\n🔔 Загальна сума: {total} грн"
-    return body, total
-
-async def send_or_update_cart_footer(chat_id: int, user_id: int, bot: Bot, state: FSMContext):
-    data = await state.get_data()
-    footer_msg_id = data.get("cart_footer_msg_id")
-    cart = load_cart(user_id)
-    text, total = await build_cart_summary_text(cart)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🧺 ТУТ ВАША КОРЗИНА — Загальна сума: {total} грн", callback_data="cart:open")],
-    ])
-    try:
-        if footer_msg_id:
-            await bot.edit_message_text(text=f"🧺 Кошик • Загальна сума: {total} грн", chat_id=chat_id, message_id=footer_msg_id, reply_markup=kb)
-        else:
-            m = await bot.send_message(chat_id, f"🧺 Кошик • Загальна сума: {total} грн", reply_markup=kb)
-            await state.update_data(cart_footer_msg_id=m.message_id)
-    except Exception:
-        # fallback: send new
-        m = await bot.send_message(chat_id, f"🧺 Кошик • Загальна сума: {total} грн", reply_markup=kb)
-        await state.update_data(cart_footer_msg_id=m.message_id)
-
-@router.callback_query(F.data == "cart:open")
-async def cb_cart_open(cb: CallbackQuery, state: FSMContext):
-    cart = load_cart(cb.from_user.id)
-    text, total = await build_cart_summary_text(cart)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("✅ Оформити замовлення", callback_data="cart:checkout")],
-        [InlineKeyboardButton("➕ Продовжити вибір", callback_data="choose:continue")],
-        [InlineKeyboardButton("❌ Повністю скасувати", callback_data="cart:clear")],
-    ])
-    await cb.message.answer(text, reply_markup=kb)
-    await cb.answer()
-
-@router.callback_query(F.data == "cart:clear")
-async def cb_cart_clear(cb: CallbackQuery, state: FSMContext):
-    save_cart(cb.from_user.id, {"items": []})
-    await state.update_data(cart_footer_msg_id=None)
-    await cb.message.answer("Кошик очищено.")
-    await cb.answer()
-
-def format_price(v):
-    try:
-        return int(v) if v is not None else 0
-    except:
-        try:
-            return int(float(v))
-        except:
-            return 0
-
-async def add_item_to_cart(state: FSMContext, item: dict):
-    """
-    item = {
-      'sku': '4165105s2',
-      'name': 'Комплект ...',
-      'size': 'M',
-      'amount': 2,
-      'price': 745,  # price per 1 (final_price)
-      'drop_price': 560.0
-    }
-    """
-    data = await state.get_data()
-    cart = data.get("cart", [])
-    # додаємо як нову позицію (не агрегація) — можна оновити логіку по ключу sku+size
-    cart.append(item)
-    await state.update_data(cart=cart)
-
-async def get_cart_summary(state: FSMContext) -> (str, int):
-    data = await state.get_data()
-    cart = data.get("cart", [])
-    if not cart:
-        return "🛒 Кошик порожній.", 0
-    lines = []
-    total = 0
-    for i, it in enumerate(cart, 1):
-        name = it.get("name") or it.get("sku") or "Товар"
-        size = it.get("size") or "-"
-        amount = int(it.get("amount", 1))
-        price = format_price(it.get("price"))
-        subtotal = price * amount
-        total += subtotal
-        lines.append(f"{i}. {name} ({size}) — {price} грн × {amount} = {subtotal} грн")
-    text = "🧾 Ваша корзина:\n\n" + "\n".join(lines) + f"\n\n🔢 Загальна сума: {total} грн"
-    return text, total
-
-def cart_footer_keyboard(total: int) -> InlineKeyboardMarkup:
-    """
-    Кнопка, що показується внизу (постійна) з загальною сумою.
-    """
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🛒 ТУТ ЗНАХОДИТЬСЯ ВАША КОРЗИНА! Загальна сума — {total} грн", callback_data="cart:open")],
-    ])
-    return kb
-
-def cart_control_keyboard():
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="cart:checkout")],
-        [InlineKeyboardButton(text="❌ Повністю скасувати замовлення", callback_data="cart:clear")],
-        [InlineKeyboardButton(text="↩️ Повернутись", callback_data="flow:back:article")],
-    ])
-    return kb
-
-USER_CART_MSG = {}  # chat_id -> message_id
-
-def build_cart_footer(chat_id: int, cart_items: List[Dict[str,Any]]):
-    total = cart_total(cart_items)
-    text = f"🛒 ТУТ ЗНАХОДИТЬСЯ ВАША КОРЗИНА! Загальна сума — {total} грн."
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🧾 Відкрити корзину — {total} ₴", callback_data="cart:open")],
-    ])
-    return text, kb
-
-async def update_or_send_cart_footer(chat_id: int, bot_instance=None):
-    """
-    Оновлює існуюче футер-повідомлення або надсилає нове.
-    bot_instance: за замовчуванням використовує глобальний bot
-    """
-    bot_obj = bot_instance or bot
-    cart_items = get_cart_items(chat_id)
-    text, kb = build_cart_footer(chat_id, cart_items)
-    if chat_id in USER_CART_MSG:
-        msg_id = USER_CART_MSG[chat_id]
-        try:
-            await bot_obj.edit_message_text(text, chat_id, msg_id, reply_markup=kb)
-            return
-        except Exception:
-            # якщо редагування не вдалось — видаляємо старий id і відправимо нове
-            USER_CART_MSG.pop(chat_id, None)
-    try:
-        m = await bot_obj.send_message(chat_id, text, reply_markup=kb)
-        USER_CART_MSG[chat_id] = getattr(m, "message_id", None)
-    except Exception:
-        logger.exception("Failed to send/update cart footer for chat %s", chat_id)
+# ---------------- Cart helpers (GCS-backed, TTL = 20 minutes) ----------------
+CART_TTL_SECONDS = 20 * 60  # 20 хвилин
 
 # ---------------- Cart storage & helpers ----------------
 # chat_id -> list[ {name, sku, price, qty, sizes (dict)} ]
 USER_CARTS: Dict[int, List[Dict[str, Any]]] = {}
-USER_CART_MSG: Dict[int, Dict[str, Any]] = {}
+USER_CART_MSG: Dict[int, Dict[str, int]] = {}
+
+def _get_storage_client():
+    """
+    Переважно використовуємо SERVICE_ACCOUNT_JSON з .env (якщо задано),
+    інакше fallback на storage.Client() (ADC).
+    """
+    svc_json = os.getenv("SERVICE_ACCOUNT_JSON")
+    if svc_json:
+        try:
+            info = json.loads(svc_json)
+            return storage.Client.from_service_account_info(info)
+        except Exception:
+            logger.exception("Failed to init storage.Client from SERVICE_ACCOUNT_JSON, falling back to default client.")
+    return storage.Client()
+
+def _cart_blob(user_id: int):
+    client = _get_storage_client()
+    bucket = client.bucket(BUCKET_NAME)
+    return bucket.blob(f"carts/{user_id}.json")
+
+def load_cart(user_id: int) -> dict:
+    """
+    Завантажує корзину з GCS. Повертає структуру:
+      {"created_at": ISO, "items": [ {sku,name,size,amount,unit_price,line_total,added_at}, ... ]}
+    Якщо немає або минув TTL — повертає порожню корзину.
+    """
+    blob = _cart_blob(user_id)
+    if not blob.exists():
+        return {"created_at": datetime.now(timezone.utc).isoformat(), "items": []}
+    try:
+        raw = blob.download_as_text()
+        data = json.loads(raw)
+    except Exception:
+        # якщо щось не так із JSON — видаляємо і повертаємо нову корзину
+        try:
+            blob.delete()
+        except:
+            pass
+        return {"created_at": datetime.now(timezone.utc).isoformat(), "items": []}
+
+    # перевіряємо TTL
+    created_at_raw = data.get("created_at")
+    try:
+        created_at = datetime.fromisoformat(created_at_raw)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+    except Exception:
+        created_at = datetime.now(timezone.utc)
+
+    if datetime.now(timezone.utc) - created_at > timedelta(seconds=CART_TTL_SECONDS):
+        # прострочена — видалити blob і повернути порожню
+        try:
+            blob.delete()
+        except Exception:
+            logger.debug("Failed to delete expired cart blob for user %s", user_id)
+        return {"created_at": datetime.now(timezone.utc).isoformat(), "items": []}
+
+    return data
+
+def save_cart(user_id: int, cart: dict):
+    """Зберігає корзину у GCS (перезапис blob)."""
+    blob = _cart_blob(user_id)
+    try:
+        blob.upload_from_string(json.dumps(cart, ensure_ascii=False), content_type="application/json")
+    except Exception:
+        logger.exception("Failed to save cart for user %s", user_id)
+        raise
+
+async def add_to_cart(user_id: int, product: dict, size: Optional[str] = None, amount: int = 1, bot_instance: Optional[Bot] = None):
+    """
+    Додає позицію до корзини в GCS і оновлює футер у чаті користувача.
+    product повинен містити хоча б: sku/name/drop_price або price
+    """
+    cart = load_cart(user_id)
+    try:
+        unit_price = int(round(float(product.get("drop_price") or product.get("price") or 0)))
+    except Exception:
+        unit_price = 0
+    try:
+        amount_i = int(amount or 1)
+    except Exception:
+        amount_i = 1
+
+    item = {
+        "sku": product.get("sku") or product.get("vendor_code") or product.get("offer_id") or "",
+        "name": product.get("name") or "Товар",
+        "size": size or "-",
+        "amount": amount_i,
+        "unit_price": unit_price,
+        "line_total": unit_price * amount_i,
+        "added_at": datetime.now(timezone.utc).isoformat()
+    }
+    cart.setdefault("items", []).append(item)
+    cart["created_at"] = datetime.now(timezone.utc).isoformat()
+
+    save_cart(user_id, cart)
+
+    # оновити футер у чаті
+    bot_obj = bot_instance or bot
+    try:
+        await ensure_or_update_cart_footer(chat_id=user_id, user_id=user_id, bot_instance=bot_obj)
+    except Exception:
+        logger.exception("Failed to update cart footer after add_to_cart for user %s", user_id)
+
+    return cart
+
+def remove_item_from_cart(user_id: int, idx: int) -> Optional[dict]:
+    cart = load_cart(user_id)
+    items = cart.get("items", [])
+    if 0 <= idx < len(items):
+        removed = items.pop(idx)
+        cart["items"] = items
+        cart["created_at"] = datetime.now(timezone.utc).isoformat()
+        save_cart(user_id, cart)
+        return removed
+    return None
+
+def clear_cart(user_id: int) -> dict:
+    """
+    Повністю очищає корзину (видаляє blob). Повертає порожню корзину.
+    """
+    blob = _cart_blob(user_id)
+    try:
+        if blob.exists():
+            blob.delete()
+    except Exception:
+        logger.exception("Failed to delete cart blob for user %s", user_id)
+    empty = {"created_at": datetime.now(timezone.utc).isoformat(), "items": []}
+    # для простоти — збережемо пусту корзину, щоб при наступному читанні була структура
+    save_cart(user_id, empty)
+    # прибираємо інформацію про футер
+    USER_CART_MSG.pop(user_id, None)
+    return empty
+
+def cart_total(cart_items: List[Dict[str, Any]]) -> int:
+    total = 0
+    for it in cart_items or []:
+        try:
+            total += int(it.get("line_total") or (int(it.get("unit_price") or 0) * int(it.get("amount") or 1)))
+        except Exception:
+            try:
+                total += int(float(it.get("line_total") or 0))
+            except Exception:
+                pass
+    return total
+
+async def build_cart_summary_text_and_total(user_id: int) -> Tuple[str, int]:
+    cart = load_cart(user_id)
+    lines = []
+    total = 0
+    for i, it in enumerate(cart.get("items", []), start=1):
+        price = int(it.get("unit_price") or 0)
+        qty = int(it.get("amount") or 1)
+        subtotal = price * qty
+        total += subtotal
+        size = it.get("size") or "-"
+        lines.append(f"{i}. {it.get('name')} ({it.get('sku')})\n   📏 Розмір: {size}\n   💵 {price} грн × {qty} = {subtotal} грн")
+    body = "\n\n".join(lines) if lines else "🛒 Кошик порожній."
+    body += f"\n\n🔔 Загальна сума: {total} грн"
+    return body, total
+
+def build_cart_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    cart = load_cart(user_id)
+    items = cart.get("items", [])
+    kb_rows: List[List[InlineKeyboardButton]] = []
+
+    for idx, it in enumerate(items):
+        kb_rows.append([InlineKeyboardButton(text=f"🗑️ Видалити {it.get('name')} ({it.get('size')})", callback_data=f"cart:remove:{idx}")])
+
+    kb_rows.append([InlineKeyboardButton(text="➕ Додати товар", callback_data="cart:add")])
+
+    if items:
+        kb_rows.append([InlineKeyboardButton(text="🧹 Очистити корзину", callback_data="cart:clear")])
+        kb_rows.append([InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="cart:checkout")])
+
+    # Навігаційні кнопки
+    kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="flow:back_to_start")])
+    kb_rows.append([InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="flow:cancel_order")])
+
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+async def ensure_or_update_cart_footer(chat_id: int, user_id: int, bot_instance: Optional[Bot] = None):
+    """
+    Створює або редагує постійне повідомлення-футер у чаті користувача з поточною сумою.
+    Зберігає meta у USER_CART_MSG[user_id] = {"chat_id":..., "message_id":...}
+    """
+    bot_obj = bot_instance or bot
+    cart = load_cart(user_id)
+    total = cart_total(cart.get("items", []))
+    text = f"🛒 Ваша корзина — Загальна сума: {total} грн"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🧾 Відкрити корзину — {total} грн", callback_data="cart:open")]
+    ])
+
+    meta = USER_CART_MSG.get(user_id)
+    if meta:
+        try:
+            await bot_obj.edit_message_text(text=text, chat_id=meta["chat_id"], message_id=meta["message_id"], reply_markup=kb)
+            return
+        except Exception:
+            USER_CART_MSG.pop(user_id, None)
+
+    try:
+        sent = await bot_obj.send_message(chat_id, text, reply_markup=kb)
+        USER_CART_MSG[user_id] = {"chat_id": sent.chat.id, "message_id": sent.message_id}
+    except Exception:
+        logger.exception("Cannot send/update cart footer for user %s", user_id)
+
+# backward-compatible alias (деякі місця коду могли викликати інші назви)
+send_or_update_cart_footer = ensure_or_update_cart_footer
+update_or_send_cart_footer = ensure_or_update_cart_footer
 
 def ensure_cart(chat_id: int):
     if chat_id not in USER_CARTS:
         USER_CARTS[chat_id] = []
-
-async def ensure_or_update_cart_footer(chat_id: int):
-    """
-    Якщо footer існує — редагуємо його, інакше створюємо нове повідомлення з кнопкою перегляду корзини.
-    """
-    cart = get_cart_items(chat_id)
-    total = cart_total(cart)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🛒 Тут знаходиться ваша КОРЗИНА — Загальна сума: {total} грн", callback_data="cart:view")],
-    ])
-    meta = USER_CART_MSG.get(chat_id)
-    if meta:
-        try:
-            await bot.edit_message_text(f"🛒 Ваша корзина — Загальна сума: {total} грн", chat_id=meta["chat_id"], message_id=meta["message_id"], reply_markup=kb)
-            return
-        except Exception:
-            # якщо edit помер — створимо нове
-            USER_CART_MSG.pop(chat_id, None)
-
-    # create new footer message
-    sent = await bot.send_message(chat_id, f"🛒 Ваша корзина — Загальна сума: {total} грн", reply_markup=kb)
-    USER_CART_MSG[chat_id] = {"chat_id": sent.chat.id, "message_id": sent.message_id}
 
 @router.callback_query(F.data == "cart:view")
 async def cart_view(cb: CallbackQuery, state: FSMContext):
@@ -1023,10 +984,14 @@ async def cb_select_size(callback: CallbackQuery, state: FSMContext):
 # ---------------- Select Quantity ----------------
 @router.callback_query(F.data.startswith("select_qty:"))
 async def cb_select_qty(callback: CallbackQuery, state: FSMContext):
+    """
+    Новий flow: при виборі кількості — додаємо товар в GCS-корзину (add_to_cart),
+    оновлюємо футер з сумою і повідомляємо користувача про TTL (20 хв).
+    """
     try:
         _, sku, size, qty = callback.data.split(":")
         qty = int(qty)
-    except ValueError:
+    except Exception:
         await callback.answer("Помилка у виборі кількості", show_alert=True)
         return
 
@@ -1035,37 +1000,32 @@ async def cb_select_qty(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Товар не знайдено у базі", show_alert=True)
         return
 
-    # Беремо поточний кошик з FSM
-    data = await state.get_data()
-    cart = data.get("cart", [])
+    user_id = callback.from_user.id
 
-    # Додаємо товар у кошик
-    cart.append({
-        "sku": sku,
-        "name": product["name"],
-        "size": size,
-        "qty": qty,
-        "price": float(product["price"]),
-    })
+    # додаємо у GCS корзину
+    try:
+        cart = await add_to_cart(user_id=user_id, product=product, size=size, amount=qty, bot_instance=bot)
+    except Exception:
+        logger.exception("Failed to add product to cart for user %s", user_id)
+        await callback.answer("⚠️ Помилка додавання товару в корзину. Спробуйте пізніше.", show_alert=True)
+        return
 
-    await state.update_data(cart=cart)
-
-    # Підрахунок суми
-    total = sum(item["price"] * item["qty"] for item in cart)
+    total = cart_total(cart.get("items", []))
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛒 Відкрити корзину", callback_data="open_cart")],
-        [InlineKeyboardButton(text="✅ Підтвердити замовлення", callback_data="confirm_order")],
-        [InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="cancel_order")],
-        [InlineKeyboardButton(text="↩️ Назад", callback_data=f"select_size:{sku}:{size}")]
+        [InlineKeyboardButton(text="🧾 Відкрити корзину", callback_data="cart:open")],
+        [InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="cart:checkout")],
+        [InlineKeyboardButton(text="➕ Додати ще (перейти в канал/пошук)", callback_data="cart:add")],
+        [InlineKeyboardButton(text="↩️ Назад до товару", callback_data=f"select_size:{sku}:{size}")]
     ])
 
     await callback.message.answer(
-        f"✅ Додано у корзину: <b>{product['name']}</b>\n"
+        f"✅ Додано у корзину: <b>{product.get('name')}</b>\n"
         f"📏 Розмір: <b>{size}</b>\n"
         f"📦 Кількість: <b>{qty}</b>\n"
-        f"💵 Ціна: {product['price']} грн/шт.\n\n"
-        f"🛒 Загальна сума корзини: <b>{total} грн</b>",
+        f"💵 Сума за цю позицію: <b>{int(round(float(product.get('drop_price') or product.get('price') or 0))) * qty} грн</b>\n\n"
+        f"🧾 Загальна сума у корзині: <b>{total} грн</b>\n\n"
+        f"⏳ Корзина збережена у бота на 20 хвилин (після цього вона буде автоматично видалена).",
         reply_markup=kb,
         parse_mode="HTML"
     )
@@ -1358,18 +1318,37 @@ async def finalize_order(msg: Message, state: FSMContext):
 
     await state.clear()
 
+# ---------------- Publish Test ----------------
 @router.message(Command("publish_test"))
-async def publish_test(msg: Message):
+async def cmd_publish_test(msg: Message):
     """
-    Тестовий пост у канал з deep link для SKU 1056 (Гольф чорний).
+    Адмінська команда — публікація тестового поста в тестовий канал.
+    Використовує:
+    - ADMIN_ID (перевірка прав)
+    - TEST_CHANNEL (ID каналу для поста)
+    - TEST_CHANNEL_URL (invite link для fallback кнопки)
     """
-    test_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="🛒 Замовити Гольф чорний (тест)",
-            url=BOT_USERNAME
-        )]
-    ])
+    try:
+        admin_id = int(os.getenv("ADMIN_ID", "0") or 0)
+    except Exception:
+        admin_id = 0
 
+    if msg.from_user.id != admin_id:
+        await msg.answer("⚠️ У вас немає прав на виконання цієї команди.")
+        return
+
+    # Перевіримо TEST_CHANNEL
+    raw_channel = os.getenv("TEST_CHANNEL")
+    if not raw_channel:
+        await msg.answer("⚠️ TEST_CHANNEL не встановлений у .env")
+        return
+    try:
+        channel_chat_id = int(raw_channel)
+    except Exception:
+        await msg.answer(f"⚠️ TEST_CHANNEL має бути числом (наприклад -100123456789). Зараз: {raw_channel}")
+        return
+
+    # Тестовий текст поста
     text = (
         "🧪 Тестовий пост для перевірки товару:\n\n"
         "👕 Гольф чорний\n"
@@ -1378,44 +1357,50 @@ async def publish_test(msg: Message):
         "📏 Доступні розміри: 46–64"
     )
 
-    await bot.send_message(
-        chat_id=msg.chat.id,
-        text="Тест публікації",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(
-                text="📢 Відкрити канал",
-                url=os.getenv("TEST_CHANNEL_URL")  # 👈 винеси в .env
-            )]
-        ])
-    )
+    # Кнопка "Замовити" (deep link у бота)
+    kb = get_order_keyboard(post_id=12345, sku="1056", test=True)
 
-    await msg.answer("✅ Тестовий пост (Гольф чорний) опубліковано в каналі.")
+    # Fallback кнопка "Відкрити канал" (якщо бот не може постити напряму)
+    invite_url = os.getenv("TEST_CHANNEL_URL")
+    fallback_kb = None
+    if invite_url:
+        fallback_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Відкрити канал", url=invite_url)]
+            ]
+        )
 
-# ---------------- Test command ----------------
-@router.message(Command("publish_test"))
-async def cmd_publish_test(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
-        await msg.answer("⚠️ У вас немає прав на виконання цієї команди.")
-        return
-    text = (
-        "🔥 <b>Тестовий пост для</b> @test_taverna\n\n"
-        "Це перевірка кнопки <b>«Замовити»</b>.\n"
-        "Натисніть і перевірте форму замовлення."
-    )
-    kb = get_order_keyboard(post_id=12345, sku="0999", test=True)
     try:
-        await bot.send_message(TEST_CHANNEL, text, reply_markup=kb)
-        await msg.answer("✅ Тестовий пост опубліковано в тестовому каналі.")
+        # Публікуємо у канал
+        await bot.send_message(chat_id=channel_chat_id, text=text, reply_markup=kb, parse_mode="HTML")
+        await msg.answer("✅ Тестовий пост (Гольф чорний) опубліковано в тестовому каналі.")
     except Exception as e:
-        await msg.answer(f"⚠️ Помилка при публікації: {e}")
+        logger.exception("Помилка публікації тестового поста в канал")
+        await msg.answer(
+            f"⚠️ Помилка при публікації у канал: {e}\nПереконайтеся, що бот доданий у канал та має права публікації."
+        )
+        if fallback_kb:
+            await msg.answer("🔗 Можна вручну відкрити канал:", reply_markup=fallback_kb)
 
+# ---------------- Refresh Cache ----------------
 @router.message(Command("refresh_cache"))
 async def cmd_refresh_cache(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
+    """
+    Адмінська команда — примусове оновлення кешу вигрузки.
+    Використовує ADMIN_ID з .env для перевірки прав.
+    """
+    try:
+        admin_id = int(os.getenv("ADMIN_ID", "0") or 0)
+    except Exception:
+        admin_id = 0
+
+    if msg.from_user.id != admin_id:
         await msg.answer("⚠️ У вас немає прав на виконання цієї команди.")
         return
+
     await msg.answer("⏳ Оновлюю кеш вигрузки...")
     text = await load_products_export(force=True)
+
     if text:
         await msg.answer("✅ Кеш оновлено успішно.")
     else:
@@ -2608,23 +2593,6 @@ async def cb_sizes_edit(cb: CallbackQuery, state: FSMContext):
     await state.set_state(OrderForm.size)
     await cb.answer("Почніть заново вибір розмірів.")
 
-def load_cart(chat_id: int) -> Dict[str, Any]:
-    """Повертає dict {'items': [...]}. Якщо немає — повертає {'items':[]}."""
-    try:
-        f = Path(ORDERS_DIR) / f"cart_{chat_id}.json"
-        if f.exists():
-            return json.loads(f.read_text(encoding="utf-8"))
-    except Exception:
-        logger.exception("load_cart failed for %s", chat_id)
-    return {"items": []}
-
-def save_cart(chat_id: int, cart_obj: Dict[str, Any]) -> None:
-    try:
-        f = Path(ORDERS_DIR) / f"cart_{chat_id}.json"
-        f.write_text(json.dumps(cart_obj, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        logger.exception("save_cart failed for %s", chat_id)
-
 # ---------- Unified async function to add product to cart ----------
 async def add_product_to_cart(state: FSMContext, product: Dict[str, Any], size_text: str, qty: int, chat_id: Optional[int] = None) -> Dict[str, Any]:
     """
@@ -3185,31 +3153,8 @@ def add_to_cart(chat_id: int, item: Dict[str, Any]) -> None:
     """Додає item до USER_CARTS[chat_id]. item must have keys: name, sku, price, qty, sizes"""
     USER_CARTS.setdefault(chat_id, []).append(item)
 
-
-def clear_cart(chat_id: int) -> None:
-    USER_CARTS.pop(chat_id, None)
-    # також видалимо запис про footer, якщо є
-    USER_CART_MSG.pop(chat_id, None)
-
-
 def get_cart_items(chat_id: int) -> List[Dict[str, Any]]:
     return USER_CARTS.get(chat_id, [])
-
-
-def cart_total(cart_items: List[Dict[str, Any]]) -> int:
-    total = 0
-    for it in cart_items:
-        price = it.get("price") or 0
-        qty = int(it.get("qty") or 1)
-        try:
-            total += int(price) * qty
-        except Exception:
-            try:
-                total += int(float(price)) * qty
-            except:
-                pass
-    return total
-
 
 def format_cart_contents(cart_items: List[Dict[str, Any]]) -> str:
     if not cart_items:
