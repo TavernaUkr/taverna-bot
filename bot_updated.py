@@ -1379,10 +1379,12 @@ async def publish_test(msg: Message):
     )
 
     await bot.send_message(
-        chat_id=TEST_CHANNEL,
-        text=text,
-        reply_markup=test_kb
-    )
+        chat_id=msg.chat.id,
+        text="Тест публікації",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Відкрити бот", url="https://t.me/taverna_ukr_bot")]
+    ])
+)
     await msg.answer("✅ Тестовий пост (Гольф чорний) опубліковано в каналі.")
 
 # ---------------- Test command ----------------
