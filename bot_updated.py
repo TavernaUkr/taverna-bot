@@ -1013,7 +1013,7 @@ async def publish_test(msg: Message):
     test_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text="🛒 Замовити Гольф чорний (тест)",
-            url="https://t.me/taverna_bot?start=order_test_12345__sku_1056"  # заміни taverna_bot на юзернейм твого бота
+            url=f"https://t.me/{BOT_USERNAME}?start=order_test_12345__sku_1056"  # автоматично підставляємо юзернейм бота
         )]
     ])
 
@@ -1025,7 +1025,7 @@ async def publish_test(msg: Message):
     )
 
     await bot.send_message(
-        chat_id=-1001234567890,  # 🔴 заміни на ID твого тестового каналу
+        chat_id=TEST_CHANNEL,  # ✅ беремо ID каналу з ENV
         text=text,
         reply_markup=test_kb
     )
