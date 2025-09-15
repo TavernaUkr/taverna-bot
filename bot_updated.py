@@ -76,7 +76,7 @@ def check_env_vars():
 BOT_TOKEN = check_env_vars()
 BOT_USERNAME = os.getenv("BOT_USERNAME")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-TEST_CHANNEL = os.getenv("TEST_CHANNEL")
+TEST_CHANNEL = int(os.getenv("TEST_CHANNEL"))
 MAIN_CHANNEL = os.getenv("MAIN_CHANNEL")
 
 api_id = int(os.getenv("TG_API_ID", "0") or 0)
@@ -970,8 +970,8 @@ async def cmd_start(msg: Message, state: FSMContext):
     else:
         # Якщо просто /start
         start_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton("📢 Перейти для оформлення замовлення на канал", url=f"https://t.me/{MAIN_CHANNEL.replace('@','')}")],
-            [InlineKeyboardButton("🛒 Розпочати оформлення", callback_data="start_order")]
+            [InlineKeyboardButton(text="📢 Перейти для оформлення замовлення на канал", url=f"https://t.me/{MAIN_CHANNEL.replace('@','')}")],
+            [InlineKeyboardButton(text="🛒 Розпочати оформлення", callback_data="start_order")]
         ])
         await msg.answer(
             "Привіт! Це бот Taverna 👋\n\n"
@@ -1382,7 +1382,10 @@ async def publish_test(msg: Message):
         chat_id=msg.chat.id,
         text="Тест публікації",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Відкрити бот", url="https://t.me/taverna_ukr_bot")]
+            [InlineKeyboardButton(
+                text="📢 Відкрити канал",
+                url=f"https://t.me/c/{TEST_CHANNEL.replace('-100','')}"
+        )]
     ])
 )
     await msg.answer("✅ Тестовий пост (Гольф чорний) опубліковано в каналі.")
