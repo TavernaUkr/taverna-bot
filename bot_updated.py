@@ -318,14 +318,12 @@ def load_cart(user_id: int) -> dict:
 
     return data
 
-
 def save_cart(user_id: int, cart: dict):
     """
     Зберігає кошик у GCS.
     """
     blob = _cart_blob(user_id)
     blob.upload_from_string(json.dumps(cart, ensure_ascii=False), content_type="application/json")
-
 
 def add_to_cart(user_id: int, product: dict, size: str, amount: int):
     """
