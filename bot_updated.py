@@ -1827,7 +1827,7 @@ async def size_continue_handler(cb: CallbackQuery, state: FSMContext):
 
 # Обробник вибору розміру
 @router.callback_query(lambda c: c.data and c.data.startswith("choose_size:"))
-async def cb_choose_size(query: types.CallbackQuery, state: FSMContext):
+async def cb_choose_size(query: CallbackQuery, state: FSMContext):
     # формат: choose_size:<sku>:<size>
     try:
         _, sku, size = query.data.split(":", 2)
