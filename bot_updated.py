@@ -26,7 +26,7 @@ from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone, timedelta
 from google.cloud import storage
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.enums import ParseMode
+from aiogram.enums import ParseMode,
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
@@ -1856,7 +1856,7 @@ async def cb_choose_size(query: CallbackQuery, state: FSMContext):
 
 # Обробник натискання "підтвердити" з suggestion
 @router.callback_query(lambda c: c.data == "article:confirm")
-async def cb_article_confirm(query: types.CallbackQuery, state: FSMContext):
+async def cb_article_confirm(query: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     product = data.get("last_suggestion")
     if not product:
