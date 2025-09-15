@@ -275,20 +275,31 @@ def build_products_index_from_xml(text: str):
     except Exception:
         logger.exception("Failed to build products index")
 
-def find_product_by_sku(sku: str):
+def find_product_by_sku(sku: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    """
+    Пошук товару по SKU або vendorCode у PRODUCTS_INDEX.
+    Повертає (product, method).
+    """
+    if not sku:
+        return None, "empty"
+
     norm = normalize_sku(sku)
 
-    # 1. Шукаємо по offer_id (старий спосіб)
-    if norm in product_index:
-        return product_index[norm]
+    # 1) Пошук по SKU
+    if norm in PRODUCTS_INDEX["by_sku"]:
+        return PRODUCTS_INDEX["by_sku"][norm], "by_sku"
 
-    # 2. Шукаємо по vendorCode (артикулу)
-    for prod in all_products.values():
-        if prod.get("vendorCode") and normalize_sku(prod["vendorCode"]) == norm:
-            return prod
+    # 2) Пошук по vendorCode
+    if norm in PRODUCTS_INDEX["by_name"]:
+        return PRODUCTS_INDEX["by_name"][norm], "by_vendorCode"
 
-    # 3. Якщо нічого не знайшли
-    return None
+    # 3) Пошук у сирих SKU (raw_skus)
+    for p in PRODUCTS_INDEX["all_products"]:
+        if norm in [normalize_sku(s) for s in p.get("raw_skus", [])]:
+            return p, "by_raw_sku"
+
+    # 4) Не знайдено
+    return None, "not_found"
 
 # ---------------- Cache for MyDrop products ----------------
 CART_TTL_SECONDS = 15 * 60  # 15 хвилин
