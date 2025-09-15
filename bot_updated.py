@@ -920,11 +920,11 @@ async def cmd_start(msg: Message, state: FSMContext, command: CommandStart):
 
         if sku:
             sku_norm = normalize_sku(sku)
-            product = find_product_by_sku(sku_norm)
+            product, method = find_product_by_sku(sku_norm)
             logger.debug(
-                "Deep link lookup result. SKU=%s (norm=%s), found=%s",
-                sku, sku_norm, bool(product)
-            )
+                "Deep link lookup result. SKU=%s (norm=%s), method=%s, found=%s",
+                sku, sku_norm, method, bool(product)
+)
 
             if not product:
                 await msg.answer("⚠️ Товар з таким артикулом не знайдено. Введіть артикул або назву вручну.")
