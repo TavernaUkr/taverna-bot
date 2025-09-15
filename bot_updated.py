@@ -26,7 +26,7 @@ from urllib.parse import urlparse, parse_qs
 from datetime import datetime, timezone, timedelta
 from google.cloud import storage
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.enums import ParseMode,
+from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
