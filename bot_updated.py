@@ -353,9 +353,10 @@ def add_to_cart(user_id: int, product: dict, size: str, amount: int):
 ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 # ---------------- id Telegram ----------------
-async def get_channel_id():
+@router.message(Command("get_chatid"))
+async def cmd_get_chatid(msg: Message):
     chat = await bot.get_chat("@test_taverna")
-    print(chat.id)
+    await msg.answer(f"ID каналу: {chat.id}")
 
 # ---------------- Aiogram bot ----------------
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
