@@ -1384,10 +1384,11 @@ async def publish_test(msg: Message):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(
                 text="📢 Відкрити канал",
-                url=f"https://t.me/c/{TEST_CHANNEL.replace('-100','')}"
-        )]
-    ])
-)
+                url=os.getenv("TEST_CHANNEL_URL")  # 👈 винеси в .env
+            )]
+        ])
+    )
+
     await msg.answer("✅ Тестовий пост (Гольф чорний) опубліковано в каналі.")
 
 # ---------------- Test command ----------------
