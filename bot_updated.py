@@ -350,17 +350,14 @@ def add_to_cart(user_id: int, product: dict, size: str, amount: int):
 # буде заповнений в main()
 ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
-# ---------------- id Telegram ----------------
-@router.message(Command("get_chatid"))
-async def cmd_get_chatid(msg: Message):
-    chat = await bot.get_chat("@test_taverna")
-    await msg.answer(f"ID каналу: {chat.id}")
-
 # ---------------- Aiogram bot ----------------
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
-router = Router()
+
+router = Router()  # ✅ додаємо це
+
 dp.include_router(router)
+
 
 from aiogram.types import BotCommand
 
@@ -388,6 +385,12 @@ class OrderForm(StatesGroup):
     payment = State()
     note = State()
     confirm = State()
+
+# ---------------- id Telegram ----------------
+@router.message(Command("get_chatid"))
+async def cmd_get_chatid(msg: Message):
+    chat = await bot.get_chat("@test_taverna")
+    await msg.answer(f"ID каналу: {chat.id}")
 
 # ---------------- Helpers: keyboards ----------------
 async def push_flow(state: FSMContext, state_name: str):
