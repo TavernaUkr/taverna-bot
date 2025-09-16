@@ -310,9 +310,10 @@ def build_products_index_from_xml(text: str):
 # ---------------- Robust SKU search (ФІНАЛЬНА ВЕРСІЯ) ----------------
 def find_product_by_sku(raw: str) -> Optional[list]:
     """
-    Покращений пошук з сортуванням за релевантністю.
+    Покращений пошук з сортуванням, який надає пріоритет повноцінним товарам.
     1. Шукає точний збіг.
-    2. Якщо не знайдено, шукає часткові збіги і сортує їх.
+    2. Якщо не знайдено, шукає часткові збіги.
+    3. Сортує результати, штрафуючи товари без назви або ціни.
     """
     if not raw:
         return None
@@ -323,7 +324,7 @@ def find_product_by_sku(raw: str) -> Optional[list]:
 
     by_sku = PRODUCTS_INDEX.get("by_sku", {})
     
-    # --- Етап 1: Точний пошук (швидкий і надійний) ---
+    # --- Етап 1: Точний пошук ---
     candidates = []
     if norm in by_sku: candidates.extend(by_sku[norm])
     if rl in by_sku: candidates.extend(by_sku[rl])
@@ -334,7 +335,7 @@ def find_product_by_sku(raw: str) -> Optional[list]:
         logger.debug(f"Found {len(unique_products)} products by exact match for SKU='{raw}'")
         return unique_products
 
-    # --- Етап 2: Частковий пошук з оцінкою релевантності ---
+    # --- Етап 2: Частковий пошук з оцінкою якості даних ---
     candidates_with_scores = []
     if len(raw) >= 3:
         processed_offers = set()
@@ -345,18 +346,18 @@ def find_product_by_sku(raw: str) -> Optional[list]:
                     if offer_id in processed_offers:
                         continue
                     
-                    # Оцінюємо, наскільки товар відповідає запиту
+                    # 1. Базова оцінка за збігом артикула
                     score = 0
                     vendor_code_norm = normalize_sku(p.get("vendor_code", ""))
                     
-                    if norm == vendor_code_norm:
-                        score = 100  # Ідеальний збіг по артикулу
-                    elif norm in vendor_code_norm:
-                        score = 90   # Частковий збіг по артикулу
-                    elif key.startswith(norm):
-                        score = 70   # Збіг на початку ID
-                    else:
-                        score = 10   # Інший частковий збіг
+                    if norm == vendor_code_norm: score = 100
+                    elif norm in vendor_code_norm: score = 90
+                    elif key.startswith(norm): score = 70
+                    else: score = 10
+                    
+                    # 2. Штраф за відсутність ключових даних
+                    if not p.get("name") or not p.get("drop_price"):
+                        score -= 50 # Значно знижуємо рейтинг "порожніх" товарів
                     
                     candidates_with_scores.append({"product": p, "score": score})
                     processed_offers.add(offer_id)
@@ -365,10 +366,8 @@ def find_product_by_sku(raw: str) -> Optional[list]:
         logger.debug("Lookup failed for SKU=%s norm=%s (even with partial search)", raw, norm)
         return None
 
-    # Сортуємо кандидатів за оцінкою (від кращого до гіршого)
+    # Сортуємо кандидатів за фінальною оцінкою
     sorted_candidates = sorted(candidates_with_scores, key=lambda x: x["score"], reverse=True)
-    
-    # Повертаємо список лише товарів, вже відсортований
     final_products = [item["product"] for item in sorted_candidates]
     
     if final_products:
