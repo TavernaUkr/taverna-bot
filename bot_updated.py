@@ -648,20 +648,25 @@ async def cmd_debug_findraw(msg: Message):
         await msg.answer("debug failed")
 
 @router.message(Command("debug_lookup"))
-async def cmd_debug_lookup(msg: Message):
-    """
-    /debug_lookup 1056
-    Викликає find_product_by_sku і повертає результат (product, method).
-    """
+async def cmd_debug_lookup(msg: Message, command: CommandObject):
     try:
-        arg = (msg.text or "").split(maxsplit=1)
-        key = arg[1].strip() if len(arg) > 1 else ""
-        norm = normalize_sku(key) if key else key
-        prod, method = find_product_by_sku(norm) if norm else (None, "empty")
-        await msg.answer(f"lookup: key={key} norm={norm} found={bool(prod)} method={method}\nprod_sample={prod and {'offer_id':prod.get('offer_id'),'vendor_code':prod.get('vendor_code'),'name':prod.get('name')}}")
-    except Exception:
-        logger.exception("debug_lookup failed")
-        await msg.answer("debug failed")
+        raw = command.args.strip() if command.args else ""
+        norm = normalize_sku(raw) if raw else None
+        logger.debug(f"Debug lookup: raw='{raw}', norm='{norm}'")
+
+        result = find_product_by_sku(norm) if norm else None
+        if result:
+            prod, method = result
+            await msg.answer(f"✅ Lookup success: {prod['name']} (method={method})")
+        else:
+            await msg.answer(
+                f"❌ Lookup failed for SKU={raw} norm={norm}\n"
+                f"by_sku has norm? {norm in PRODUCTS_INDEX['by_sku']}\n"
+                f"keys sample: {list(PRODUCTS_INDEX['by_sku'].keys())[:10]}"
+            )
+    except Exception as e:
+        logger.error("debug_lookup failed", exc_info=True)
+        await msg.answer(f"❌ Debug lookup error: {e}")
 
 # ---------------- Helpers: keyboards ----------------
 async def push_flow(state: FSMContext, state_name: str):
