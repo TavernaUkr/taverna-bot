@@ -240,62 +240,60 @@ def build_products_index_from_xml(text: str):
 # ---------------- Robust SKU search (ФІНАЛЬНА ВЕРСІЯ) ----------------
 def find_product_by_sku(raw: str) -> Optional[list]:
     """
-    Фінальна версія пошуку, яка жорстко пріоритезує якісні дані.
+    Фінальна версія пошуку, яка жорстко фільтрує "порожні" товари.
+    1. Знаходить усіх можливих кандидатів.
+    2. Викидає зі списку всіх, у кого немає назви або ціни.
+    3. Сортує решту за релевантністю.
     """
     if not raw:
         return None
 
     raw = str(raw).strip()
     norm = normalize_sku(raw)
-    rl = raw.lower()
     by_sku = PRODUCTS_INDEX.get("by_sku", {})
     
-    # --- Етап 1: Точний пошук ---
-    candidates = []
-    if norm in by_sku: candidates.extend(by_sku[norm])
-    if rl in by_sku: candidates.extend(by_sku[rl])
-    if raw in by_sku: candidates.extend(by_sku[raw])
-    if candidates:
-        unique_products = list({p["offer_id"]: p for p in candidates}.values())
-        logger.debug(f"Found {len(unique_products)} products by exact match for SKU='{raw}'")
-        return unique_products
-
-    # --- Етап 2: Частковий пошук з агресивною оцінкою ---
-    candidates_with_scores = []
+    # --- Етап 1: Збираємо абсолютно всіх кандидатів ---
+    all_candidates = []
     processed_offers = set()
+
+    # Поєднуємо пошук по точному збігу та частковому
     for key, products in by_sku.items():
         if raw in key or norm in key:
             for p in products:
                 offer_id = p.get("offer_id")
-                if offer_id in processed_offers:
-                    continue
-                
-                # 1. Базова оцінка
-                score = 0
-                vendor_code = p.get("vendor_code", "")
-                vendor_code_norm = normalize_sku(vendor_code)
-                
-                if norm == vendor_code_norm:
-                    score = 100  # Ідеальний збіг
-                elif norm in vendor_code_norm:
-                    score = 90   # "1056" є в "A1056"
-                else:
-                    score = 10   # Інший частковий збіг
-                
-                # 2. ВЕЛИЧЕЗНИЙ БОНУС за наявність ключових даних
-                if p.get("name") and p.get("drop_price"):
-                    score += 1000  # Цей бонус гарантує, що "хороші" товари завжди будуть першими
-                
-                # 3. Бонус за точний vendor_code
-                if vendor_code == "A1056":
-                     score += 500
+                if offer_id not in processed_offers:
+                    all_candidates.append(p)
+                    processed_offers.add(offer_id)
 
-                candidates_with_scores.append({"product": p, "score": score})
-                processed_offers.add(offer_id)
-
-    if not candidates_with_scores:
-        logger.debug("Lookup failed for SKU=%s", raw)
+    if not all_candidates:
+        logger.debug("Lookup failed: No candidates found for SKU=%s", raw)
         return None
+
+    # --- Етап 2: ЖОРСТКА ФІЛЬТРАЦІЯ ---
+    # Залишаємо тільки ті товари, в яких є і назва, і ціна.
+    # Це найважливіший крок, який прибирає "сміття".
+    good_candidates = [
+        p for p in all_candidates 
+        if p.get("name") and p.get("drop_price")
+    ]
+
+    if not good_candidates:
+        logger.warning(f"Lookup warning for SKU='{raw}': Found {len(all_candidates)} candidates, but all were filtered out (missing name or price).")
+        return None
+
+    # --- Етап 3: Сортування тільки "хороших" кандидатів ---
+    candidates_with_scores = []
+    for p in good_candidates:
+        score = 0
+        vendor_code_norm = normalize_sku(p.get("vendor_code", ""))
+        
+        if norm == vendor_code_norm:
+            score = 100  # Ідеальний збіг
+        elif norm in vendor_code_norm:
+            score = 90   # "1056" є в "A1056"
+        else:
+            score = 10   # Інший збіг
+        candidates_with_scores.append({"product": p, "score": score})
 
     sorted_candidates = sorted(candidates_with_scores, key=lambda x: x["score"], reverse=True)
     final_products = [item["product"] for item in sorted_candidates]
@@ -303,7 +301,7 @@ def find_product_by_sku(raw: str) -> Optional[list]:
     if final_products:
         best_match = sorted_candidates[0]
         logger.debug(
-            f"Found {len(final_products)} products by partial match for SKU='{raw}'. "
+            f"Lookup success for SKU='{raw}': Found {len(final_products)} valid products. "
             f"Best match score: {best_match['score']}, name: '{best_match['product'].get('name')}', "
             f"vc: '{best_match['product'].get('vendor_code')}'"
         )
