@@ -322,6 +322,14 @@ def build_products_index_from_xml(text: str):
                 except Exception:
                     candidates.add(rv.lower())
 
+            # 🔥 Обов’язково додаємо vendorCode окремо, щоб короткі артикули (типу 1056) не губилися
+            if vendor_code:
+                vc_norm = normalize_sku(vendor_code)
+                PRODUCTS_INDEX["by_sku"][vendor_code.strip()] = product
+                PRODUCTS_INDEX["by_sku"][vendor_code.strip().lower()] = product
+                if vc_norm:
+                    PRODUCTS_INDEX["by_sku"][vc_norm] = product
+
             for key in candidates:
                 if key:
                     PRODUCTS_INDEX["by_sku"][key] = product
