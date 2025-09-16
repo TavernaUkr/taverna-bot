@@ -240,6 +240,12 @@ def build_products_index_from_xml(text: str):
 
             raw_skus = [r for r in dict.fromkeys([r for r in raw_skus if r])]
 
+            if vendor_code or offer_id:
+                logger.debug(
+                    "INDEXED PRODUCT: offer_id=%s, vendor_code=%s, raw_skus=%s, name=%s",
+                    offer_id, vendor_code, raw_skus, name
+    )
+
             main_key = vendor_code or offer_id or (raw_skus[0] if raw_skus else "")
             sku_normalized = normalize_sku(main_key) or (main_key or "").lower()
 
