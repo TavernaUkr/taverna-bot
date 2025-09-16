@@ -163,6 +163,7 @@ def build_products_index_from_xml(text: str):
         "by_name": {},
         "by_offer": {},
         "by_base_name": {}
+        "by_vendor": {}
     }
 
     try:
@@ -1059,7 +1060,7 @@ async def cmd_start_deeplink(msg: Message, command: CommandObject):
 
         # ✅ Нормалізація і пошук по vendorCode
         sku_norm = normalize_sku(sku)
-        vendor_group = PRODUCTS_INDEX["by_vendor"].get(sku_norm)
+        vendor_group = PRODUCTS_INDEX.get("by_vendor", {}).get(sku_norm, [])
 
         if vendor_group:
             # кілька офферів з одним vendorCode
