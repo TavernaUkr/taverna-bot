@@ -39,7 +39,9 @@ from telethon.tl.types import MessageMediaPhoto
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from html import unescape
 import tempfile
+
 
 app = Flask(__name__)
 
@@ -133,12 +135,16 @@ PRODUCTS_INDEX = {
 }
 # ---------------- Build product index (robust) ----------------
 def normalize_sku(s: str) -> str:
-    """Нормалізує SKU: зберігаємо лише латинські букви і цифри, у lower-case."""
+    """Нормалізує артикул / sku: прибирає пробіли, невидимі символи та небажані знаки, нижній регістр."""
     if not s:
         return ""
-    s = str(s).strip()
-    # Видаляємо все, що не літера/цифра, робимо нижній регістр
-    return re.sub(r'[^0-9A-Za-z]+', '', s).lower()
+    s = unescape(str(s))
+    s = s.strip()
+    # видаляємо zero-width і BOM
+    s = re.sub(r'[\u200B\uFEFF]', '', s)
+    # залишаємо лише латинські букви і цифри
+    s = re.sub(r'[^0-9A-Za-z]+', '', s)
+    return s.lower()
 
 # ---------------- Build product index (robust) ----------------
 def build_products_index_from_xml(text: str):
@@ -147,10 +153,17 @@ def build_products_index_from_xml(text: str):
       - PRODUCTS_INDEX["by_sku"] -> mapping ключ -> product dict
       - PRODUCTS_INDEX["by_offer"] -> mapping offer_id -> product dict
       - PRODUCTS_INDEX["by_name"] -> token -> [product dicts]
+      - PRODUCTS_INDEX["by_base_name"] -> base_name -> [product dicts]
       - PRODUCTS_INDEX["all_products"] -> list(product dicts)
     """
     global PRODUCTS_INDEX
-    PRODUCTS_INDEX = {"all_products": [], "by_sku": {}, "by_name": {}, "by_offer": {}}
+    PRODUCTS_INDEX = {
+        "all_products": [],
+        "by_sku": {},
+        "by_name": {},
+        "by_offer": {},
+        "by_base_name": {}
+    }
 
     try:
         it = ET.iterparse(io.StringIO(text), events=("end",))
@@ -163,7 +176,6 @@ def build_products_index_from_xml(text: str):
             offer_id = (elem.attrib.get("id") or "").strip()
             group_id = (elem.attrib.get("group_id") or elem.attrib.get("group") or "").strip()
 
-            # --- шукаємо vendor_code ---
             vendor_code = _find_first_text(
                 elem, ["vendorcode", "vendor_code", "vendorCode", "sku", "articul", "article", "code", "vendor"]
             ) or ""
@@ -171,17 +183,6 @@ def build_products_index_from_xml(text: str):
                 vc = elem.find("vendorCode")
                 if vc is not None and (vc.text or "").strip():
                     vendor_code = vc.text.strip()
-
-            for c in list(elem):
-                ln = _local_tag(c.tag)
-                if ln == "param":
-                    pname = (c.attrib.get("name") or "").strip().lower()
-                    if "артикул" in pname or "sku" in pname or "код" in pname:
-                        if c.text and c.text.strip():
-                            vendor_code = vendor_code or c.text.strip()
-
-            if vendor_code:
-                logger.debug(f"Offer {offer_id}: vendor_code found = {vendor_code}")
 
             name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
             description = _find_first_text(elem, ["description", "desc"]) or ""
@@ -199,21 +200,15 @@ def build_products_index_from_xml(text: str):
                     if txt:
                         pictures.append(txt)
 
-            # --- raw_skus (offer_id + vendor_code + param variants) ---
-            raw_skus = []
-            if offer_id:
-                raw_skus.append(offer_id)
-            if vendor_code:
-                raw_skus.append(vendor_code)
-
+            # sizes / stock / available
             sizes = []
             stock_qty = 0
             available = True
             for c in list(elem):
                 ln = _local_tag(c.tag)
-                pname = (c.attrib.get("name") or c.attrib.get("k") or "").strip().lower()
-                ptxt = (c.text or "").strip()
                 if ln in ("param", "attribute"):
+                    pname = (c.attrib.get("name") or c.attrib.get("k") or "").strip().lower()
+                    ptxt = (c.text or "").strip()
                     if pname and ("размер" in pname or "size" in pname or "розмір" in pname):
                         if ptxt:
                             sizes.append(ptxt)
@@ -226,34 +221,24 @@ def build_products_index_from_xml(text: str):
                     av = (c.text or "").strip().lower()
                     if av in ("false", "0", "no"):
                         available = False
-                if ln == "param" and ("vendor" in pname or "art" in pname or "sku" in pname):
-                    if ptxt:
-                        raw_skus.append(ptxt)
 
-            # fallback з description
-            if not vendor_code and description:
-                m = re.search(r'(?:артикул|артікул|sku|код|article)[:\s\-]*([0-9A-Za-z\-]{2,30})', description, flags=re.I)
-                if m:
-                    vendor_code = m.group(1).strip()
-                    logger.debug(f"Offer {offer_id}: vendor_code fallback = {vendor_code}")
-                    raw_skus.append(vendor_code)
+            raw_skus = []
+            if offer_id:
+                raw_skus.append(offer_id)
+            if vendor_code:
+                raw_skus.append(vendor_code)
 
             raw_skus = [r for r in dict.fromkeys([r for r in raw_skus if r])]
-
-            if vendor_code or offer_id:
-                logger.debug(
-                    "INDEXED PRODUCT: offer_id=%s, vendor_code=%s, raw_skus=%s, name=%s",
-                    offer_id, vendor_code, raw_skus, name
-    )
 
             main_key = vendor_code or offer_id or (raw_skus[0] if raw_skus else "")
             sku_normalized = normalize_sku(main_key) or (main_key or "").lower()
 
-            if vendor_code == "1056" or main_key == "1056":
-                logger.debug(
-                    "DEBUG PRODUCT: offer_id=%s, vendor_code=%s, raw_skus=%s, sku_norm=%s, name=%s",
-                    offer_id, vendor_code, raw_skus, sku_normalized, name,
-                )
+            # === NEW: визначаємо base_name (без кольору) ===
+            words = (name or "").split()
+            if len(words) > 1:
+                base_name = " ".join(words[:-1]).lower()
+            else:
+                base_name = (name or "").lower()
 
             product = {
                 "offer_id": offer_id,
@@ -263,6 +248,7 @@ def build_products_index_from_xml(text: str):
                 "sku": sku_normalized,
                 "vendor_code": vendor_code,
                 "name": name,
+                "base_name": base_name,
                 "description": description,
                 "pictures": pictures,
                 "sizes": list(dict.fromkeys(sizes)) if sizes else [],
@@ -273,10 +259,12 @@ def build_products_index_from_xml(text: str):
 
             PRODUCTS_INDEX["all_products"].append(product)
 
+            # index by offer_id
             if offer_id:
                 PRODUCTS_INDEX["by_offer"][offer_id.lower()] = product
                 PRODUCTS_INDEX["by_offer"][normalize_sku(offer_id) or offer_id.lower()] = product
 
+            # index by sku/vendor_code/raw
             candidates = set()
             if sku_normalized:
                 candidates.add(sku_normalized)
@@ -284,11 +272,6 @@ def build_products_index_from_xml(text: str):
                 mk = main_key.strip().lower()
                 candidates.add(mk)
                 candidates.add(mk.lstrip("0"))
-            if offer_id:
-                offer_low = offer_id.strip().lower()
-                candidates.add(offer_low)
-                candidates.add(normalize_sku(offer_id) or offer_low)
-                candidates.add(offer_low.lstrip("0"))
             if vendor_code:
                 vc_low = vendor_code.strip().lower()
                 candidates.add(vc_low)
@@ -305,14 +288,18 @@ def build_products_index_from_xml(text: str):
                 if key:
                     PRODUCTS_INDEX["by_sku"][key] = product
 
+            # index by name tokens
             for tok in re.findall(r'\w{3,}', (name or "").lower()):
                 PRODUCTS_INDEX["by_name"].setdefault(tok, []).append(product)
+
+            # === NEW: index by base_name ===
+            if base_name:
+                PRODUCTS_INDEX["by_base_name"].setdefault(base_name, []).append(product)
 
             elem.clear()
 
         total = len(PRODUCTS_INDEX["all_products"])
-        sample = [(p.get("raw_sku"), p.get("sku")) for p in PRODUCTS_INDEX["all_products"][:5]]
-        logger.debug("Product index built: %s products total. First 5 SKUs (raw,norm): %s", total, sample)
+        logger.debug("Product index built: %s products total.", total)
 
     except Exception:
         logger.exception("Failed to build products index")
@@ -336,50 +323,61 @@ def _find_first_text(elem, tags: list[str]) -> Optional[str]:
     return None
 
 # ---------------- Robust SKU search ----------------
-def find_product_by_sku(sku: str) -> Tuple[Optional[Dict[str, Any]], str]:
+def find_product_by_sku(raw: str) -> Optional[dict]:
     """
-    Пошук товару по SKU / артикулу / частині назви.
-    Повертає (product_dict_or_None, method_string).
-    method_string: 'by_sku', 'candidate:<key>', 'vendor_code', 'raw_sku', 'offer_id', 'name_contains', 'not_found'
+    Шукаємо товар по артикулу / offer_id / vendor_code / raw_sku / назві.
+    Підтримує точний та частковий пошук.
     """
-    if not sku:
-        return None, "empty"
+    if not raw:
+        return None
 
-    raw = str(sku).strip()
-    norm = normalize_sku(raw) or raw.lower()
+    raw = raw.strip()
+    norm = normalize_sku(raw)
+    logger.debug(f"Searching product: input='{raw}', normalized='{norm}'")
 
-    by_sku = PRODUCTS_INDEX.get("by_sku", {})
-    all_products = PRODUCTS_INDEX.get("all_products", [])
+    # 1. прямі хіти в індексі
+    if norm in PRODUCTS_INDEX["by_sku"]:
+        logger.debug("Deep link lookup result. SKU=%s (norm=%s), found=True (method=by_sku_norm)", raw, norm)
+        return PRODUCTS_INDEX["by_sku"][norm]
 
-    logger.debug("Searching product: input=%r, normalized=%r", raw, norm)
+    if raw.lower() in PRODUCTS_INDEX["by_sku"]:
+        logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_sku_raw)", raw)
+        return PRODUCTS_INDEX["by_sku"][raw.lower()]
 
-    # 1) прямий збіг у by_sku
-    p = by_sku.get(norm)
-    if p:
-        return p, "by_sku"
+    raw_nozero = raw.lstrip("0").lower()
+    if raw_nozero in PRODUCTS_INDEX["by_sku"]:
+        logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_sku_nozero)", raw)
+        return PRODUCTS_INDEX["by_sku"][raw_nozero]
 
-    # 2) пробуємо кілька кандидатів (lower, без ведучих нулів)
-    for cand in (raw.lower(), raw.lstrip("0")):
-        if not cand:
-            continue
-        p = by_sku.get(cand)
-        if p:
-            return p, f"candidate:{cand}"
+    # 2. пошук по offer_id
+    if raw in PRODUCTS_INDEX["by_offer"]:
+        logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_offer)", raw)
+        return PRODUCTS_INDEX["by_offer"][raw]
 
-    # 3) лінійний пошук по всіх продуктах (vendorCode / raw_skus / offer_id / name contains)
-    qlow = raw.lower()
-    for p in all_products:
-        if qlow == (p.get("vendor_code") or "").lower():
-            return p, "vendor_code"
-        for rs in p.get("raw_skus", []) or []:
-            if qlow == (rs or "").lower() or qlow == (rs or "").lstrip("0").lower():
-                return p, "raw_sku"
-        if qlow == (p.get("offer_id") or "").lower():
-            return p, "offer_id"
-        if qlow in (p.get("name") or "").lower() or qlow in (p.get("description") or "").lower():
-            return p, "name_contains"
+    # 3. пошук по vendor_code / raw_skus
+    for p in PRODUCTS_INDEX["all_products"]:
+        if raw.lower() == (p.get("vendor_code") or "").lower():
+            logger.debug("Deep link lookup result. SKU=%s, found=True (method=vendor_code)", raw)
+            return p
+        if any(raw.lower() == (sku or "").lower() for sku in p.get("raw_skus", [])):
+            logger.debug("Deep link lookup result. SKU=%s, found=True (method=raw_skus)", raw)
+            return p
+        if raw == p.get("offer_id"):
+            logger.debug("Deep link lookup result. SKU=%s, found=True (method=offer_id)", raw)
+            return p
 
-    return None, "not_found"
+    # 4. частковий пошук у назві / описі
+    tokens = re.findall(r"\w{3,}", raw.lower())
+    if tokens:
+        for p in PRODUCTS_INDEX["all_products"]:
+            haystack = (p.get("name", "") + " " + p.get("description", "")).lower()
+            if all(tok in haystack for tok in tokens):
+                logger.debug("Deep link lookup result. SKU=%s, found=True (method=partial_name)", raw)
+                return p
+
+    # 5. не знайдено
+    logger.debug("Deep link lookup result. SKU=%s (norm=%s), found=False (method=not_found)", raw, norm)
+    return None
 
 # ---------------- global async loop holder ----------------
 # буде заповнений в main()
@@ -1023,42 +1021,69 @@ def render_product_text(product: dict, mode: str = "client", include_intro: bool
 def render_product_text(product: dict, mode: str = "client", include_intro: bool = True) -> str:
     return format_product_message(product, mode=mode, include_intro=include_intro)
 
-# ---------------- START (deep links) ----------------
+# ---------------- callback при виборі розміру----------------
+@router.callback_query(F.data.startswith("order:"))
+async def handle_order_callback(query: CallbackQuery):
+    offer_id = query.data.split(":")[1]
+    product = PRODUCTS_INDEX["by_offer"].get(offer_id)
+    if not product:
+        await query.answer("❌ Товар не знайдено", show_alert=True)
+        return
+
+    # ✅ Формуємо JSON для mydrop
+    order_json = {
+        "offer_id": product["offer_id"],
+        "vendor_code": product["vendor_code"],
+        "size": product["sizes"][0] if product["sizes"] else None,
+        "qty": 1,
+    }
+    logger.info(f"Prepared JSON for mydrop: {order_json}")
+
+    await query.answer(f"✅ Обрано: {product['name']} ({', '.join(product['sizes'])})")
+
 # ---------------- Start command with deep-link ----------------
 @router.message(CommandStart(deep_link=True))
-async def cmd_start(msg: Message, command: CommandObject):
-    """
-    Обробка deep-link запуску бота:
-      /start order_<mode>_<postid>__sku_<sku>
-    """
-    args = (command.args or "").strip()
-    if not args:
-        await msg.answer("Вітаю у боті Taverna! Використовуйте меню для пошуку товарів.")
+async def cmd_start_deeplink(msg: Message, command: CommandObject):
+    logger.info("Start deep link: %s", command.args)
+    if not command.args:
+        await msg.answer("👋 Вітаю! Надішліть артикул або посилання.")
         return
 
-    logger.info("Start deep link: %s", args)
+    args = command.args.strip()
+    if "__sku_" in args:
+        # формат: order_test_12345__sku_1056
+        parts = args.split("__sku_")
+        order_info = parts[0]
+        sku = parts[1].strip()
+        logger.info("Start deep link: mode=test post_id=%s sku=%s", order_info, sku)
 
-    # Парсимо deep-link
-    m = re.match(r"^order_([^_]+)_(.+?)__sku_(.+)$", args)
-    if not m:
-        await msg.answer("❌ Невірне посилання або формат команди.")
-        return
+        # ✅ Нормалізація і пошук по vendorCode
+        sku_norm = normalize_sku(sku)
+        vendor_group = PRODUCTS_INDEX["by_vendor"].get(sku_norm)
 
-    mode, post_id, sku = m.groups()
-    logger.info("Start deep link: mode=%s post_id=%s sku=%s", mode, post_id, sku)
+        if vendor_group:
+            # кілька офферів з одним vendorCode
+            base = vendor_group[0]
+            caption = f"🛍 {base['name']}\n💰 {base['drop_price']} грн\n\n{base['description']}"
+            kb = InlineKeyboardMarkup()
+            for p in vendor_group:
+                size_label = ", ".join(p["sizes"]) if p["sizes"] else f"ID {p['offer_id']}"
+                kb.add(InlineKeyboardButton(
+                    f"📏 {size_label}",
+                    callback_data=f"order:{p['offer_id']}"
+                ))
+            await msg.answer_photo(base["pictures"][0] if base["pictures"] else None,
+                                   caption=caption,
+                                   reply_markup=kb)
+            return
 
-    # Нормалізуємо та шукаємо продукт через індекс
-    norm_sku = normalize_sku(sku) if sku else None
-    product, method = find_product_by_sku(norm_sku) if norm_sku else (None, "empty")
+        # fallback → пошук по by_sku (як було раніше)
+        product = find_product_by_sku(sku)
+        if not product:
+            await msg.answer(f"❌ Товар з артикулом {sku} не знайдено.")
+            return
 
-    logger.debug(
-        "Deep link lookup result. SKU=%s (norm=%s), found=%s (method=%s)",
-        sku, norm_sku, bool(product), method,
-    )
-
-    if not product:
-        await msg.answer(f"❌ Товар з артикулом <code>{sku}</code> не знайдено.", parse_mode="HTML")
-        return
+        await show_product(msg, product)
 
     # Формуємо повідомлення з товаром
     vendor_code = product.get("vendor_code") or product.get("raw_sku") or sku
@@ -1078,6 +1103,99 @@ async def cmd_start(msg: Message, command: CommandObject):
         await msg.answer_photo(photo=pictures[0], caption=text, reply_markup=kb, parse_mode="HTML")
     else:
         await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+
+    # показуємо перші 10 результатів
+    for product in results[:10]:
+        title = product.get("name", "Без назви")
+        price = product.get("price", "—")
+        sku = product.get("vendor_code", "—")
+        offer_id = product.get("offer_id", "—")
+        pics = product.get("pictures", [])
+
+        caption = f"📦 <b>{title}</b>\n💰 {price} грн\n🆔 Артикул: {sku}\n🔑 Offer ID: {offer_id}"
+
+        if pics:
+            await msg.answer_photo(
+                photo=pics[0],
+                caption=caption,
+                parse_mode="HTML"
+            )
+        else:
+            await msg.answer(caption, parse_mode="HTML")
+
+# ---------------- Command: /find ----------------
+RESULTS_PER_PAGE = 10
+
+def paginate_products(matches, page: int):
+    start = page * RESULTS_PER_PAGE
+    end = start + RESULTS_PER_PAGE
+    items = matches[start:end]
+
+    buttons = []
+    for p in items:
+        text = f"{p['name']} ({p['sku']})"
+        buttons.append([InlineKeyboardButton(text=text, callback_data=f"product:{p['offer_id']}")])
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"page:{page-1}"))
+    if end < len(matches):
+        nav_buttons.append(InlineKeyboardButton("➡️ Далі", callback_data=f"page:{page+1}"))
+    if nav_buttons:
+        buttons.append(nav_buttons)
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.message(Command("find"))
+async def cmd_find(message: Message, command: CommandObject, state: FSMContext):
+    query = (command.args or "").strip()
+    if not query:
+        await message.answer("❌ Введіть запит. Приклад: /find термо")
+        return
+
+    matches = search_products(query)
+    if not matches:
+        await message.answer("❌ Товарів не знайдено.")
+        return
+
+    await state.update_data(find_results=matches)
+    kb = paginate_products(matches, 0)
+    await message.answer(f"🔎 Знайдено {len(matches)} товарів. Оберіть зі списку:", reply_markup=kb)
+
+@router.callback_query(F.data.startswith("page:"))
+async def cb_find_page(query: CallbackQuery, state: FSMContext):
+    page = int(query.data.split(":")[1])
+    data = await state.get_data()
+    matches = data.get("find_results", [])
+
+    kb = paginate_products(matches, page)
+    await query.message.edit_reply_markup(reply_markup=kb)
+    await query.answer()
+
+
+@router.callback_query(F.data.startswith("product:"))
+async def cb_find_product(query: CallbackQuery, state: FSMContext):
+    offer_id = query.data.split(":")[1]
+    product = PRODUCTS_INDEX["by_offer"].get(offer_id)
+    if not product:
+        await query.answer("❌ Товар не знайдено", show_alert=True)
+        return
+
+    text = (
+        f"<b>{product['name']}</b>\n"
+        f"💰 {product['price']} грн\n"
+        f"📦 В наявності: {product.get('stock', '?')}\n"
+        f"🔖 Артикул: {product['sku']}"
+    )
+    photo = product["pictures"][0] if product["pictures"] else None
+
+    if photo:
+        await query.message.answer_photo(photo, caption=text, parse_mode="HTML")
+    else:
+        await query.message.answer(text, parse_mode="HTML")
+
+    await query.answer()
 
 # ---------------- Callback: Add to cart ----------------
 @router.callback_query(F.data.startswith("addcart:"))
@@ -1788,9 +1906,6 @@ def _local_tag(tag: str) -> str:
         return tag.split("}", 1)[1]
     return tag
 
-def local(tag: str) -> str:
-    return _local_tag(tag)
-
 def _find_first_numeric_text(elem, candidates):
     """Шукає перший під-елемент з тегом в candidates, який може бути числом (float)."""
     for child in elem.iter():
@@ -1811,13 +1926,22 @@ def _find_first_numeric_text(elem, candidates):
 
 def _find_first_text(elem, tags: list[str]) -> Optional[str]:
     """
-    Шукає перший тег з текстом серед можливих назв.
-    Повертає текст або None.
+    Робочий case-insensitive пошук тексту у будь-якому під-елементі.
+    Повертає перший текст, де локальний тег містить один із candidates.
+    (більш стійкий до namespace / змішаного регістру)
     """
-    for t in tags:
-        child = elem.find(f".//{t}")
-        if child is not None and child.text:
-            return child.text.strip()
+    if not tags:
+        return None
+    tags_l = [t.lower() for t in tags]
+    for child in elem.iter():
+        name = _local_tag(child.tag).lower()
+        txt = (child.text or "").strip()
+        if not txt:
+            continue
+        # точний збіг або вхождення (щоб спіймати vendorCode, vendor_code, Vendor, sku і т.д.)
+        for t in tags_l:
+            if t == name or t in name or name in t:
+                return txt
     return None
 
 def _find_first_numeric(elem, tags: List[str]) -> Optional[float]:
