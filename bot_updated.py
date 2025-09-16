@@ -307,11 +307,13 @@ def build_products_index_from_xml(text: str):
     except Exception:
         logger.exception("❌ Failed to build products index")
 
-# ---------------- Robust SKU search (ВИПРАВЛЕНО) ----------------
+# ---------------- Robust SKU search (ФІНАЛЬНА ВЕРСІЯ) ----------------
 def find_product_by_sku(raw: str) -> Optional[list]:
     """
-    Шукаємо товар по артикулу / vendorCode / offer_id.
-    Повертаємо список унікальних product dicts.
+    Покращений пошук товару по артикулу / vendorCode / offer_id.
+    1. Шукає точний збіг (швидко).
+    2. Якщо не знайдено, шукає частковий збіг (входження рядка).
+    3. Повертає список унікальних product dicts.
     """
     if not raw:
         return None
@@ -325,34 +327,33 @@ def find_product_by_sku(raw: str) -> Optional[list]:
     
     candidates = []
 
-    # Шукаємо у всіх можливих індексах
-    if norm in by_sku:
-        candidates.extend(by_sku[norm])
-    if rl in by_sku:
-        candidates.extend(by_sku[rl])
-    if raw in by_sku:
-        candidates.extend(by_sku[raw])
-    if rl in by_vendor:
-        candidates.extend(by_vendor[rl])
+    # Етап 1: Точний пошук (найшвидший)
+    if norm in by_sku: candidates.extend(by_sku[norm])
+    if rl in by_sku: candidates.extend(by_sku[rl])
+    if raw in by_sku: candidates.extend(by_sku[raw])
+    if rl in by_vendor: candidates.extend(by_vendor[rl])
+    
+    # Якщо знайшли точні збіги, одразу повертаємо унікалізований результат
+    if candidates:
+        unique_products = list({p["offer_id"]: p for p in candidates}.values())
+        logger.debug(f"Found {len(unique_products)} products by exact match for SKU='{raw}'")
+        return unique_products
 
-    # Якщо нічого не знайдено, пробуємо пошук по частині назви/опису
-    if not candidates:
-        tokens = re.findall(r"\w{3,}", rl)
-        if tokens:
-            res = []
-            for p in PRODUCTS_INDEX.get("all_products", []):
-                haystack = (p.get("name", "") + " " + p.get("description", "")).lower()
-                if all(tok in haystack for tok in tokens):
-                    res.append(p)
-            if res:
-                candidates.extend(res)
+    # Етап 2: Частковий пошук (якщо точного збігу немає)
+    # Допомагає знайти '1056' в 'A1056'.
+    if len(raw) >= 3: # Не шукаємо для дуже коротких запитів
+        for key, products in by_sku.items():
+            # Шукаємо входження оригінального запиту (raw) або нормалізованого (norm) в ключ індексу
+            if raw in key or norm in key:
+                candidates.extend(products)
 
-    # Унікалізація результатів за offer_id
     if not candidates:
-        logger.debug("Lookup failed for SKU=%s norm=%s", raw, norm)
+        logger.debug("Lookup failed for SKU=%s norm=%s (even with partial search)", raw, norm)
         return None
 
+    # Унікалізація результатів, зібраних на Етапі 2
     unique_products = list({p["offer_id"]: p for p in candidates}.values())
+    logger.debug(f"Found {len(unique_products)} products by partial match for SKU='{raw}'")
     return unique_products
 
 # ---------------- global async loop holder ----------------
@@ -653,6 +654,17 @@ async def cmd_debug_lookup(msg: Message, command: CommandObject):
     except Exception as e:
         logger.error("debug_lookup failed", exc_info=True)
         await msg.answer(f"❌ Debug lookup error: {e}")
+
+def main_menu_keyboard():
+    """Створює клавіатуру головного меню."""
+    # Ви можете налаштувати кнопки та посилання на свій розсуд
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 Пошук товару за артикулом", callback_data="start_search")],
+        [InlineKeyboardButton(text="🛒 Мій кошик", callback_data="show_basket")],
+        # Розкоментуйте та вставте посилання на ваш канал
+        # [InlineKeyboardButton(text="🛍️ Перейти на канал", url="https://t.me/your_channel_name")]
+    ])
+    return kb
 
 # ---------------- Helpers: keyboards ----------------
 async def push_flow(state: FSMContext, state_name: str):
