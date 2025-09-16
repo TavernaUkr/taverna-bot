@@ -372,10 +372,13 @@ def find_product_by_sku(sku: str) -> Tuple[Optional[Dict[str, Any]], str]:
     raw = str(sku).strip()
     norm = normalize_sku(raw) or raw.lower()
 
+    by_sku = PRODUCTS_INDEX.get("by_sku", {})
+    all_products = PRODUCTS_INDEX.get("all_products", [])
+
     logger.debug("Searching product: input=%r, normalized=%r", raw, norm)
 
     # 1) прямий збіг у by_sku
-    p = PRODUCTS_INDEX["by_sku"].get(norm)
+    p = by_sku.get(norm)
     if p:
         return p, "by_sku"
 
@@ -383,24 +386,20 @@ def find_product_by_sku(sku: str) -> Tuple[Optional[Dict[str, Any]], str]:
     for cand in (raw.lower(), raw.lstrip("0")):
         if not cand:
             continue
-        p = PRODUCTS_INDEX["by_sku"].get(cand)
+        p = by_sku.get(cand)
         if p:
             return p, f"candidate:{cand}"
 
     # 3) лінійний пошук по всіх продуктах (vendorCode / raw_skus / offer_id / name contains)
     qlow = raw.lower()
-    for p in PRODUCTS_INDEX["all_products"]:
-        # vendorCode (артикул у XML – vendorCode)
-        if qlow == (p.get("vendor_code") or p.get("vendorCode") or "").lower():
+    for p in all_products:
+        if qlow == (p.get("vendor_code") or "").lower():
             return p, "vendor_code"
-        # raw_skus (варіанти, group offers)
         for rs in p.get("raw_skus", []) or []:
             if qlow == (rs or "").lower() or qlow == (rs or "").lstrip("0").lower():
                 return p, "raw_sku"
-        # offer_id
         if qlow == (p.get("offer_id") or "").lower():
             return p, "offer_id"
-        # partial name / description match
         if qlow in (p.get("name") or "").lower() or qlow in (p.get("description") or "").lower():
             return p, "name_contains"
 
