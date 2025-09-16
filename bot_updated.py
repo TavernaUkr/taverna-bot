@@ -171,8 +171,14 @@ def build_products_index_from_xml(text: str):
             offer_id = (elem.attrib.get("id") or "").strip()
             group_id = (elem.attrib.get("group_id") or elem.attrib.get("group") or "").strip()
 
-            # стандартні поля (використовуємо ваш _find_first_text якщо є)
-            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "vendorCode", "sku", "vendor", "vendor_code"]) or ""
+            # --- FIX: шукаємо тільки lowercase ключі ---
+            vendor_code = _find_first_text(
+                elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code", "vendor"]
+            ) or ""
+
+            # дебаг після отримання
+            if vendor_code:
+                logger.debug(f"Offer {offer_id}: vendor_code found = {vendor_code}")
             name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
             description = _find_first_text(elem, ["description", "desc"]) or ""
             price_txt = _find_first_text(elem, ["price", "cost"]) or ""
@@ -214,12 +220,11 @@ def build_products_index_from_xml(text: str):
                         available = False
 
             # fallback vendor_code: спробуємо знайти в різних місцях
-            if not vendor_code:
-                vendor_code = _find_first_text(elem, ["vendorCode", "vendor_code", "vendorcode", "vendor"]) or ""
-                if not vendor_code and description:
-                    m = re.search(r'(?:артикул|артікул|sku|код|article)[:\s\-]*([0-9A-Za-z\-]{2,30})', description, flags=re.I)
-                    if m:
-                        vendor_code = m.group(1).strip()
+            if not vendor_code and description:
+                m = re.search(r'(?:артикул|артікул|sku|код|article)[:\s\-]*([0-9A-Za-z\-]{2,30})', description, flags=re.I)
+                if m:
+                    vendor_code = m.group(1).strip()
+                    logger.debug(f"Offer {offer_id}: vendor_code fallback = {vendor_code}")
 
             # raw_skus збираємо: offer_id, vendor_code, можливі варіанти param
             if offer_id:
