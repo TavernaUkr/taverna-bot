@@ -126,13 +126,6 @@ CACHE_TTL = 900  # 15 хвилин (900 секунд)
 
 PRODUCTS_EXPORT_CACHE: Optional[str] = None
 
-# ---------------- Index for fast lookup ----------------
-PRODUCTS_INDEX = {
-    "by_sku": {},
-    "by_offer": {},
-    "by_name": {},
-    "all_products": []
-}
 # ---------------- Build product index (robust) ----------------
 def normalize_sku(s: str) -> str:
     """Нормалізує артикул / sku: прибирає пробіли, невидимі символи та небажані знаки, нижній регістр."""
