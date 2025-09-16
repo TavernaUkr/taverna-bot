@@ -2628,34 +2628,91 @@ async def size_continue_handler(cb: CallbackQuery, state: FSMContext):
     await state.set_state(OrderForm.amount)
     await cb.answer()
 
-# Обробник вибору розміру
-@router.callback_query(lambda c: c.data and c.data.startswith("choose_size:"))
-async def cb_choose_size(query: CallbackQuery, state: FSMContext):
-    # формат: choose_size:<sku>:<size>
+# ---------------- Callback: вибір розміру + кількості ----------------
+@router.callback_query(lambda c: c.data.startswith("choose_size:"))
+async def cb_choose_size(callback: CallbackQuery, state: FSMContext):
+    """
+    Обробка вибору розміру користувачем.
+    Після вибору розміру запрошуємо кількість товару.
+    """
     try:
-        _, sku, size = query.data.split(":", 2)
-    except Exception:
-        await query.answer("Невірні дані", show_alert=True)
+        _, offer_id, size = callback.data.split(":", 2)
+    except ValueError:
+        await callback.answer("Невірні дані.", show_alert=True)
         return
 
-    product, method = find_product_by_sku(sku)
-    if not product:
-        await query.answer("Товар не знайдено", show_alert=True)
+    # отримуємо товари з state
+    data = await state.get_data()
+    all_products = data.get("last_products") or []
+    selected_product = next((p for p in all_products if str(p.get("offer_id")) == offer_id), None)
+    if not selected_product:
+        await callback.answer("⚠️ Товар не знайдено.", show_alert=True)
         return
 
-    # зберігаємо вибраний розмір
-    await state.update_data(last_product=product, chosen_size=size)
+    # зберігаємо вибраний розмір у state
+    await state.update_data(last_selected_product=selected_product, chosen_size=size)
+
     # видаляємо клавіатуру розмірів
     try:
-        await query.message.edit_reply_markup(reply_markup=None)
+        await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
 
-    await query.message.answer(f"Ви обрали розмір: {size}\n\n👉 Введіть кількість товару (число):",
-    reply_markup=build_nav_kb()
-)
+    # запрошуємо кількість
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="flow:back_to_start"),
+        InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="order:cancel")
+    )
+
+    await callback.message.answer(
+        f"✅ Ви обрали розмір: {size}\n\n👉 Введіть кількість товару (число):",
+        reply_markup=kb
+    )
+
     await state.set_state(OrderForm.amount)
-    await query.answer()
+    await callback.answer()
+
+# ---------------- Обробка введеної кількості ----------------
+@router.message(OrderForm.amount)
+async def amount_entered(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    selected_product = data.get("last_selected_product")
+    chosen_size = data.get("chosen_size")
+    if not selected_product or not chosen_size:
+        await msg.answer("❌ Не вибрано товар або розмір. Спробуйте ще раз.")
+        return
+
+    try:
+        qty = int(msg.text.strip())
+        if qty <= 0:
+            raise ValueError()
+    except ValueError:
+        await msg.answer("⚠️ Введіть коректне число для кількості.")
+        return
+
+    # додаємо товар у кошик
+    cart_items = data.get("cart_items", [])
+    cart_items.append({
+        "sku": selected_product.get("sku") or selected_product.get("raw_sku") or selected_product.get("offer_id"),
+        "name": selected_product.get("name") or "—",
+        "size_text": chosen_size,
+        "qty": qty,
+        "unit_price": aggressive_round(selected_product.get("drop_price", 0) * 1.33)
+    })
+    await state.update_data(cart_items=cart_items)
+
+    # показуємо кнопку перегляду кошика з сумою
+    total_sum = sum(item["qty"] * item["unit_price"] for item in cart_items)
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton(text=f"🛒 Ваш кошик — Загальна сума: {total_sum} грн", callback_data="basket:view"),
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="flow:back_to_start"),
+        InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="order:cancel")
+    )
+
+    await msg.answer(f"✅ Товар додано у кошик!", reply_markup=kb)
+    await state.set_state(None)
 
 # Обробник натискання "підтвердити" з suggestion
 @router.callback_query(lambda c: c.data == "article:confirm")
@@ -2692,6 +2749,26 @@ async def cb_suggest_back(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("🔙 Повернулись назад. Введіть артикул або назву товару:")
     await state.set_state(OrderForm.article)
     await cb.answer()
+
+# ---------------- Callback: перегляд кошика ----------------
+@router.callback_query(lambda c: c.data == "basket:view")
+async def cb_view_basket(callback: CallbackQuery, state: FSMContext):
+    """
+    Показуємо користувачу поточний кошик із товарами та сумою.
+    """
+    data = await state.get_data()
+    cart_items = data.get("cart_items", [])
+
+    text = render_cart_text(cart_items)
+
+    kb = InlineKeyboardMarkup(row_width=1)
+    kb.add(
+        InlineKeyboardButton(text="⬅️ Назад", callback_data="flow:back_to_start"),
+        InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="order:cancel")
+    )
+
+    await callback.message.answer(text, reply_markup=kb)
+    await callback.answer()
 
 # CART helpers (store in state or in memory for multi-session)
 def render_cart_text(cart_items: list):
