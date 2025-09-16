@@ -1966,7 +1966,11 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
                 continue
             offer_id = (elem.attrib.get("id") or "").strip()
             name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
-            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"]) or ""
+            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "vendorCode", "sku", "articul", "article", "code"]) or ""
+            if not vendor_code:
+                v = elem.find("vendorCode")
+                if v is not None and v.text:
+                    vendor_code = v.text.strip()
             searchable = " ".join([offer_id.lower(), vendor_code.lower(), name.lower()])
             if qlow in searchable and len(qlow) >= 2:
                 # use existing parsing within this block to assemble product dict
