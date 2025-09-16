@@ -1071,6 +1071,42 @@ def render_product_text(product: dict, mode: str = "client", include_intro: bool
 def render_product_text(product: dict, mode: str = "client", include_intro: bool = True) -> str:
     return format_product_message(product, mode=mode, include_intro=include_intro)
 
+# ---------------- Robust SKU search + product display ----------------
+async def display_product(callback: CallbackQuery, raw_sku: str, state: FSMContext):
+    """
+    Виводимо товар для вибору розміру і додавання в кошик.
+    Підтримуємо мульти-розміри, кнопки кошика та навігаційні кнопки.
+    """
+    products = find_product_by_sku(raw_sku)
+    if not products:
+        await callback.answer("⚠️ Товар не знайдено.", show_alert=True)
+        return
+
+    # вибираємо перший для тексту, якщо це група
+    product_text = render_product_text(products[0], mode="client")
+    kb = build_size_keyboard(products) if len(products) > 1 else InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Продовжити", callback_data=f"choose_size:{products[0]['offer_id']}:{products[0].get('param_name_Размер', '—')}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="flow:back_to_start")],
+        [InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="order:cancel")]
+    ])
+
+    # надсилаємо фото, якщо є
+    if products[0].get("pictures"):
+        await callback.message.answer_photo(
+            products[0]["pictures"][0],
+            caption=product_text,
+            reply_markup=kb
+        )
+    else:
+        await callback.message.answer(
+            product_text,
+            reply_markup=kb
+        )
+
+    # Зберігаємо стан для корзини
+    await state.update_data(last_products=products, last_selected_product=products[0])
+    await callback.answer()
+
 # ---------------- callback при виборі розміру----------------
 @router.callback_query(F.data.startswith("order:"))
 async def handle_order_callback(query: CallbackQuery):
