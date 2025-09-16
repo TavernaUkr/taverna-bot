@@ -34,11 +34,193 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, BotCommand, FSInputFile
-
-# Telethon optional
-from telethon import TelegramClient
+from telethon import TelegramClient, events
+from telethon.tl.types import MessageMediaPhoto
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import tempfile
 
 app = Flask(__name__)
+
+# ініціалізація Google Drive service
+def init_gdrive():
+    if not USE_GDRIVE:
+        return None
+    try:
+        import json
+        if SERVICE_ACCOUNT_JSON.strip().startswith("{"):
+            info = json.loads(SERVICE_ACCOUNT_JSON)
+            creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive.file"])
+        else:
+            creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_JSON, scopes=["https://www.googleapis.com/auth/drive.file"])
+        return build("drive", "v3", credentials=creds, cache_discovery=False)
+    except Exception:
+        logger.exception("❌ GDrive init failed")
+        return None
+
+GDRIVE_SERVICE = init_gdrive()
+
+def gdrive_upload_file(local_path: str, mime_type: str, filename: str, parent_folder_id: str):
+    if not GDRIVE_SERVICE:
+        return None
+    try:
+        body = {"name": filename, "parents": [parent_folder_id]}
+        media = MediaFileUpload(local_path, mimetype=mime_type)
+        file = GDRIVE_SERVICE.files().create(body=body, media_body=media, fields="id, webViewLink").execute()
+        return file
+    except Exception:
+        logger.exception("❌ GDrive upload failed")
+        return None
+
+# ---------------- Telethon: supplier -> repost to MAIN_CHANNEL with deep-link ----------------
+# матчери для артикулу в тексті поста
+SKU_REGEX = re.compile(r'(?:артикул|арт\.|артікул|sku|код|vendorCode|vendor_code)[^\d\-:]*([0-9A-Za-z\-\_]{2,30})', flags=re.I)
+
+# ---------------- Telethon (start_telethon_client) + GDrive uploader ----------------
+# Вставити ПІСЛЯ init_gdrive() / gdrive_upload_file() і ПЕРЕД main()
+
+TELETHON_CLIENT: Optional[TelegramClient] = None
+TELETHON_STARTED = False
+
+async def start_telethon_client(loop: asyncio.AbstractEventLoop):
+    """
+    Запускає Telethon client у тому ж asyncio-лупі, реєструє handler для SUPPLIER_CHANNEL.
+    Запуск: asyncio.create_task(start_telethon_client(ASYNC_LOOP))
+    """
+    global TELETHON_CLIENT, TELETHON_STARTED
+    if TELETHON_STARTED:
+        logger.debug("Telethon already started, skip")
+        return
+
+    # Використовуємо SESSION_NAME, api_id, api_hash (вони є в конфігурації файлу)
+    try:
+        TELETHON_CLIENT = TelegramClient(SESSION_NAME, api_id, api_hash, loop=loop)
+        await TELETHON_CLIENT.start()
+        TELETHON_STARTED = True
+        logger.info("Telethon client started; listening supplier channel: %s", SUPPLIER_CHANNEL)
+    except Exception:
+        logger.exception("Failed to start Telethon client")
+        return
+    @TELETHON_CLIENT.on(events.NewMessage(chats=SUPPLIER_CHANNEL))
+    async def supplier_msg_handler(event: events.NewMessage.Event):
+        """
+        Handler для нового поста в SUPPLIER_CHANNEL:
+         - шукає SKU у тексті/caption,
+         - викликає find_product_by_sku(sku),
+         - (опційно) зберігає фото/текст у GDrive (якщо USE_GDRIVE),
+         - репостить у MAIN_CHANNEL через aiogram bot з deep-link кнопкою «🛒 Замовити».
+        """
+        try:
+            msg = event.message
+            text = (msg.message or "") if hasattr(msg, "message") else (msg.raw_text or "")
+            if not text and not getattr(msg, "media", None):
+                return
+
+            # 1) шукаємо SKU (regex + fallback)
+            sku_found = None
+            m = SKU_REGEX.search(text or "")
+            if m:
+                sku_found = m.group(1).strip()
+            if not sku_found:
+                # пробуємо перший рядок (цифри)
+                first_line = (text.splitlines()[0] if text else "")[:120]
+                m2 = re.search(r'\b([0-9]{3,10})\b', first_line)
+                if m2:
+                    sku_found = m2.group(1)
+            # ще спроба з caption (якщо медіа)
+            if not sku_found and getattr(msg, "media", None):
+                caption = getattr(msg, "message", "") or getattr(msg, "raw_text", "") or ""
+                m3 = SKU_REGEX.search(caption)
+                if m3:
+                    sku_found = m3.group(1).strip()
+
+            if not sku_found:
+                logger.debug("Telethon: SKU не знайдено в пості постачальника (skip). preview: %s", (text or "")[:120])
+                return
+
+            logger.info("Telethon: виявлено SKU=%s у пості постачальника", sku_found)
+
+            # 2) знаходимо товар через існуючу функцію
+            product, method = find_product_by_sku(sku_found)
+            if not product:
+                logger.info("Telethon: товар не знайдено для SKU=%s (method=%s). Повідомлю рев'ю-чат.", sku_found, method)
+                try:
+                    if REVIEW_CHAT:
+                        await bot.send_message(REVIEW_CHAT, f"🔍 Не знайдено товар для артикулу `{sku_found}` у пості постачальника.\n\nPreview:\n{(text or '')[:800]}", parse_mode="HTML")
+                except Exception:
+                    logger.exception("Failed to notify review chat")
+                return
+
+            # 3) опціонально зберігаємо перше фото і текст у GDrive
+            saved_pic_info = None
+            saved_txt_info = None
+            try:
+                if getattr(msg, "media", None) and USE_GDRIVE and GDRIVE_SERVICE and GDRIVE_FOLDER_ID:
+                    tmpf = tempfile.NamedTemporaryFile(prefix="tav_", delete=False)
+                    tmpf.close()
+                    await TELETHON_CLIENT.download_media(msg.media, file=tmpf.name)
+                    uploaded = gdrive_upload_file(tmpf.name, "image/jpeg", f"{sku_found}_post_{getattr(msg,'id', '') or getattr(msg,'message_id','')}.jpg", GDRIVE_FOLDER_ID)
+                    if uploaded:
+                        saved_pic_info = uploaded
+                        logger.info("GDrive: saved photo for SKU %s", sku_found)
+                    try:
+                        os.remove(tmpf.name)
+                    except Exception:
+                        pass
+                if USE_GDRIVE and GDRIVE_SERVICE and GDRIVE_FOLDER_ID:
+                    tmp_txt = tempfile.NamedTemporaryFile(prefix="tav_txt_", suffix=".txt", delete=False, mode="w", encoding="utf-8")
+                    tmp_txt.write(f"Source supplier post chat={event.chat_id} msg={getattr(msg,'id',None) or getattr(msg,'message_id',None)}\n\n")
+                    tmp_txt.write(text or "")
+                    tmp_txt.close()
+                    uploaded_txt = gdrive_upload_file(tmp_txt.name, "text/plain", f"{sku_found}_post_{getattr(msg,'id','')}.txt", GDRIVE_FOLDER_ID)
+                    if uploaded_txt:
+                        saved_txt_info = uploaded_txt
+                    try:
+                        os.remove(tmp_txt.name)
+                    except Exception:
+                        pass
+            except Exception:
+                logger.exception("Telethon: помилка збереження в GDrive (нефатальна)")
+
+            # 4) готуємо текст для репосту і deep-link
+            vendor_code = product.get("vendor_code") or product.get("raw_sku") or sku_found
+            name = product.get("name") or vendor_code
+            price = product.get("drop_price") or product.get("price") or "—"
+            pictures = product.get("pictures") or []
+            description = product.get("description") or ""
+
+            repost_text = f"📦 <b>{name}</b>\n\nАртикул: <code>{vendor_code}</code>\nЦіна: <b>{price} грн</b>\n\n"
+            if description:
+                repost_text += (description[:450] + ("…" if len(description) > 450 else "")) + "\n\n"
+            repost_text += "🔹 Натисніть «🛒 Замовити», щоб оформити в боті."
+
+            post_id = f"{event.chat_id}_{getattr(msg, 'id', '') or getattr(msg, 'message_id', '')}"
+            deep = f"order_supplier_{post_id}__sku_{vendor_code}"
+            deep_link_url = f"https://t.me/{BOT_USERNAME}?start={deep}"
+
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🛒 Замовити", url=deep_link_url)],
+                [InlineKeyboardButton(text="🔎 Переглянути в каталозі", callback_data=f"search:sku:{vendor_code}")]
+            ])
+
+            # 5) відправка в MAIN_CHANNEL через aiogram bot
+            try:
+                if saved_pic_info and saved_pic_info.get("webViewLink"):
+                    # використовуємо посилання з GDrive (якщо доступно)
+                    await bot.send_photo(chat_id=MAIN_CHANNEL, photo=saved_pic_info.get("webViewLink"), caption=repost_text, reply_markup=kb, parse_mode="HTML")
+                elif pictures:
+                    await bot.send_photo(chat_id=MAIN_CHANNEL, photo=pictures[0], caption=repost_text, reply_markup=kb, parse_mode="HTML")
+                else:
+                    await bot.send_message(chat_id=MAIN_CHANNEL, text=repost_text, reply_markup=kb, parse_mode="HTML")
+                logger.info("Telethon: успішно репостнув SKU=%s до MAIN_CHANNEL", vendor_code)
+            except Exception:
+                logger.exception("Telethon: помилка відправки в MAIN_CHANNEL")
+
+        except Exception:
+            logger.exception("Telethon handler exception for supplier message")
+
+    logger.info("Telethon client listening configured for supplier channel.")
 
 # ---------------- Config & Env ----------------
 load_dotenv()
@@ -82,10 +264,10 @@ MAIN_CHANNEL = os.getenv("MAIN_CHANNEL")
 TEST_CHANNEL_URL = os.getenv("TEST_CHANNEL_URL")
 
 api_id = int(os.getenv("TG_API_ID", "0") or 0)
-api_hash = os.getenv("TG_API_HASH", "")
-SESSION_NAME = os.getenv("SESSION_NAME", "bot1")
-supplier_channel = os.getenv("SUPPLIER_CHANNEL")
-supplier_name = os.getenv("SUPPLIER_NAME", "Supplier")
+api_hash = os.getenv("TG_API_HASH")
+SESSION_NAME = os.getenv("SESSION_NAME")
+SUPPLIER_CHANNEL = os.getenv("SUPPLIER_CHANNEL")
+SUPPLIER_NAME = os.getenv("SUPPLIER_NAME")
 
 NP_API_KEY = os.getenv("NP_API_KEY")
 NP_API_URL = os.getenv("NP_API_URL")
@@ -94,7 +276,7 @@ MYDROP_API_KEY = os.getenv("MYDROP_API_KEY")
 MYDROP_EXPORT_URL = os.getenv("MYDROP_EXPORT_URL")
 MYDROP_ORDERS_URL = os.getenv("MYDROP_ORDERS_URL")
 
-ORDERS_DIR = os.getenv("ORDERS_DIR", "/tmp/orders")
+ORDERS_DIR = os.getenv("ORDERS_DIR")
 Path(ORDERS_DIR).mkdir(parents=True, exist_ok=True)
 
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
@@ -104,6 +286,13 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 REVIEW_CHAT = int(os.getenv("REVIEW_CHAT", str(ADMIN_ID)))
 BUCKET_NAME = os.getenv("GCS_BUCKET", "taverna-bot-storage")
+
+TELETHON_API_ID = int(os.getenv("TG_API_ID", "0") or 0)
+TELETHON_API_HASH = os.getenv("TG_API_HASH", "")
+TELETHON_SESSION_NAME = os.getenv("SESSION_NAME")
+GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "")
+USE_GDRIVE = os.getenv("USE_GDRIVE", "false").lower() in ("1", "true", "yes")
+SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON", "")
 
 # ---------------- Cache for MyDrop products ----------------
 PRODUCTS_CACHE = {
@@ -137,13 +326,15 @@ def normalize_sku(s: Optional[str]) -> Optional[str]:
 def build_products_index_from_xml(text: str):
     """
     Парсимо XML і будуємо індекс товарів:
-      - by_sku: ключі (normalized, raw_lower, raw_no_leading_zeros) -> product dict
-      - by_name: token -> [product dicts]
-      - all_products: список усіх товарів
-    Додаємо пошук артикулу з <param> і — як fallback — із опису/назви.
+      - by_sku: кілька ключів (normalized, raw_lower, raw_no_leading_zeros) -> product dict
+      - by_offer: mapping по offer id (raw.lower() та normalized)
+      - by_name: токени назви -> [product dicts]
+      - all_products: список усіх product dict
+    Product dict стандартизований: keys = offer_id, raw_skus, sku (normalized), vendor_code,
+      name, description, pictures, sizes, drop_price, stock_qty, available
     """
     global PRODUCTS_INDEX
-    PRODUCTS_INDEX = {"all_products": [], "by_sku": {}, "by_name": {}}
+    PRODUCTS_INDEX = {"all_products": [], "by_sku": {}, "by_name": {}, "by_offer": {}}
     try:
         it = ET.iterparse(io.StringIO(text), events=("end",))
         for event, elem in it:
@@ -153,84 +344,79 @@ def build_products_index_from_xml(text: str):
                 continue
 
             offer_id = (elem.attrib.get("id") or "").strip()
-            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"])
-            name = _find_first_text(elem, ["name", "title", "product", "model", "productname", "product_name"]) or offer_id
-            drop_price = _find_first_numeric(elem, ["price", "drop", "cost", "value", "price_uah"])
-            retail_price = _find_first_numeric(elem, ["rrc", "retail", "msrp", "oldprice"])
+            group_id = (elem.attrib.get("group_id") or elem.attrib.get("group") or "").strip()
 
-            # Наявність і кількість
-            stock_qty = None
-            qtxt = _find_first_text(elem, ["quantity", "quantity_in_stock", "stock", "available_quantity", "count"])
-            if qtxt:
-                m = re.search(r'\d+', qtxt.replace(" ", ""))
-                if m:
-                    try:
-                        stock_qty = int(m.group(0))
-                    except:
-                        stock_qty = None
+            # Основні поля з різних можливих тегів
+            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"]) or ""
+            name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
+            description = _find_first_text(elem, ["description", "desc"]) or ""
+            price_txt = _find_first_text(elem, ["price", "cost"]) or ""
+            try:
+                drop_price = float(price_txt)
+            except Exception:
+                drop_price = None
 
-            available = (elem.attrib.get("available") or "").lower() in ["true", "1", "yes", "да"]
+            # pictures (збираємо всі <picture> або <image>)
+            pictures = []
+            for c in list(elem):
+                ln = _local_tag(c.tag)
+                if ln in ("picture", "image", "img"):
+                    txt = (c.text or "").strip()
+                    if txt:
+                        pictures.append(txt)
 
-            # Опис, фото
-            description = _find_first_text(elem, ["description"])
-            pictures = [p.text.strip() for p in elem.findall(".//picture") if p.text]
-
-            # sizes and raw_skus
+            # Параметри — наприклад, розміри або інші param name=""
             sizes = []
             raw_skus = []
-
-            # парсимо <param>
-            for p in elem.findall(".//param"):
-                pname = (p.attrib.get("name") or "").lower()
-                pval = (p.text or "").strip()
-                if not pval:
-                    continue
-
-                if any(k in pname for k in ("артикул", "артікул", "sku", "код", "vendorcode", "vendor_code", "article")):
-                    # може бути список або просто значення
-                    for s in re.split(r'[;,/]', pval):
-                        s = s.strip()
-                        if s:
-                            raw_skus.append(s)
-                    if not vendor_code:
-                        vendor_code = pval.strip()
-                    continue
-
-                if any(k in pname for k in ("размер", "розмір", "size", "розміри")):
-                    for s in re.split(r'[;,/]', pval):
-                        s = s.strip()
-                        if s:
-                            sizes.append(s)
-                    continue
-
-                if any(k in pname for k in ("цена", "дроп", "price")):
+            stock_qty = 0
+            available = True
+            for c in list(elem):
+                ln = _local_tag(c.tag)
+                if ln == "param" or ln == "attribute":
+                    pname = (c.attrib.get("name") or c.attrib.get("k") or "").strip().lower()
+                    ptxt = (c.text or "").strip()
+                    if pname and ("размер" in pname or "size" in pname or "розмір" in pname):
+                        if ptxt:
+                            sizes.append(ptxt)
+                if ln in ("quantity", "stock", "quantity_in_stock"):
                     try:
-                        drop_price = float(pval.replace(",", ".").replace(" ", ""))
-                    except:
+                        stock_qty = int((c.text or "0").strip())
+                    except Exception:
                         pass
-                    continue
+                if ln in ("available",):
+                    av = (c.text or "").strip().lower()
+                    if av in ("false", "0", "no"):
+                        available = False
 
-            # також дивимось на внутрішні варіації/variant/offer sku attributes
-            for v in list(elem.findall(".//offer")) + list(elem.findall(".//variant")) + list(elem.findall(".//item")):
-                vsku = (v.attrib.get("sku") or _find_first_text(v, ["sku", "vendorcode", "articul"]) or "").strip()
-                if vsku:
-                    raw_skus.append(vsku)
+            # fallback: vendor_code може бути в <vendorCode> або в param, або в описі
+            if not vendor_code:
+                # спробуємо знайти атрибут vendorCode або param
+                vc = _find_first_text(elem, ["vendorCode", "vendor_code", "vendorcode"])
+                if vc:
+                    vendor_code = vc
+                else:
+                    # regex fallback у тексті опису
+                    if description:
+                        m = re.search(r'(?:артикул|артікул|sku|код|article)[\s\:\-]*([0-9A-Za-z\-]{2,20})', description, flags=re.I)
+                        if m:
+                            vendor_code = m.group(1).strip()
 
-            # fallback: витягнути артикул із опису/назви, якщо vendor_code ще немає
-            if not vendor_code and description:
-                m = re.search(r'(?:артикул|артікул|sku|код|article)[\s\:\-]*([0-9]{2,10})', description, flags=re.I)
-                if m:
-                    vendor_code = m.group(1).strip()
+            # raw_skus: збираємо варіанти
+            if offer_id:
+                raw_skus.append(offer_id)
+            if vendor_code:
+                raw_skus.append(vendor_code)
 
-            # унікалізація raw_skus
-            raw_skus = [s for s in dict.fromkeys([r for r in raw_skus if r])]
+            # unique
+            raw_skus = [r for r in dict.fromkeys([r for r in raw_skus if r])]
 
-            # основний ключ (normalized)
+            # нормалізований основний ключ (sku)
             main_key = vendor_code or offer_id or (raw_skus[0] if raw_skus else "")
-            sku_normalized = normalize_sku(main_key or "")
+            sku_normalized = normalize_sku(main_key or "") or (main_key or "").lower()
 
             product = {
                 "offer_id": offer_id,
+                "group_id": group_id,
                 "raw_skus": raw_skus,
                 "raw_sku": raw_skus[0] if raw_skus else (vendor_code or offer_id or ""),
                 "sku": sku_normalized,
@@ -238,23 +424,33 @@ def build_products_index_from_xml(text: str):
                 "name": name,
                 "description": description,
                 "pictures": pictures,
-                "sizes": sizes,
+                "sizes": list(dict.fromkeys(sizes)) if sizes else [],
                 "drop_price": drop_price,
                 "stock_qty": stock_qty,
                 "available": available,
             }
+
+            # додаємо в масив усіх
             PRODUCTS_INDEX["all_products"].append(product)
 
-            # індексуємо під кількома ключами для надійного пошуку
+            # індекс по offer id (raw та нормалізований)
+            if offer_id:
+                PRODUCTS_INDEX["by_offer"][offer_id.lower()] = product
+                noff = normalize_sku(offer_id) or offer_id.lower()
+                PRODUCTS_INDEX["by_offer"][noff] = product
+
+            # індексуємо під кількома ключами для надійного пошуку по SKU
             candidates = set()
             if sku_normalized:
                 candidates.add(sku_normalized)
             if offer_id:
                 candidates.add(normalize_sku(offer_id) or offer_id.lower())
+                candidates.add(offer_id.lower())
             if vendor_code:
                 candidates.add(normalize_sku(vendor_code) or vendor_code.lower())
+                candidates.add(vendor_code.lower())
             for r in raw_skus:
-                candidates.add(normalize_sku(r) or r.strip().lower())
+                candidates.add((normalize_sku(r) or r.strip().lower()))
                 candidates.add(r.strip().lower())
                 candidates.add(r.strip().lstrip("0"))
 
@@ -268,7 +464,6 @@ def build_products_index_from_xml(text: str):
 
             elem.clear()
 
-        # лог once
         total = len(PRODUCTS_INDEX["all_products"])
         sample = [(p.get("raw_sku"), p.get("sku")) for p in PRODUCTS_INDEX["all_products"][:5]]
         logger.debug("Product index built: %s products total. First 5 SKUs (raw,norm): %s", total, sample)
@@ -288,7 +483,7 @@ def find_product_by_sku(sku: str) -> Tuple[Optional[Dict[str, Any]], str]:
 
     raw = str(sku).strip()
     norm = normalize_sku(raw) or raw.lower()
-    by_sku = PRODUCTS_INDEX.get("by_sku", {})
+    by_sku = find_product_by_sku("by_sku", {})
 
     logger.debug("Searching product: input=%r, normalized=%r", raw, norm)
 
@@ -307,7 +502,7 @@ def find_product_by_sku(sku: str) -> Tuple[Optional[Dict[str, Any]], str]:
 
     # 3) лінійний пошук по всіх продуктах (vendorCode / raw_skus / offer_id / name contains)
     qlow = raw.lower()
-    for p in PRODUCTS_INDEX.get("all_products", []):
+    for p in find_product_by_sku("all_products", []):
         # vendorCode (артикул у XML – vendorCode)
         if qlow == (p.get("vendor_code") or p.get("vendorCode") or "").lower():
             return p, "vendor_code"
@@ -481,117 +676,64 @@ def size_keyboard(sizes: List[str], component_index: int = 0) -> InlineKeyboardM
     kb.add(InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel"))
     return kb
 
-# ---------------- Cart helpers (GCS-backed, TTL = 20 minutes) ----------------
+# ---------------- Unified Cart (GCS-backed) ----------------
 CART_TTL_SECONDS = 20 * 60  # 20 хвилин
 
-# ---------------- Cart storage & helpers ----------------
-# chat_id -> list[ {name, sku, price, qty, sizes (dict)} ]
-USER_CARTS: Dict[int, List[Dict[str, Any]]] = {}
-USER_CART_MSG: Dict[int, Dict[str, int]] = {}
+USER_CART_MSG: Dict[int, Dict[str, int]] = {}  # user_id -> {"chat_id": int, "message_id": int}
 
 def _get_storage_client():
-    """
-    Переважно використовуємо SERVICE_ACCOUNT_JSON з .env (якщо задано),
-    інакше fallback на storage.Client() (ADC).
-    """
     svc_json = os.getenv("SERVICE_ACCOUNT_JSON")
     if svc_json:
         try:
             info = json.loads(svc_json)
             return storage.Client.from_service_account_info(info)
         except Exception:
-            logger.exception("Failed to init storage.Client from SERVICE_ACCOUNT_JSON, falling back to default client.")
+            logger.exception("Failed to init storage.Client from SERVICE_ACCOUNT_JSON. Falling back to default client.")
     return storage.Client()
 
 def _cart_blob(user_id: int):
-    client = _get_storage_client()
+    client = storage.Client()
     bucket = client.bucket(BUCKET_NAME)
     return bucket.blob(f"carts/{user_id}.json")
 
 def load_cart(user_id: int) -> dict:
-    """
-    Завантажує корзину з GCS. Повертає структуру:
-      {"created_at": ISO, "items": [ {sku,name,size,amount,unit_price,line_total,added_at}, ... ]}
-    Якщо немає або минув TTL — повертає порожню корзину.
-    """
     blob = _cart_blob(user_id)
     if not blob.exists():
         return {"created_at": datetime.now(timezone.utc).isoformat(), "items": []}
+
     try:
-        raw = blob.download_as_text()
-        data = json.loads(raw)
+        data = json.loads(blob.download_as_text())
     except Exception:
-        # якщо щось не так із JSON — видаляємо і повертаємо нову корзину
+        return {"created_at": datetime.now(timezone.utc).isoformat(), "items": []}
+
+    created_at = datetime.fromisoformat(data.get("created_at"))
+    if datetime.now(timezone.utc) - created_at > timedelta(seconds=CART_TTL_SECONDS):
+        # кошик прострочений — видаляємо
         try:
             blob.delete()
         except:
             pass
         return {"created_at": datetime.now(timezone.utc).isoformat(), "items": []}
 
-    # перевіряємо TTL
-    created_at_raw = data.get("created_at")
-    try:
-        created_at = datetime.fromisoformat(created_at_raw)
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
-    except Exception:
-        created_at = datetime.now(timezone.utc)
-
-    if datetime.now(timezone.utc) - created_at > timedelta(seconds=CART_TTL_SECONDS):
-        # прострочена — видалити blob і повернути порожню
-        try:
-            blob.delete()
-        except Exception:
-            logger.debug("Failed to delete expired cart blob for user %s", user_id)
-        return {"created_at": datetime.now(timezone.utc).isoformat(), "items": []}
-
     return data
 
 def save_cart(user_id: int, cart: dict):
-    """Зберігає корзину у GCS (перезапис blob)."""
     blob = _cart_blob(user_id)
-    try:
-        blob.upload_from_string(json.dumps(cart, ensure_ascii=False), content_type="application/json")
-    except Exception:
-        logger.exception("Failed to save cart for user %s", user_id)
-        raise
+    blob.upload_from_string(json.dumps(cart, ensure_ascii=False), content_type="application/json")
 
-async def add_to_cart(user_id: int, product: dict, size: Optional[str] = None, amount: int = 1, bot_instance: Optional[Bot] = None):
-    """
-    Додає позицію до корзини в GCS і оновлює футер у чаті користувача.
-    product повинен містити хоча б: sku/name/drop_price або price
-    """
+def add_to_cart(user_id: int, product: dict, size: str, amount: int):
     cart = load_cart(user_id)
-    try:
-        unit_price = int(round(float(product.get("drop_price") or product.get("price") or 0)))
-    except Exception:
-        unit_price = 0
-    try:
-        amount_i = int(amount or 1)
-    except Exception:
-        amount_i = 1
-
     item = {
-        "sku": product.get("sku") or product.get("vendor_code") or product.get("offer_id") or "",
-        "name": product.get("name") or "Товар",
-        "size": size or "-",
-        "amount": amount_i,
-        "unit_price": unit_price,
-        "line_total": unit_price * amount_i,
-        "added_at": datetime.now(timezone.utc).isoformat()
+        "sku": product.get("sku"),
+        "name": product.get("name"),
+        "size": size,
+        "amount": amount,
+        "unit_price": product.get("drop_price") or 0,
+        "line_total": (product.get("drop_price") or 0) * amount
     }
-    cart.setdefault("items", []).append(item)
+    cart["items"].append(item)
     cart["created_at"] = datetime.now(timezone.utc).isoformat()
-
     save_cart(user_id, cart)
-
-    # оновити футер у чаті
-    bot_obj = bot_instance or bot
-    try:
-        await ensure_or_update_cart_footer(chat_id=user_id, user_id=user_id, bot_instance=bot_obj)
-    except Exception:
-        logger.exception("Failed to update cart footer after add_to_cart for user %s", user_id)
-
     return cart
 
 def remove_item_from_cart(user_id: int, idx: int) -> Optional[dict]:
@@ -606,9 +748,6 @@ def remove_item_from_cart(user_id: int, idx: int) -> Optional[dict]:
     return None
 
 def clear_cart(user_id: int) -> dict:
-    """
-    Повністю очищає корзину (видаляє blob). Повертає порожню корзину.
-    """
     blob = _cart_blob(user_id)
     try:
         if blob.exists():
@@ -616,9 +755,7 @@ def clear_cart(user_id: int) -> dict:
     except Exception:
         logger.exception("Failed to delete cart blob for user %s", user_id)
     empty = {"created_at": datetime.now(timezone.utc).isoformat(), "items": []}
-    # для простоти — збережемо пусту корзину, щоб при наступному читанні була структура
     save_cart(user_id, empty)
-    # прибираємо інформацію про футер
     USER_CART_MSG.pop(user_id, None)
     return empty
 
@@ -663,17 +800,12 @@ def build_cart_keyboard(user_id: int) -> InlineKeyboardMarkup:
         kb_rows.append([InlineKeyboardButton(text="🧹 Очистити корзину", callback_data="cart:clear")])
         kb_rows.append([InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="cart:checkout")])
 
-    # Навігаційні кнопки
     kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="flow:back_to_start")])
     kb_rows.append([InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="flow:cancel_order")])
 
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 async def ensure_or_update_cart_footer(chat_id: int, user_id: int, bot_instance: Optional[Bot] = None):
-    """
-    Створює або редагує постійне повідомлення-футер у чаті користувача з поточною сумою.
-    Зберігає meta у USER_CART_MSG[user_id] = {"chat_id":..., "message_id":...}
-    """
     bot_obj = bot_instance or bot
     cart = load_cart(user_id)
     total = cart_total(cart.get("items", []))
@@ -696,91 +828,9 @@ async def ensure_or_update_cart_footer(chat_id: int, user_id: int, bot_instance:
     except Exception:
         logger.exception("Cannot send/update cart footer for user %s", user_id)
 
-# backward-compatible alias (деякі місця коду могли викликати інші назви)
+# backward-compatible aliases
 send_or_update_cart_footer = ensure_or_update_cart_footer
 update_or_send_cart_footer = ensure_or_update_cart_footer
-
-def ensure_cart(chat_id: int):
-    if chat_id not in USER_CARTS:
-        USER_CARTS[chat_id] = []
-
-@router.callback_query(F.data == "cart:view")
-async def cart_view(cb: CallbackQuery, state: FSMContext):
-    chat_id = cb.from_user.id
-    items = get_cart_items(chat_id)
-    text = format_cart_contents(items)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Повністю скасувати замовлення", callback_data="cart:clear")],
-        [InlineKeyboardButton(text="Продовжити оформлення", callback_data="cart:continue")],
-    ])
-    await cb.message.answer(text, reply_markup=kb)
-    await cb.answer()
-
-@router.callback_query(F.data == "cart:clear")
-async def cart_clear(cb: CallbackQuery, state: FSMContext):
-    chat_id = cb.from_user.id
-    clear_cart(chat_id)
-    # видаляємо footer якщо був
-    meta = USER_CART_MSG.pop(chat_id, None)
-    if meta:
-        try:
-            await bot.delete_message(meta["chat_id"], meta["message_id"])
-        except:
-            pass
-    await cb.message.answer("❌ Замовлення повністю скасовано. Можете почати оформлення заново.")
-    await cb.answer()
-
-def add_to_cart(chat_id: int, item: Dict[str, Any]) -> None:
-    """Додає item до USER_CARTS[chat_id]. item keys: name, sku, price, qty, sizes"""
-    USER_CARTS.setdefault(chat_id, []).append(item)
-
-def clear_cart(chat_id: int) -> None:
-    USER_CARTS.pop(chat_id, None)
-    # також видаляємо запис про footer, якщо є
-    USER_CART_MSG.pop(chat_id, None)
-
-def get_cart_items(chat_id: int) -> List[Dict[str, Any]]:
-    return USER_CARTS.get(chat_id, [])
-
-def cart_total(cart_items: List[Dict[str, Any]]) -> int:
-    total = 0
-    for it in cart_items:
-        price = it.get("price") or 0
-        qty = int(it.get("qty") or 1)
-        try:
-            total += int(price) * qty
-        except Exception:
-            try:
-                total += int(float(price)) * qty
-            except Exception:
-                # якщо не вдалося перетворити — ігноруємо
-                pass
-    return total
-
-def format_cart_contents(cart_items: List[Dict[str, Any]]) -> str:
-    if not cart_items:
-        return "🛒 Ваша корзина порожня."
-    lines = ["🧾 Вміст корзини:"]
-    for i, it in enumerate(cart_items, 1):
-        sizes = it.get("sizes") or {}
-        if isinstance(sizes, dict):
-            sizes_txt = ", ".join([f"{k}: {v}" for k, v in sizes.items()]) if sizes else "—"
-        else:
-            sizes_txt = str(sizes) if sizes else "—"
-        price = it.get("price") or "—"
-        qty = int(it.get("qty") or 1)
-        try:
-            subtotal = int(price) * qty
-        except Exception:
-            try:
-                subtotal = int(float(price)) * qty
-            except Exception:
-                subtotal = "—"
-        lines.append(f"{i}. {it.get('name','Товар')} ({sizes_txt}) — {price} грн × {qty} = {subtotal}")
-    total = cart_total(cart_items)
-    lines.append(f"\n💰 Загальна сума: {total} грн.")
-    lines.append("\n❌ Для повного скасування натисніть: /clear_cart (або відповідну кнопку в інтерфейсі)")
-    return "\n".join(lines)
 
 # ---------------- Routers / Handlers ----------------
 # --- Replace all other CommandStart handlers with this single unified handler ---
@@ -879,106 +929,95 @@ def render_product_text(product: dict, mode: str = "client", include_intro: bool
 # ---------------- START (deep links) ----------------
 @router.message(Command("start"))
 async def cmd_start(msg: Message, state: FSMContext):
-    args = msg.text.split(maxsplit=1)
+    """
+    Обробка /start [payload]
+    Підтримує payload виду: order_<mode>_<post_id>__sku_<sku>
+    Наприклад: /start order_test_12345__sku_1056
+    """
+    text = (msg.text or "").strip()
+    parts = text.split(maxsplit=1)
+    payload = parts[1].strip() if len(parts) > 1 else ""
 
-    # Якщо deep-link з поста
-    if len(args) > 1 and args[1].startswith("order_"):
-        parts = args[1].split("__")
-        mode = parts[0].replace("order_", "")
-        post_id = parts[1].split("_sku_")[0] if "__sku_" in args[1] else None
-        sku = args[1].split("_sku_")[1] if "__sku_" in args[1] else None
-        logger.info(f"Start deep link: mode={mode} post_id={post_id} sku={sku}")
+    if not payload:
+        await msg.answer("Привіт! Щоб замовити — натисніть '🛒 Відкрити корзину' або оберіть 'Вибрати товар'.", reply_markup=build_nav_kb())
+        return
 
-        norm_sku = normalize_sku(sku) if sku else None
-        product = PRODUCTS_INDEX.get(norm_sku)
+    if payload.startswith("order_"):
+        try:
+            left, sku_part = payload.split("__sku_", 1)
+            mode_and_post = left.replace("order_", "")
+            mode_parts = mode_and_post.split("_", 1)
+            mode = mode_parts[0] if mode_parts else "test"
+            post_id = mode_parts[1] if len(mode_parts) > 1 else None
+            sku = sku_part
+        except Exception:
+            logger.debug("cmd_start: failed to parse payload=%r", payload)
+            sku = None
+            mode = "test"
+            post_id = None
 
-        logger.debug(f"Deep link lookup result. SKU={sku} (norm={norm_sku}), found={bool(product)}")
+        logger.info("Start deep link: mode=%s post_id=%s sku=%s", mode, post_id, sku)
 
-        if not product:
-            await msg.answer("❌ На жаль, товар не знайдено у базі.")
+        if not sku:
+            await msg.answer("Не вказано артикул у посиланнi.")
             return
 
-        # Формуємо кнопки з розмірами
-        size_buttons = []
-        if product.get("sizes"):
-            for s in product["sizes"]:
-                size_buttons.append([InlineKeyboardButton(
-                    text=f"📏 Розмір {s}",
-                    callback_data=f"select_size:{norm_sku}:{s}"
-                )])
+        product, method = find_product_by_sku(sku)
+        logger.debug("Deep link lookup result. SKU=%s (norm=%s), found=%s (method=%s)", sku, normalize_sku(sku), bool(product), method)
 
-        # Додаємо кнопку повернення у канал
-        size_buttons.append([InlineKeyboardButton(
-            text="↩️ Повернутись до перегляду каналу (без збереження в корзину)",
-            url=f"https://t.me/{MAIN_CHANNEL.replace('@','')}"
-        )])
+        if not product:
+            await msg.answer("⚠️ Не вдалося знайти товар по цьому артикулу. Спробуйте пошук по назві або зверніться до підтримки.")
+            return
 
-        kb = InlineKeyboardMarkup(inline_keyboard=size_buttons)
+        # Формуємо повідомлення про товар і питаємо розміри / кількість
+        name = product.get("name") or ""
+        price = product.get("drop_price") or product.get("price") or "—"
+        pictures = product.get("pictures") or []
+        sizes = product.get("sizes") or []
 
-        # Виводимо картинку + опис
-        photos = product.get("pictures", [])
-        caption = (
-            f"🛒 <b>{product['name']}</b>\n"
-            f"📌 Артикул: {product.get('vendorCode','—')}\n"
-            f"💵 Ціна: {product.get('price','?')} грн"
-        )
+        caption = f"📦 <b>{name}</b>\nАртикул: <code>{product.get('vendor_code') or product.get('raw_sku') or sku}</code>\nЦіна: <b>{price} грн</b>"
 
-        if photos:
-            await msg.answer_photo(photo=photos[0], caption=caption, reply_markup=kb, parse_mode="HTML")
+        if sizes:
+            buttons = [[InlineKeyboardButton(text=str(sz), callback_data=f"select_size:{product.get('sku') or product.get('raw_sku') or sku}:{sz}")] for sz in sizes]
+            buttons.append([InlineKeyboardButton("↩️ Повернутись до каналу", url=f"https://t.me/{MAIN_CHANNEL.replace('@','')}")])
+            kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        else:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Додати в корзину", callback_data=f"select_qty:{product.get('sku') or product.get('raw_sku') or sku}::1")]])
+
+        if pictures:
+            await msg.answer_photo(photo=pictures[0], caption=caption, reply_markup=kb, parse_mode="HTML")
         else:
             await msg.answer(caption, reply_markup=kb, parse_mode="HTML")
-
+        return
     else:
-        # Якщо просто /start
-        start_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📢 Перейти для оформлення замовлення на канал", url=f"https://t.me/{MAIN_CHANNEL.replace('@','')}")],
-            [InlineKeyboardButton(text="🛒 Розпочати оформлення", callback_data="start_order")]
-        ])
-        await msg.answer(
-            "Привіт! Це бот Taverna 👋\n\n"
-            "🔹 Натисніть кнопку «Замовити» під постом у каналі, щоб оформити замовлення.\n"
-            "🔹 Або скористайтесь меню нижче:",
-            reply_markup=start_kb
-        )
+        await msg.answer("Привіт! Виклик з payload: " + payload)
+        return
 
 # ---------------- Select Size ----------------
 @router.callback_query(F.data.startswith("select_size:"))
 async def cb_select_size(callback: CallbackQuery, state: FSMContext):
     try:
-        _, sku, size = callback.data.split(":")
+        _, sku, size = callback.data.split(":", 2)
     except ValueError:
         await callback.answer("Помилка у виборі розміру", show_alert=True)
         return
 
-    product = PRODUCTS_INDEX.get(sku)
+    product, method = find_product_by_sku(sku)
     if not product:
         await callback.answer("❌ Товар не знайдено у базі", show_alert=True)
         return
 
-    # Кнопки для вибору кількості
     qty_buttons = []
     for i in range(1, 6):
-        qty_buttons.append([InlineKeyboardButton(
-            text=f"{i} шт.",
-            callback_data=f"select_qty:{sku}:{size}:{i}"
-        )])
-
-    # Додаємо кнопку повернення у канал
-    qty_buttons.append([InlineKeyboardButton(
-        text="↩️ Повернутись до перегляду каналу (без збереження в корзину)",
-        url=f"https://t.me/{MAIN_CHANNEL.replace('@','')}"
-    )])
-
+        qty_buttons.append([InlineKeyboardButton(text=f"{i} шт.", callback_data=f"select_qty:{product.get('sku') or product.get('raw_sku') or sku}:{size}:{i}")])
+    qty_buttons.append([InlineKeyboardButton(text="↩️ Повернутись до каналу", url=f"https://t.me/{MAIN_CHANNEL.replace('@','')}")])
     kb = InlineKeyboardMarkup(inline_keyboard=qty_buttons)
 
     await callback.message.answer(
-        f"✅ Ви обрали <b>{product['name']}</b>\n"
-        f"📏 Розмір: <b>{size}</b>\n\n"
-        "Оберіть кількість:",
+        f"✅ Ви обрали <b>{product.get('name')}</b>\n📏 Розмір: <b>{size}</b>\n\nОберіть кількість:",
         reply_markup=kb,
         parse_mode="HTML"
     )
-
     await callback.answer()
 
 # ---------------- Select Quantity ----------------
@@ -987,22 +1026,23 @@ async def cb_select_qty(callback: CallbackQuery, state: FSMContext):
     """
     Новий flow: при виборі кількості — додаємо товар в GCS-корзину (add_to_cart),
     оновлюємо футер з сумою і повідомляємо користувача про TTL (20 хв).
+    Очікується формат callback.data = "select_qty:<sku>:<size>:<qty>"
     """
     try:
-        _, sku, size, qty = callback.data.split(":")
-        qty = int(qty)
+        _, raw_sku, size, qty_s = callback.data.split(":", 3)
+        qty = int(qty_s)
     except Exception:
         await callback.answer("Помилка у виборі кількості", show_alert=True)
         return
 
-    product = PRODUCTS_INDEX.get(sku)
+    product, method = find_product_by_sku(raw_sku)
     if not product:
         await callback.answer("❌ Товар не знайдено у базі", show_alert=True)
         return
 
     user_id = callback.from_user.id
 
-    # додаємо у GCS корзину
+    # додаємо у GCS корзину (асинхронна реалізація)
     try:
         cart = await add_to_cart(user_id=user_id, product=product, size=size, amount=qty, bot_instance=bot)
     except Exception:
@@ -1016,19 +1056,25 @@ async def cb_select_qty(callback: CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="🧾 Відкрити корзину", callback_data="cart:open")],
         [InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="cart:checkout")],
         [InlineKeyboardButton(text="➕ Додати ще (перейти в канал/пошук)", callback_data="cart:add")],
-        [InlineKeyboardButton(text="↩️ Назад до товару", callback_data=f"select_size:{sku}:{size}")]
+        [InlineKeyboardButton(text="↩️ Назад до товару", callback_data=f"select_size:{product.get('sku') or product.get('raw_sku') or raw_sku}:{size}")]
     ])
 
     await callback.message.answer(
-        f"✅ Додано у корзину: <b>{product.get('name')}</b>\n"
+        f"✅ Товар додано в корзину: <b>{product.get('name')}</b>\n"
+        f"📌 Артикул: <b>{product.get('sku') or product.get('raw_sku') or raw_sku}</b>\n"
         f"📏 Розмір: <b>{size}</b>\n"
-        f"📦 Кількість: <b>{qty}</b>\n"
-        f"💵 Сума за цю позицію: <b>{int(round(float(product.get('drop_price') or product.get('price') or 0))) * qty} грн</b>\n\n"
-        f"🧾 Загальна сума у корзині: <b>{total} грн</b>\n\n"
-        f"⏳ Корзина збережена у бота на 20 хвилин (після цього вона буде автоматично видалена).",
+        f"🔢 Кількість: <b>{qty}</b>\n\n"
+        f"🔢 Підсумок у корзині: <b>{total} грн</b>\n\n"
+        f"⏳ Корзина автоматично очиститься через <b>{CART_TTL_SECONDS//60} хвилин</b> (якщо не завершити оформлення).",
         reply_markup=kb,
         parse_mode="HTML"
     )
+
+    # оновимо футер у чаті (якщо використовується)
+    try:
+        await ensure_or_update_cart_footer(callback.from_user.id, callback.from_user.id, bot_instance=bot)
+    except Exception:
+        logger.debug("ensure_or_update_cart_footer failed (non-fatal) for user %s", callback.from_user.id)
 
     await callback.answer()
 
@@ -1366,7 +1412,7 @@ async def cmd_publish_test(msg: Message):
     if invite_url:
         fallback_kb = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="📢 Відкрити канал", url=invite_url)]
+                [InlineKeyboardButton(text="📢 Відкрити канал", url=TEST_CHANNEL_URL)]
             ]
         )
 
@@ -1711,7 +1757,7 @@ async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
     qlow = q.lower().strip()
 
     # ensure we have index
-    if not PRODUCTS_INDEX.get("all_products"):
+    if not find_product_by_sku("all_products"):
         text = await load_products_export(force=False)
         if not text:
             return None
@@ -3549,20 +3595,6 @@ async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int
             await bot.send_message(notify_chat, f"❌ Виняток при відправці в MyDrop: {e}")
         return None
 
-# ---------------- Telethon client ----------------
-telethon_client: Optional[TelegramClient] = None
-if api_id and api_hash:
-    session_path = SESSION_NAME
-    try:
-        telethon_client = TelegramClient(session_path, api_id, api_hash)
-        logger.info("Telethon client initialized (session=%s)", session_path)
-    except Exception:
-        logger.exception("Failed init Telethon client")
-        telethon_client = None
-else:
-    logger.warning("Telethon not configured (TG_API_ID/TG_API_HASH missing)")
-    telethon_client = None
-
 # ---------------- Flask app & webhook endpoint ----------------
 
 @app.route(WEBHOOK_PATH, methods=["POST"])
@@ -3608,7 +3640,7 @@ def run_flask():
 async def main():
     global ASYNC_LOOP, WEBHOOK_URL
     ASYNC_LOOP = asyncio.get_running_loop()
-
+    
     # Запускаємо Flask healthcheck/webhook endpoint в окремому потоці
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -3627,6 +3659,14 @@ async def main():
             logger.info("Dispatcher has no startup() method — skipping warmup.")
     except Exception:
         logger.exception("Dispatcher warmup failed (non-fatal).")
+    
+    # ---------------- start Telethon ----------------
+    try:
+        # ASYNC_LOOP вже встановлено вище як asyncio.get_running_loop()
+        asyncio.create_task(start_telethon_client(ASYNC_LOOP))
+        logger.info("Telethon start task scheduled.")
+    except Exception:
+        logger.exception("Failed to schedule Telethon client start")
 
     # Команди бота
     try:
