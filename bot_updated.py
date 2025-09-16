@@ -139,27 +139,24 @@ def normalize_sku(s: str) -> str:
     s = re.sub(r'[^0-9A-Za-z]+', '', s)
     return s.lower()
 
+# bot_updated_46.py
+
+# ... (попередній код без змін) ...
+
 # ---------------- Build product index (robust) ----------------
 def build_products_index_from_xml(text: str):
     """
-    Надійний парсер YML/XML, який будує PRODUCTS_INDEX з кількома індексами:
-      - by_sku: ключі — normalized, raw, raw без провідних нулів, offer_id variants, vendorCode variants
-      - by_offer: offer_id -> product
-      - by_id: offer id (строка) -> product
-      - by_name: token -> [products]
-      - by_base_name: базова назва (без останнього слова) -> [products] (для кольорів/варіантів)
-      - by_vendor: vendor_code (lower) -> [products] (групування варіантів під одним артикулом)
-      - all_products: повний список product dict
-    Підтримуємо короткі артикули (наприклад "1056") — не відкидаємо їх.
+    Надійний парсер YML/XML, який будує PRODUCTS_INDEX з кількома індексами.
+    - by_sku тепер зберігає СПИСОК товарів для одного артикула.
     """
     global PRODUCTS_INDEX
     PRODUCTS_INDEX = {
         "all_products": [],
-        "by_sku": {},
-        "by_name": {},
+        "by_sku": defaultdict(list),  # Змінено на defaultdict(list)
+        "by_name": defaultdict(list),
         "by_offer": {},
-        "by_base_name": {},
-        "by_vendor": {},
+        "by_base_name": defaultdict(list),
+        "by_vendor": defaultdict(list),
         "by_id": {},
     }
 
@@ -171,9 +168,11 @@ def build_products_index_from_xml(text: str):
                 elem.clear()
                 continue
 
+            # ... (код для витягування даних про товар залишається без змін) ...
+            
             offer_id = (elem.attrib.get("id") or "").strip()
             group_id = (elem.attrib.get("group_id") or elem.attrib.get("group") or "").strip()
-
+            
             # ---------- Витягуємо vendorCode / SKU ----------
             vendor_code = _find_first_text(
                 elem, ["vendorcode", "vendor_code", "vendorCode", "sku", "articul", "article", "code", "vendor"]
@@ -220,7 +219,6 @@ def build_products_index_from_xml(text: str):
                     if av in ("false", "0", "no"):
                         available = False
 
-            # ---------- збираємо всі сирі SKU ----------
             raw_skus = []
             if offer_id:
                 raw_skus.append(offer_id)
@@ -233,7 +231,6 @@ def build_products_index_from_xml(text: str):
                     if ptxt:
                         raw_skus.append(ptxt)
 
-            # fallback з опису
             if not vendor_code and description:
                 m = re.search(r'(?:артикул|артікул|арт|sku|код|article)[:\s\-]*([0-9A-Za-z\-\_]{2,30})', description, flags=re.I)
                 if m:
@@ -270,37 +267,39 @@ def build_products_index_from_xml(text: str):
 
             PRODUCTS_INDEX["all_products"].append(product)
 
-            # ---------- Індексація ----------
-            # by_offer/by_id
+            # ---------- Індексація (ВИПРАВЛЕНО) ----------
             if offer_id:
                 PRODUCTS_INDEX["by_offer"][offer_id.lower()] = product
                 PRODUCTS_INDEX["by_id"][str(offer_id)] = product
                 PRODUCTS_INDEX["by_offer"][normalize_sku(offer_id) or offer_id.lower()] = product
 
-            # by_sku: всі варіанти ключів, включаючи короткі
+            # by_sku: тепер додає в список, щоб уникнути перезапису
             candidates = set([sku_normalized, vendor_code, offer_id] + raw_skus)
             for c in list(candidates):
                 if c:
-                    PRODUCTS_INDEX["by_sku"][c] = product
-                    PRODUCTS_INDEX["by_sku"][c.lower()] = product
-                    PRODUCTS_INDEX["by_sku"][c.lstrip("0")] = product
+                    # Додаємо унікальний товар (за offer_id) до списку
+                    if product not in PRODUCTS_INDEX["by_sku"][c]:
+                         PRODUCTS_INDEX["by_sku"][c].append(product)
+                    if product not in PRODUCTS_INDEX["by_sku"][c.lower()]:
+                         PRODUCTS_INDEX["by_sku"][c.lower()].append(product)
+                    if c.lstrip("0") and product not in PRODUCTS_INDEX["by_sku"][c.lstrip("0")]:
+                         PRODUCTS_INDEX["by_sku"][c.lstrip("0")].append(product)
                     try:
-                        PRODUCTS_INDEX["by_sku"][normalize_sku(c)] = product
+                        norm_c = normalize_sku(c)
+                        if norm_c and product not in PRODUCTS_INDEX["by_sku"][norm_c]:
+                            PRODUCTS_INDEX["by_sku"][norm_c].append(product)
                     except Exception:
                         pass
-
-            # by_name tokens
+            
             for tok in re.findall(r'\w{3,}', (name or "").lower()):
-                PRODUCTS_INDEX["by_name"].setdefault(tok, []).append(product)
-
-            # by_base_name
+                PRODUCTS_INDEX["by_name"][tok].append(product)
+            
             if base_name:
-                PRODUCTS_INDEX["by_base_name"].setdefault(base_name, []).append(product)
-
-            # by_vendor
+                PRODUCTS_INDEX["by_base_name"][base_name].append(product)
+            
             if vendor_code:
-                PRODUCTS_INDEX["by_vendor"].setdefault(vendor_code.strip().lower(), []).append(product)
-
+                PRODUCTS_INDEX["by_vendor"][vendor_code.strip().lower()].append(product)
+            
             elem.clear()
 
         logger.debug("✅ Product index built: %s products total.", len(PRODUCTS_INDEX["all_products"]))
@@ -308,73 +307,53 @@ def build_products_index_from_xml(text: str):
     except Exception:
         logger.exception("❌ Failed to build products index")
 
-# ---------------- Robust SKU search ----------------
-# ---------------- Robust SKU search ----------------
+# ---------------- Robust SKU search (ВИПРАВЛЕНО) ----------------
 def find_product_by_sku(raw: str) -> Optional[list]:
     """
-    Шукаємо товар по артикулу / vendorCode / offer_id / raw_sku / назві.
-    Повертаємо список product dicts для варіантів (розміри/кольори) або None.
+    Шукаємо товар по артикулу / vendorCode / offer_id.
+    Повертаємо список унікальних product dicts.
     """
     if not raw:
         return None
 
     raw = str(raw).strip()
-    try:
-        norm = normalize_sku(raw)
-    except Exception:
-        norm = re.sub(r'[^0-9A-Za-z]+', '', raw).lower()
+    norm = normalize_sku(raw)
     rl = raw.lower()
 
     by_sku = PRODUCTS_INDEX.get("by_sku", {})
-    by_offer = PRODUCTS_INDEX.get("by_offer", {})
-    by_id = PRODUCTS_INDEX.get("by_id", {})
     by_vendor = PRODUCTS_INDEX.get("by_vendor", {})
-    all_products = PRODUCTS_INDEX.get("all_products", [])
-
+    
     candidates = []
 
-    # прямі хіти по by_sku
-    for key in [norm, rl, rl.lstrip("0")]:
-        if key in by_sku:
-            candidates.append(by_sku[key])
-
-    # by_offer / by_id
-    if rl in by_offer:
-        candidates.append(by_offer[rl])
-    if raw in by_id:
-        candidates.append(by_id[raw])
-
-    # група по vendor_code (усі варіанти)
+    # Шукаємо у всіх можливих індексах
+    if norm in by_sku:
+        candidates.extend(by_sku[norm])
+    if rl in by_sku:
+        candidates.extend(by_sku[rl])
+    if raw in by_sku:
+        candidates.extend(by_sku[raw])
     if rl in by_vendor:
         candidates.extend(by_vendor[rl])
 
-    # точний перебір всіх продуктів
-    for p in all_products:
-        if rl == (p.get("vendor_code") or "").lower():
-            candidates.append(p)
-        elif any(rl == (sku or "").lower() for sku in p.get("raw_skus", [])):
-            candidates.append(p)
-        elif raw == p.get("offer_id"):
-            candidates.append(p)
+    # Якщо нічого не знайдено, пробуємо пошук по частині назви/опису
+    if not candidates:
+        tokens = re.findall(r"\w{3,}", rl)
+        if tokens:
+            res = []
+            for p in PRODUCTS_INDEX.get("all_products", []):
+                haystack = (p.get("name", "") + " " + p.get("description", "")).lower()
+                if all(tok in haystack for tok in tokens):
+                    res.append(p)
+            if res:
+                candidates.extend(res)
 
-    # унікалізація по offer_id
-    uniq = {p["offer_id"]: p for p in candidates}.values()
-    if uniq:
-        return list(uniq)
+    # Унікалізація результатів за offer_id
+    if not candidates:
+        logger.debug("Lookup failed for SKU=%s norm=%s", raw, norm)
+        return None
 
-    # частковий пошук по назві/опису для кольорів
-    tokens = re.findall(r"\w{3,}", rl)
-    if tokens:
-        res = []
-        for p in all_products:
-            hay = ((p.get("name") or "") + " " + (p.get("description") or "")).lower()
-            if all(tok in hay for tok in tokens):
-                res.append(p)
-        if res:
-            return res
-
-    logger.debug("Lookup failed for SKU=%s norm=%s", raw, norm)
-    return None
+    unique_products = list({p["offer_id"]: p for p in candidates}.values())
+    return unique_products
 
 # ---------------- global async loop holder ----------------
 # буде заповнений в main()
@@ -656,16 +635,20 @@ async def cmd_debug_lookup(msg: Message, command: CommandObject):
         raw = command.args.strip() if command.args else ""
         norm = normalize_sku(raw) if raw else None
         logger.debug(f"Debug lookup: raw='{raw}', norm='{norm}'")
-
-        result = find_product_by_sku(norm) if norm else None
+        
+        result = find_product_by_sku(raw) # Шукаємо за сирим значенням
+        
         if result:
-            prod, method = result
-            await msg.answer(f"✅ Lookup success: {prod['name']} (method={method})")
+            # result - це список товарів
+            count = len(result)
+            names = ", ".join([p['name'] for p in result[:3]])
+            await msg.answer(f"✅ Lookup success: Знайдено {count} товарів. Наприклад: {names}")
         else:
+            by_sku = PRODUCTS_INDEX.get("by_sku", {})
             await msg.answer(
                 f"❌ Lookup failed for SKU={raw} norm={norm}\n"
-                f"by_sku has norm? {norm in PRODUCTS_INDEX['by_sku']}\n"
-                f"keys sample: {list(PRODUCTS_INDEX['by_sku'].keys())[:10]}"
+                f"by_sku has norm? {norm in by_sku}\n"
+                f"keys sample: {list(by_sku.keys())[:10]}"
             )
     except Exception as e:
         logger.error("debug_lookup failed", exc_info=True)
@@ -1079,88 +1062,72 @@ async def handle_order_callback(query: CallbackQuery):
 
     await query.answer(f"✅ Обрано: {product['name']} ({', '.join(product['sizes'])})")
 
-# ---------------- Start command with deep-link ----------------
 @router.message(CommandStart(deep_link=True))
-async def cmd_start_deeplink(msg: Message, command: CommandObject):
-    logger.info("Start deep link: %s", command.args)
-    if not command.args:
-        await msg.answer("👋 Вітаю! Надішліть артикул або посилання.")
-        return
+async def cmd_start_deep_link(msg: Message, command: CommandObject, state: FSMContext):
+    """
+    Handler for deep-links like: t.me/bot?start=order_test_12345__sku_1056
+    """
+    try:
+        args = (command.args or "").split("__")
+        payload = {}
+        for arg in args:
+            if "=" in arg:
+                k, v = arg.split("=", 1)
+                payload[k] = v
+            elif "sku" in arg:
+                parts = arg.split("_")
+                if len(parts) > 1:
+                    payload["sku"] = parts[-1]
+        
+        logger.info("Start deep link: %s", command.args)
+        logger.info("Start deep link: %s", payload)
 
-    args = command.args.strip()
-    if "__sku_" in args:
-        # формат: order_test_12345__sku_1056
-        parts = args.split("__sku_")
-        order_info = parts[0]
-        sku = parts[1].strip()
-        logger.info("Start deep link: mode=test post_id=%s sku=%s", order_info, sku)
+        sku = payload.get("sku")
+        if sku:
+            # ВИПРАВЛЕНО: обробляємо список товарів
+            product_group = find_product_by_sku(sku)
+            if product_group:
+                # Беремо перший товар як основний для відображення
+                main_product = product_group[0]
+                
+                # Збираємо всі унікальні розміри з групи
+                sizes = sorted(list(set(p.get("sizes")[0] for p in product_group if p.get("sizes"))))
 
-        # нормалізуємо артикул
-        sku_norm = normalize_sku(sku)
+                # Формуємо повідомлення
+                caption = (
+                    f"<b>{main_product['name']}</b>\n\n"
+                    f"Артикул: <code>{main_product['vendor_code']}</code>\n"
+                    f"Ціна: {main_product['drop_price']} грн"
+                )
+                
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=size, callback_data=f"select_size:{p['offer_id']}")]
+                    for p in product_group if (size := (p.get("sizes")[0] if p.get("sizes") else None))
+                ] + [[InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")]])
 
-        # спочатку шукаємо групу по vendor_code
-        vendor_group = PRODUCTS_INDEX.get("by_vendor", {}).get(sku_norm.lower(), [])
+                if main_product.get("pictures"):
+                    await msg.answer_photo(
+                        photo=main_product["pictures"][0],
+                        caption=caption,
+                        reply_markup=kb
+                    )
+                else:
+                    await msg.answer(caption, reply_markup=kb)
 
-        if vendor_group:
-            # кілька офферів з одним vendorCode
-            base = vendor_group[0]
-            caption = f"🛍 {base['name']}\n💰 {base['drop_price']} грн\n\n{base['description']}"
-            kb = InlineKeyboardMarkup()
-            for p in vendor_group:
-                size_label = ", ".join(p["sizes"]) if p["sizes"] else f"ID {p['offer_id']}"
-                kb.add(InlineKeyboardButton(
-                    f"📏 {size_label}",
-                    callback_data=f"order:{p['offer_id']}"
-                ))
-            # надсилаємо перше фото або None
-            await msg.answer_photo(base["pictures"][0] if base["pictures"] else None,
-                                   caption=caption,
-                                   reply_markup=kb)
-            return
-
-        # fallback → пошук по by_sku
-        product_list = find_product_by_sku(sku)
-        if not product_list:
-            await msg.answer(f"❌ Товар з артикулом {sku} не знайдено.")
-            return
-
-        # беремо перший товар у списку
-        product = product_list[0]
-
-        # Формуємо повідомлення з товаром
-        vendor_code = product.get("vendor_code") or product.get("raw_sku") or sku
-        name = product.get("name") or vendor_code
-        price = product.get("drop_price") or product.get("price") or "—"
-        desc = (product.get("description") or "")[:500]
-        pictures = product.get("pictures") or []
-
-        text = f"📦 <b>{name}</b>\n\nАртикул: <code>{vendor_code}</code>\nЦіна: <b>{price} грн</b>\n\n{desc}"
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Додати в корзину", callback_data=f"addcart:{vendor_code}")],
-            [InlineKeyboardButton(text="🔎 Пошук схожих", callback_data=f"search:sku:{vendor_code}")]
-        ])
-
-        if pictures:
-            await msg.answer_photo(photo=pictures[0], caption=text, reply_markup=kb, parse_mode="HTML")
-        else:
-            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
-
-        # додатково показуємо перші 10 схожих результатів (якщо потрібно)
-        results = product_list[:10]
-        for p in results:
-            title = p.get("name", "Без назви")
-            price = p.get("price") or p.get("drop_price") or "—"
-            sku_item = p.get("vendor_code") or p.get("raw_sku") or "—"
-            offer_id = p.get("offer_id") or "—"
-            pics = p.get("pictures") or []
-
-            caption = f"📦 <b>{title}</b>\n💰 {price} грн\n🆔 Артикул: {sku_item}\n🔑 Offer ID: {offer_id}"
-
-            if pics:
-                await msg.answer_photo(photo=pics[0], caption=caption, parse_mode="HTML")
             else:
-                await msg.answer(caption, parse_mode="HTML")
+                await msg.answer(f"Товар з артикулом {sku} не знайдено.")
+        else:
+            await state.clear()
+            await msg.answer(
+                "Вітаю! 👋\n\n"
+                "Я — ваш бот-помічник для замовлень.\n"
+                "Ви можете знайти товар за артикулом або перейти на канал, щоб обрати.",
+                reply_markup=main_menu_keyboard() # Потрібно створити цю клавіатуру
+            )
+
+    except Exception:
+        logger.exception("Deep link processing error")
+        await msg.answer("Помилка обробки запиту. Спробуйте ще раз.")
 
 # ---------------- Command: /find ----------------
 RESULTS_PER_PAGE = 10
