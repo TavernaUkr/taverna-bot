@@ -175,6 +175,20 @@ def build_products_index_from_xml(text: str):
             vendor_code = _find_first_text(
                 elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code", "vendor"]
             ) or ""
+            # --- fix: шукаємо vendorCode окремо ---
+            if not vendor_code:
+                vc = elem.find("vendorCode")
+                if vc is not None and (vc.text or "").strip():
+                    vendor_code = vc.text.strip()
+            
+            # а також шукаємо param name="Артикул"
+            for c in list(elem):
+                ln = _local_tag(c.tag)
+                if ln == "param":
+                    pname = (c.attrib.get("name") or "").strip().lower()
+                    if "артикул" in pname or "sku" in pname or "код" in pname:
+                        if c.text:
+                            vendor_code = vendor_code or c.text.strip()
 
             # дебаг після отримання
             if vendor_code:
