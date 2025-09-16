@@ -329,6 +329,13 @@ def build_products_index_from_xml(text: str):
     except Exception:
         logger.exception("Failed to build products index")
 
+def _find_first_text(elem, tags: List[str]) -> Optional[str]:
+    tags = [t.lower() for t in tags]
+    for c in list(elem):
+        if _local_tag(c.tag).lower() in tags:
+            return (c.text or "").strip()
+    return None
+
 # ---------------- Robust SKU search ----------------
 def find_product_by_sku(sku: str) -> Tuple[Optional[Dict[str, Any]], str]:
     """
