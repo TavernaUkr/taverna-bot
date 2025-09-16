@@ -953,71 +953,99 @@ def render_product_text(product: dict, mode: str = "client", include_intro: bool
     return format_product_message(product, mode=mode, include_intro=include_intro)
 
 # ---------------- START (deep links) ----------------
-@router.message(Command("start"))
-async def cmd_start(msg: Message, state: FSMContext):
+# ---------------- Start command with deep-link ----------------
+@router.message(CommandStart(deep_link=True))
+async def cmd_start(msg: Message, command: CommandObject):
     """
-    Обробка /start [payload]
-    Підтримує payload виду: order_<mode>_<post_id>__sku_<sku>
-    Наприклад: /start order_test_12345__sku_1056
+    Обробка deep-link запуску бота:
+      /start order_<mode>_<postid>__sku_<sku>
     """
-    text = (msg.text or "").strip()
-    parts = text.split(maxsplit=1)
-    payload = parts[1].strip() if len(parts) > 1 else ""
-
-    if not payload:
-        await msg.answer("Привіт! Щоб замовити — натисніть '🛒 Відкрити корзину' або оберіть 'Вибрати товар'.", reply_markup=build_nav_kb())
+    args = (command.args or "").strip()
+    if not args:
+        await msg.answer("Вітаю у боті Taverna! Використовуйте меню для пошуку товарів.")
         return
 
-    if payload.startswith("order_"):
-        try:
-            left, sku_part = payload.split("__sku_", 1)
-            mode_and_post = left.replace("order_", "")
-            mode_parts = mode_and_post.split("_", 1)
-            mode = mode_parts[0] if mode_parts else "test"
-            post_id = mode_parts[1] if len(mode_parts) > 1 else None
-            sku = sku_part
-        except Exception:
-            logger.debug("cmd_start: failed to parse payload=%r", payload)
-            sku = None
-            mode = "test"
-            post_id = None
+    logger.info("Start deep link: %s", args)
 
-        logger.info("Start deep link: mode=%s post_id=%s sku=%s", mode, post_id, sku)
-
-        if not sku:
-            await msg.answer("Не вказано артикул у посиланнi.")
-            return
-
-        product, method = find_product_by_sku(sku)
-        logger.debug("Deep link lookup result. SKU=%s (norm=%s), found=%s (method=%s)", sku, normalize_sku(sku), bool(product), method)
-
-        if not product:
-            await msg.answer("⚠️ Не вдалося знайти товар по цьому артикулу. Спробуйте пошук по назві або зверніться до підтримки.")
-            return
-
-        # Формуємо повідомлення про товар і питаємо розміри / кількість
-        name = product.get("name") or ""
-        price = product.get("drop_price") or product.get("price") or "—"
-        pictures = product.get("pictures") or []
-        sizes = product.get("sizes") or []
-
-        caption = f"📦 <b>{name}</b>\nАртикул: <code>{product.get('vendor_code') or product.get('raw_sku') or sku}</code>\nЦіна: <b>{price} грн</b>"
-
-        if sizes:
-            buttons = [[InlineKeyboardButton(text=str(sz), callback_data=f"select_size:{product.get('sku') or product.get('raw_sku') or sku}:{sz}")] for sz in sizes]
-            buttons.append([InlineKeyboardButton("↩️ Повернутись до каналу", url=f"https://t.me/{MAIN_CHANNEL.replace('@','')}")])
-            kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-        else:
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Додати в корзину", callback_data=f"select_qty:{product.get('sku') or product.get('raw_sku') or sku}::1")]])
-
-        if pictures:
-            await msg.answer_photo(photo=pictures[0], caption=caption, reply_markup=kb, parse_mode="HTML")
-        else:
-            await msg.answer(caption, reply_markup=kb, parse_mode="HTML")
+    # Парсимо deep-link
+    m = re.match(r"^order_([^_]+)_(.+?)__sku_(.+)$", args)
+    if not m:
+        await msg.answer("❌ Невірне посилання або формат команди.")
         return
+
+    mode, post_id, sku = m.groups()
+    logger.info("Start deep link: mode=%s post_id=%s sku=%s", mode, post_id, sku)
+
+    # Нормалізуємо та шукаємо продукт через індекс
+    norm_sku = normalize_sku(sku) if sku else None
+    product, method = find_product_by_sku(norm_sku) if norm_sku else (None, "empty")
+
+    logger.debug(
+        "Deep link lookup result. SKU=%s (norm=%s), found=%s (method=%s)",
+        sku, norm_sku, bool(product), method,
+    )
+
+    if not product:
+        await msg.answer(f"❌ Товар з артикулом <code>{sku}</code> не знайдено.", parse_mode="HTML")
+        return
+
+    # Формуємо повідомлення з товаром
+    vendor_code = product.get("vendor_code") or product.get("raw_sku") or sku
+    name = product.get("name") or vendor_code
+    price = product.get("drop_price") or product.get("price") or "—"
+    desc = (product.get("description") or "")[:500]
+    pictures = product.get("pictures") or []
+
+    text = f"📦 <b>{name}</b>\n\nАртикул: <code>{vendor_code}</code>\nЦіна: <b>{price} грн</b>\n\n{desc}"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Додати в корзину", callback_data=f"addcart:{vendor_code}")],
+        [InlineKeyboardButton(text="🔎 Пошук схожих", callback_data=f"search:sku:{vendor_code}")]
+    ])
+
+    if pictures:
+        await msg.answer_photo(photo=pictures[0], caption=text, reply_markup=kb, parse_mode="HTML")
     else:
-        await msg.answer("Привіт! Виклик з payload: " + payload)
+        await msg.answer(text, reply_markup=kb, parse_mode="HTML")
+
+# ---------------- Callback: Add to cart ----------------
+@router.callback_query(F.data.startswith("addcart:"))
+async def callback_addcart(cb: CallbackQuery):
+    """
+    Додає товар у корзину користувача.
+    Очікує callback_data виду "addcart:<sku>".
+    """
+    sku = cb.data.split(":", 1)[1].strip()
+    norm_sku = normalize_sku(sku)
+    product, method = find_product_by_sku(norm_sku)
+
+    logger.debug(
+        "Add-to-cart lookup. SKU=%s (norm=%s), found=%s (method=%s)",
+        sku, norm_sku, bool(product), method,
+    )
+
+    if not product:
+        await cb.answer(f"❌ Товар {sku} не знайдено.", show_alert=True)
         return
+
+    user_id = cb.from_user.id
+    cart = CART.setdefault(user_id, [])
+
+    # шукаємо чи вже є цей товар у корзині
+    existing = next((item for item in cart if item["sku"] == product["sku"]), None)
+    if existing:
+        existing["qty"] += 1
+    else:
+        cart.append({
+            "sku": product["sku"],
+            "vendor_code": product.get("vendor_code"),
+            "name": product.get("name"),
+            "price": product.get("drop_price") or product.get("price"),
+            "qty": 1,
+        })
+
+    await cb.answer("✅ Додано в корзину!")
+    await cb.message.reply(f"➕ Товар <b>{product.get('name') or sku}</b> додано у корзину.", parse_mode="HTML")
 
 # ---------------- Select Size ----------------
 @router.callback_query(F.data.startswith("select_size:"))
