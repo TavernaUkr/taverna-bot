@@ -258,6 +258,11 @@ def build_products_index_from_xml(text: str):
                 "available": available,
             }
 
+            logger.debug(
+                "DEBUG PRODUCT: offer_id=%s, vendor_code=%s, raw_skus=%s, sku_norm=%s, name=%s",
+                offer_id, vendor_code, raw_skus, sku_normalized, name
+)
+
             # додаємо в масив усіх
             PRODUCTS_INDEX["all_products"].append(product)
 
