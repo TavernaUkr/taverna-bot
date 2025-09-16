@@ -162,7 +162,7 @@ def build_products_index_from_xml(text: str):
         "by_sku": {},
         "by_name": {},
         "by_offer": {},
-        "by_base_name": {}
+        "by_base_name": {},
         "by_vendor": {}
     }
 
