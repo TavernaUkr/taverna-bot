@@ -310,10 +310,9 @@ def build_products_index_from_xml(text: str):
 # ---------------- Robust SKU search (ФІНАЛЬНА ВЕРСІЯ) ----------------
 def find_product_by_sku(raw: str) -> Optional[list]:
     """
-    Покращений пошук товару по артикулу / vendorCode / offer_id.
-    1. Шукає точний збіг (швидко).
-    2. Якщо не знайдено, шукає частковий збіг (входження рядка).
-    3. Повертає список унікальних product dicts.
+    Покращений пошук з сортуванням за релевантністю.
+    1. Шукає точний збіг.
+    2. Якщо не знайдено, шукає часткові збіги і сортує їх.
     """
     if not raw:
         return None
@@ -323,38 +322,60 @@ def find_product_by_sku(raw: str) -> Optional[list]:
     rl = raw.lower()
 
     by_sku = PRODUCTS_INDEX.get("by_sku", {})
-    by_vendor = PRODUCTS_INDEX.get("by_vendor", {})
     
+    # --- Етап 1: Точний пошук (швидкий і надійний) ---
     candidates = []
-
-    # Етап 1: Точний пошук (найшвидший)
     if norm in by_sku: candidates.extend(by_sku[norm])
     if rl in by_sku: candidates.extend(by_sku[rl])
     if raw in by_sku: candidates.extend(by_sku[raw])
-    if rl in by_vendor: candidates.extend(by_vendor[rl])
     
-    # Якщо знайшли точні збіги, одразу повертаємо унікалізований результат
     if candidates:
         unique_products = list({p["offer_id"]: p for p in candidates}.values())
         logger.debug(f"Found {len(unique_products)} products by exact match for SKU='{raw}'")
         return unique_products
 
-    # Етап 2: Частковий пошук (якщо точного збігу немає)
-    # Допомагає знайти '1056' в 'A1056'.
-    if len(raw) >= 3: # Не шукаємо для дуже коротких запитів
+    # --- Етап 2: Частковий пошук з оцінкою релевантності ---
+    candidates_with_scores = []
+    if len(raw) >= 3:
+        processed_offers = set()
         for key, products in by_sku.items():
-            # Шукаємо входження оригінального запиту (raw) або нормалізованого (norm) в ключ індексу
             if raw in key or norm in key:
-                candidates.extend(products)
+                for p in products:
+                    offer_id = p.get("offer_id")
+                    if offer_id in processed_offers:
+                        continue
+                    
+                    # Оцінюємо, наскільки товар відповідає запиту
+                    score = 0
+                    vendor_code_norm = normalize_sku(p.get("vendor_code", ""))
+                    
+                    if norm == vendor_code_norm:
+                        score = 100  # Ідеальний збіг по артикулу
+                    elif norm in vendor_code_norm:
+                        score = 90   # Частковий збіг по артикулу
+                    elif key.startswith(norm):
+                        score = 70   # Збіг на початку ID
+                    else:
+                        score = 10   # Інший частковий збіг
+                    
+                    candidates_with_scores.append({"product": p, "score": score})
+                    processed_offers.add(offer_id)
 
-    if not candidates:
+    if not candidates_with_scores:
         logger.debug("Lookup failed for SKU=%s norm=%s (even with partial search)", raw, norm)
         return None
 
-    # Унікалізація результатів, зібраних на Етапі 2
-    unique_products = list({p["offer_id"]: p for p in candidates}.values())
-    logger.debug(f"Found {len(unique_products)} products by partial match for SKU='{raw}'")
-    return unique_products
+    # Сортуємо кандидатів за оцінкою (від кращого до гіршого)
+    sorted_candidates = sorted(candidates_with_scores, key=lambda x: x["score"], reverse=True)
+    
+    # Повертаємо список лише товарів, вже відсортований
+    final_products = [item["product"] for item in sorted_candidates]
+    
+    if final_products:
+        best_score = sorted_candidates[0]['score']
+        logger.debug(f"Found {len(final_products)} products by partial match for SKU='{raw}'. Best score: {best_score}")
+    
+    return final_products
 
 # ---------------- global async loop holder ----------------
 # буде заповнений в main()
