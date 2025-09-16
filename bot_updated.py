@@ -355,10 +355,10 @@ def build_products_index_from_xml(text: str):
         logger.exception("Failed to build products index")
 
 # ---------------- Robust SKU search ----------------
-def find_product_by_sku(raw: str) -> Optional[dict]:
+def find_product_by_sku(raw: str) -> Optional[list]:
     """
     Шукаємо товар по артикулу / offer_id / vendor_code / raw_sku / назві.
-    Повертаємо перший знайдений product dict або None.
+    Якщо є кілька варіантів (розміри/кольори) — повертаємо список product dicts.
     Підтримуємо кілька варіантів ключів (normalized, raw, no-zero, offer variants).
     """
     if not raw:
@@ -370,6 +370,7 @@ def find_product_by_sku(raw: str) -> Optional[dict]:
     except Exception:
         norm = re.sub(r'[^0-9A-Za-z]+', '', raw).lower()
 
+    rl = raw.lower()
     logger.debug("Searching product: input='%s', normalized='%s'", raw, norm)
 
     by_sku = PRODUCTS_INDEX.get("by_sku", {})
@@ -378,69 +379,49 @@ def find_product_by_sku(raw: str) -> Optional[dict]:
     by_vendor = PRODUCTS_INDEX.get("by_vendor", {})
     all_products = PRODUCTS_INDEX.get("all_products", [])
 
-    # Побудуємо набір кандидатів для перевірки (щоб покрити варіанти)
     candidates = []
-    if norm:
-        candidates.append(norm)
-    rl = raw.lower()
-    candidates.append(rl)
-    # raw без провідних нулів
-    if rl.lstrip("0") != rl:
-        candidates.append(rl.lstrip("0"))
-    # якщо norm містить лише цифри — додамо також варіант без нулів
-    if norm and re.fullmatch(r'\d+', norm) and norm.lstrip("0") != norm:
-        candidates.append(norm.lstrip("0"))
 
-    # Унікальність кандидатів при збереженні порядку
-    seen = set()
-    candidates = [c for c in candidates if c and not (c in seen or seen.add(c))]
-
-    # 1) шукати по by_sku (нормалізований / raw / no-zero)
-    for key in candidates:
+    # 1) прямі хіти по by_sku
+    for key in [norm, rl, rl.lstrip("0")]:
         if key in by_sku:
-            logger.debug("Deep link lookup result. SKU=%s (candidate=%s), found=True (method=by_sku)", raw, key)
-            return by_sku[key]
+            candidates.append(by_sku[key])
 
-    # 2) by_offer / by_id (offer_id може бути введений як число/рядок)
+    # 2) by_offer / by_id
     if rl in by_offer:
-        logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_offer)", raw)
-        return by_offer[rl]
-    # також перевіримо exact raw offer_id (якщо користувач ввів точний id)
+        candidates.append(by_offer[rl])
     if raw in by_id:
-        logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_id)", raw)
-        return by_id[raw]
+        candidates.append(by_id[raw])
 
-    # 3) group by vendor_code (повертаємо перший елемент групи)
+    # 3) group by vendor_code (усі варіанти)
     if rl in by_vendor:
-        grp = by_vendor[rl]
-        if grp:
-            logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_vendor_group)", raw)
-            return grp[0]
+        candidates.extend(by_vendor[rl])
 
-    # 4) точний перебір по всіх продуктах (fallback): vendor_code / raw_skus / offer_id
-    #    — тут перевіряємо точний match, не частковий
+    # 4) точний перебір по всіх продуктах (vendor_code / raw_skus / offer_id)
     for p in all_products:
-        if raw.lower() == (p.get("vendor_code") or "").lower():
-            logger.debug("Deep link lookup result. SKU=%s, found=True (method=vendor_code_scan)", raw)
-            return p
-        if any(raw.lower() == (sku or "").lower() for sku in p.get("raw_skus", [])):
-            logger.debug("Deep link lookup result. SKU=%s, found=True (method=raw_skus_scan)", raw)
-            return p
-        if raw == p.get("offer_id"):
-            logger.debug("Deep link lookup result. SKU=%s, found=True (method=offer_id_scan)", raw)
-            return p
+        if rl == (p.get("vendor_code") or "").lower():
+            candidates.append(p)
+        elif any(rl == (sku or "").lower() for sku in p.get("raw_skus", [])):
+            candidates.append(p)
+        elif raw == p.get("offer_id"):
+            candidates.append(p)
 
-    # 5) частковий пошук по назві/опису (усі токени повинні бути присутні)
-    tokens = re.findall(r"\w{3,}", raw.lower())
+    # унікалізація по offer_id
+    uniq = {p["offer_id"]: p for p in candidates}.values()
+    if uniq:
+        return list(uniq)
+
+    # 5) fallback — частковий пошук по назві/опису
+    tokens = re.findall(r"\w{3,}", rl)
     if tokens:
+        res = []
         for p in all_products:
-            haystack = ((p.get("name") or "") + " " + (p.get("description") or "")).lower()
-            if all(tok in haystack for tok in tokens):
-                logger.debug("Deep link lookup result. SKU=%s, found=True (method=partial_name)", raw)
-                return p
+            hay = ((p.get("name") or "") + " " + (p.get("description") or "")).lower()
+            if all(tok in hay for tok in tokens):
+                res.append(p)
+        if res:
+            return res
 
-    # 6) не знайдено
-    logger.debug("Deep link lookup result. SKU=%s (norm=%s), found=False (method=not_found)", raw, norm)
+    logger.debug("Lookup failed for SKU=%s norm=%s", raw, norm)
     return None
 
 # ---------------- global async loop holder ----------------
@@ -2368,20 +2349,26 @@ async def find_component_sizes(product_name: str) -> Dict[str, List[str]]:
 
     return res
 
-# ---------------- Helpers: size buttons + handlers (replace state_article + cb_size) ----------------
-def build_size_keyboard(component_index: int, sizes: List[str]) -> InlineKeyboardMarkup:
+# ---------------- Size keyboard ----------------
+def build_size_keyboard(products: List[dict]) -> InlineKeyboardMarkup:
     """
-    Повертає InlineKeyboardMarkup з кнопками розмірів.
-    callback_data: "size:<component_index>:<size_index>"
+    Повертає InlineKeyboardMarkup з кнопками для вибору розміру.
+    Кожна кнопка містить offer_id для правильного формування замовлення.
+    products: список dict одного товару з різними розмірами
     """
     kb = InlineKeyboardMarkup(row_width=3)
-    buttons = [
-        InlineKeyboardButton(text=str(s), callback_data=f"size:{component_index}:{i}")
-        for i, s in enumerate(sizes)
-    ]
+    buttons = []
+
+    for p in products:
+        size = p.get("param_name_Размер") or p.get("sizes", [])[0] if p.get("sizes") else "—"
+        offer_id = p.get("offer_id")
+        buttons.append(InlineKeyboardButton(
+            text=f"Розмір - {size}",
+            callback_data=f"choose_size:{offer_id}:{size}"
+        ))
+
     if buttons:
         kb.add(*buttons)
-    # кнопка скасування, посилає callback який вже обробляється у order:cancel
     kb.add(InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="order:cancel"))
     return kb
 
@@ -2531,21 +2518,22 @@ async def state_article(msg: Message, state: FSMContext):
         await state.set_state(OrderForm.amount)
         return
 
+# ---------------- Product rendering ----------------
+# рядок ~870 - 900
 def render_product_text(product: dict, mode: str = "client", include_intro: bool = True) -> str:
     """
     Формуємо красивий текст для повідомлення ботом за product dict.
+    Підтримуємо мульти-розміри та варіанти.
     """
     sku_line = product.get("sku") or product.get("raw_sku") or "—"
     vendor_code = product.get("vendor_code") or sku_line
     name = product.get("name") or "—"
     desc = product.get("description") or ""
     sizes = ", ".join(product.get("sizes", [])) if product.get("sizes") else "—"
-    stock_qty = product.get("stock_qty") or 0
+    stock_qty = product.get("quantity_in_stock") or 0
     stock_text = "Є ✅" if stock_qty > 0 else "Немає ❌"
     drop_price = product.get("drop_price")
-    final_price = None
-    if drop_price:
-        final_price = aggressive_round(drop_price * 1.33)
+    final_price = aggressive_round(drop_price * 1.33) if drop_price else None
 
     lines = []
     if include_intro:
@@ -2554,7 +2542,6 @@ def render_product_text(product: dict, mode: str = "client", include_intro: bool
     lines.append(f"📌 Артикул: {sku_line}")
     lines.append(f"📛 Назва: {name}")
     if desc:
-        # trim long descriptions
         lines.append(f"📝 Опис: {desc[:400]}{'...' if len(desc) > 400 else ''}")
     lines.append(f"📦 Наявність: {stock_text} (кількість: {stock_qty})")
     lines.append(f"📏 Розміри: {sizes}")
