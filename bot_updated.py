@@ -143,10 +143,12 @@ def normalize_sku(s: str) -> str:
 def build_products_index_from_xml(text: str):
     """
     Парсимо XML string (text) і будуємо PRODUCTS_INDEX:
-      - PRODUCTS_INDEX["by_sku"] -> mapping ключ -> product dict
+      - PRODUCTS_INDEX["by_sku"] -> mapping ключ -> product dict (ключі: vendorCode/normalized/offer variants)
       - PRODUCTS_INDEX["by_offer"] -> mapping offer_id -> product dict
       - PRODUCTS_INDEX["by_name"] -> token -> [product dicts]
       - PRODUCTS_INDEX["by_base_name"] -> base_name -> [product dicts]
+      - PRODUCTS_INDEX["by_vendor"] -> vendor_code -> [product dicts] (групування розмірів/варіантів)
+      - PRODUCTS_INDEX["by_id"] -> offer id -> product dict
       - PRODUCTS_INDEX["all_products"] -> list(product dicts)
     """
     global PRODUCTS_INDEX
@@ -156,10 +158,12 @@ def build_products_index_from_xml(text: str):
         "by_name": {},
         "by_offer": {},
         "by_base_name": {},
-        "by_vendor": {}
+        "by_vendor": {},
+        "by_id": {},
     }
 
     try:
+        # використовуємо iterparse щоб не завантажувати сильно великий xml в пам'ять
         it = ET.iterparse(io.StringIO(text), events=("end",))
         for event, elem in it:
             tag = _local_tag(elem.tag).lower()
@@ -167,16 +171,28 @@ def build_products_index_from_xml(text: str):
                 elem.clear()
                 continue
 
+            # --- basic fields ---
             offer_id = (elem.attrib.get("id") or "").strip()
             group_id = (elem.attrib.get("group_id") or elem.attrib.get("group") or "").strip()
 
+            # знаходимо vendorCode у різних варіаціях
             vendor_code = _find_first_text(
                 elem, ["vendorcode", "vendor_code", "vendorCode", "sku", "articul", "article", "code", "vendor"]
             ) or ""
             if not vendor_code:
-                vc = elem.find("vendorCode")
+                # додатково подивимось на прямий тег <vendorCode>
+                vc = elem.find(".//vendorCode")
                 if vc is not None and (vc.text or "").strip():
                     vendor_code = vc.text.strip()
+
+            # спробуємо знайти vendorCode у <param name="...">
+            if not vendor_code:
+                for c in elem.findall(".//param"):
+                    pname = (c.attrib.get("name") or "").strip().lower()
+                    if "арт" in pname or "артикул" in pname or "sku" in pname or "код" in pname:
+                        if (c.text or "").strip():
+                            vendor_code = (c.text or "").strip()
+                            break
 
             name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
             description = _find_first_text(elem, ["description", "desc"]) or ""
@@ -186,6 +202,7 @@ def build_products_index_from_xml(text: str):
             except Exception:
                 drop_price = None
 
+            # pictures
             pictures = []
             for c in list(elem):
                 ln = _local_tag(c.tag)
@@ -216,24 +233,44 @@ def build_products_index_from_xml(text: str):
                     if av in ("false", "0", "no"):
                         available = False
 
+            # збираємо raw_skus: offer_id та vendor_code (якщо є)
             raw_skus = []
             if offer_id:
                 raw_skus.append(offer_id)
             if vendor_code:
                 raw_skus.append(vendor_code)
 
-            raw_skus = [r for r in dict.fromkeys([r for r in raw_skus if r])]
+            # також шукаємо у всіх <param> значення які можуть бути артикулом
+            for c in elem.findall(".//param"):
+                pname = (c.attrib.get("name") or "").lower()
+                if "vendor" in pname or "арт" in pname or "арт." in pname or "sku" in pname or "код" in pname:
+                    ptxt = (c.text or "").strip()
+                    if ptxt:
+                        raw_skus.append(ptxt)
 
+            # у випадку відсутності vendor_code — спробуємо знайти в описі
+            if not vendor_code and description:
+                m = re.search(r'(?:артикул|артікул|арт|sku|код|article)[:\s\-]*([0-9A-Za-z\-\_]{2,30})', description, flags=re.I)
+                if m:
+                    vendor_code = m.group(1).strip()
+                    raw_skus.append(vendor_code)
+                    logger.debug(f"Offer {offer_id}: vendor_code fallback = {vendor_code}")
+
+            # унікалізуємо raw_skus
+            raw_skus = [r for r in dict.fromkeys([r.strip() for r in raw_skus if r and r.strip()])]
+
+            # main normalized sku (для product["sku"])
             main_key = vendor_code or offer_id or (raw_skus[0] if raw_skus else "")
             sku_normalized = normalize_sku(main_key) or (main_key or "").lower()
 
-            # === NEW: визначаємо base_name (без кольору) ===
+            # === base_name: прибираємо останнє слово (ймовірно колір/розмір) для групування ===
             words = (name or "").split()
             if len(words) > 1:
                 base_name = " ".join(words[:-1]).lower()
             else:
                 base_name = (name or "").lower()
 
+            # формуємо product dict — *єдиний* об'єкт, який індексуємо скрізь
             product = {
                 "offer_id": offer_id,
                 "group_id": group_id,
@@ -251,14 +288,16 @@ def build_products_index_from_xml(text: str):
                 "available": available,
             }
 
+            # додаємо в головний масив
             PRODUCTS_INDEX["all_products"].append(product)
 
-            # index by offer_id
+            # index by offer_id / id variants
             if offer_id:
                 PRODUCTS_INDEX["by_offer"][offer_id.lower()] = product
                 PRODUCTS_INDEX["by_offer"][normalize_sku(offer_id) or offer_id.lower()] = product
+                PRODUCTS_INDEX["by_id"][str(offer_id)] = product
 
-            # index by sku/vendor_code/raw
+            # index by sku/vendor_code/raw variants
             candidates = set()
             if sku_normalized:
                 candidates.add(sku_normalized)
@@ -282,14 +321,19 @@ def build_products_index_from_xml(text: str):
                 if key:
                     PRODUCTS_INDEX["by_sku"][key] = product
 
-            # index by name tokens
+            # index by name tokens (quick search)
             for tok in re.findall(r'\w{3,}', (name or "").lower()):
                 PRODUCTS_INDEX["by_name"].setdefault(tok, []).append(product)
 
-            # === NEW: index by base_name ===
+            # index by base_name for grouping (без кольору)
             if base_name:
                 PRODUCTS_INDEX["by_base_name"].setdefault(base_name, []).append(product)
 
+            # group by vendor_code (для показу варіантів/розмірів під одним артикулом)
+            if vendor_code:
+                PRODUCTS_INDEX["by_vendor"].setdefault(vendor_code.strip().lower(), []).append(product)
+
+            # очищаємо element щоб зменшити пам'ять
             elem.clear()
 
         total = len(PRODUCTS_INDEX["all_products"])
@@ -298,78 +342,79 @@ def build_products_index_from_xml(text: str):
     except Exception:
         logger.exception("Failed to build products index")
 
-def _find_first_text(elem, tags: list[str]) -> Optional[str]:
-    """
-    Case-insensitive search for first element text among `tags`.
-    Works with namespaces and mixed-case tag names.
-    """
-    if not tags:
-        return None
-    tags_l = [t.lower() for t in tags]
-    # ітеруємо по всіх піделементах (глибоко) — беремо локальний тег без namespace
-    for child in elem.iter():
-        name = _local_tag(child.tag).lower()
-        # точний збіг або якщо один з tags входить в name (запобігає проблемам зі склеєними/префіксами)
-        if any(name == t or t in name for t in tags_l):
-            txt = (child.text or "").strip()
-            if txt:
-                return txt
-    return None
-
 # ---------------- Robust SKU search ----------------
 def find_product_by_sku(raw: str) -> Optional[dict]:
     """
     Шукаємо товар по артикулу / offer_id / vendor_code / raw_sku / назві.
-    Підтримує точний та частковий пошук.
+    Повертаємо перший знайдений product dict або None.
+    Підтримуємо:
+      - точний пошук по нормалізованому SKU
+      - пошук по raw (lowered)
+      - пошук по offer_id
+      - пошук по vendor_code (exact)
+      - пошук по raw_skus масиву
+      - частковий пошук по назві/опису (всі токени мають бути в наявному тексті)
     """
     if not raw:
         return None
 
-    raw = raw.strip()
+    raw = str(raw).strip()
     norm = normalize_sku(raw)
     logger.debug(f"Searching product: input='{raw}', normalized='{norm}'")
 
-    # 1. прямі хіти в індексі
-    if norm in PRODUCTS_INDEX["by_sku"]:
+    # 1) прямі хіти по by_sku (normalize / raw / no-zero)
+    if norm and norm in PRODUCTS_INDEX.get("by_sku", {}):
         logger.debug("Deep link lookup result. SKU=%s (norm=%s), found=True (method=by_sku_norm)", raw, norm)
         return PRODUCTS_INDEX["by_sku"][norm]
 
-    if raw.lower() in PRODUCTS_INDEX["by_sku"]:
+    rl = raw.lower()
+    if rl in PRODUCTS_INDEX.get("by_sku", {}):
         logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_sku_raw)", raw)
-        return PRODUCTS_INDEX["by_sku"][raw.lower()]
+        return PRODUCTS_INDEX["by_sku"][rl]
 
-    raw_nozero = raw.lstrip("0").lower()
-    if raw_nozero in PRODUCTS_INDEX["by_sku"]:
+    raw_nozero = rl.lstrip("0")
+    if raw_nozero in PRODUCTS_INDEX.get("by_sku", {}):
         logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_sku_nozero)", raw)
         return PRODUCTS_INDEX["by_sku"][raw_nozero]
 
-    # 2. пошук по offer_id
-    if raw in PRODUCTS_INDEX["by_offer"]:
-        logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_offer)", raw)
-        return PRODUCTS_INDEX["by_offer"][raw]
+    # 2) пошук по offer_id / by_offer / by_id
+    if rl in PRODUCTS_INDEX.get("by_offer", {}):
+        logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_offer_lower)", raw)
+        return PRODUCTS_INDEX["by_offer"][rl]
+    if raw in PRODUCTS_INDEX.get("by_id", {}):
+        logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_id)", raw)
+        return PRODUCTS_INDEX["by_id"][raw]
 
-    # 3. пошук по vendor_code / raw_skus
-    for p in PRODUCTS_INDEX["all_products"]:
+    # 3) пошук по vendor_code (by_vendor група - повертаємо перший елемент групи)
+    vendor_map = PRODUCTS_INDEX.get("by_vendor", {})
+    if rl in vendor_map:
+        grp = vendor_map[rl]
+        if grp:
+            logger.debug("Deep link lookup result. SKU=%s, found=True (method=by_vendor_group)", raw)
+            return grp[0]
+
+    # 4) перебір всіх all_products (коли не знайдено у індексах) - exact vendor_code / raw_skus / offer_id
+    for p in PRODUCTS_INDEX.get("all_products", []):
         if raw.lower() == (p.get("vendor_code") or "").lower():
-            logger.debug("Deep link lookup result. SKU=%s, found=True (method=vendor_code)", raw)
+            logger.debug("Deep link lookup result. SKU=%s, found=True (method=vendor_code_exact_scan)", raw)
             return p
         if any(raw.lower() == (sku or "").lower() for sku in p.get("raw_skus", [])):
-            logger.debug("Deep link lookup result. SKU=%s, found=True (method=raw_skus)", raw)
+            logger.debug("Deep link lookup result. SKU=%s, found=True (method=raw_skus_scan)", raw)
             return p
         if raw == p.get("offer_id"):
-            logger.debug("Deep link lookup result. SKU=%s, found=True (method=offer_id)", raw)
+            logger.debug("Deep link lookup result. SKU=%s, found=True (method=offer_id_scan)", raw)
             return p
 
-    # 4. частковий пошук у назві / описі
+    # 5) частковий пошук у назві/описі (усі токени повинні бути присутні)
     tokens = re.findall(r"\w{3,}", raw.lower())
     if tokens:
-        for p in PRODUCTS_INDEX["all_products"]:
-            haystack = (p.get("name", "") + " " + p.get("description", "")).lower()
+        for p in PRODUCTS_INDEX.get("all_products", []):
+            haystack = ((p.get("name") or "") + " " + (p.get("description") or "")).lower()
             if all(tok in haystack for tok in tokens):
                 logger.debug("Deep link lookup result. SKU=%s, found=True (method=partial_name)", raw)
                 return p
 
-    # 5. не знайдено
+    # 6) не знайдено
     logger.debug("Deep link lookup result. SKU=%s (norm=%s), found=False (method=not_found)", raw, norm)
     return None
 
