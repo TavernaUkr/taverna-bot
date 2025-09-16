@@ -43,6 +43,333 @@ import tempfile
 
 app = Flask(__name__)
 
+# ---------------- Config & Env ----------------
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("taverna")
+logger.setLevel(logging.DEBUG)
+
+def check_env_vars():
+    print("=== Checking ENV variables ===")
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    if not BOT_TOKEN:
+        print("❌ ERROR: BOT_TOKEN is missing")
+        sys.exit(1)
+
+    env_vars = [
+        "BOT_TOKEN", "BOT_USERNAME", "ADMIN_ID",
+        "TEST_CHANNEL", "MAIN_CHANNEL", "TG_API_ID", "TG_API_HASH",
+        "SESSION_NAME", "SUPPLIER_CHANNEL", "SUPPLIER_NAME",
+        "NP_API_KEY", "NP_API_URL", "MYDROP_API_KEY", "MYDROP_EXPORT_URL", "MYDROP_ORDERS_URL", "ORDERS_DIR",
+        "USE_GCS", "GCS_BUCKET", "SERVICE_ACCOUNT_JSON",
+        "USE_GDRIVE", "GDRIVE_FOLDER_ID",
+        "TEST_MODE", "WEBHOOK_URL"
+    ]
+    for var in env_vars:
+        value = os.getenv(var)
+        if value:
+            if var.upper().endswith(("KEY", "TOKEN", "SECRET", "PASSWORD")) or var in ("SERVICE_ACCOUNT_JSON",):
+                masked = (str(value)[:4] + "...(masked)")
+            else:
+                masked = str(value) if len(str(value)) < 60 else str(value)[:57] + "..."
+            print(f"✅ {var} = {masked}")
+        else:
+            print(f"⚠️ {var} is not set")
+    print("=== End ENV check ===")
+    return BOT_TOKEN
+
+BOT_TOKEN = check_env_vars()
+BOT_USERNAME = os.getenv("BOT_USERNAME")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+TEST_CHANNEL = int(os.getenv("TEST_CHANNEL"))
+MAIN_CHANNEL = os.getenv("MAIN_CHANNEL")
+TEST_CHANNEL_URL = os.getenv("TEST_CHANNEL_URL")
+
+api_id = int(os.getenv("TG_API_ID", "0") or 0)
+api_hash = os.getenv("TG_API_HASH", "")
+SESSION_NAME = os.getenv("SESSION_NAME", "bot1")
+supplier_channel = os.getenv("SUPPLIER_CHANNEL")
+supplier_name = os.getenv("SUPPLIER_NAME", "Supplier")
+
+NP_API_KEY = os.getenv("NP_API_KEY")
+NP_API_URL = os.getenv("NP_API_URL")
+
+MYDROP_API_KEY = os.getenv("MYDROP_API_KEY")
+MYDROP_EXPORT_URL = os.getenv("MYDROP_EXPORT_URL")
+MYDROP_ORDERS_URL = os.getenv("MYDROP_ORDERS_URL")
+
+ORDERS_DIR = os.getenv("ORDERS_DIR", "/tmp/orders")
+Path(ORDERS_DIR).mkdir(parents=True, exist_ok=True)
+
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+REVIEW_CHAT = int(os.getenv("REVIEW_CHAT", str(ADMIN_ID)))
+BUCKET_NAME = os.getenv("GCS_BUCKET", "taverna-bot-storage")
+
+USE_GCS = os.getenv("USE_GCS", "false").lower() in ("1", "true", "yes")
+USE_GDRIVE = os.getenv("USE_GDRIVE", "false").lower() in ("1", "true", "yes")
+GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "")
+
+logger.debug("USE_GDRIVE = %s", USE_GDRIVE)
+
+# ---------------- Cache for MyDrop products ----------------
+PRODUCTS_CACHE = {
+    "last_update": None,
+    "data": None
+}
+CACHE_TTL = 900  # 15 хвилин (900 секунд)
+
+PRODUCTS_EXPORT_CACHE: Optional[str] = None
+
+# ---------------- Index for fast lookup ----------------
+PRODUCTS_INDEX = {
+    "by_sku": {},
+    "by_offer": {},
+    "by_name": {},
+    "all_products": []
+}
+INDEX_TTL = 1800  # 30 хвилин — перевобудовувати періодично
+
+def normalize_sku(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return None
+    s = str(s).strip().lower()
+    # remove spaces and leading zeros for numeric-like skus
+    s = re.sub(r'\s+', '', s)
+    if s.isdigit():
+        return str(int(s))  # "0099" -> "99"
+    # keep alnum + - _
+    return re.sub(r'[^a-z0-9\-_]', '', s)
+
+# ---------------- Build product index (robust) ----------------
+def build_products_index_from_xml(text: str):
+    """
+    Парсимо XML string (text) і будуємо PRODUCTS_INDEX:
+      - PRODUCTS_INDEX["by_sku"] -> mapping ключ -> product dict
+      - PRODUCTS_INDEX["by_offer"] -> mapping offer_id -> product dict
+      - PRODUCTS_INDEX["by_name"] -> token -> [product dicts]
+      - PRODUCTS_INDEX["all_products"] -> list(product dicts)
+    Ми явно додаємо для кожного товару набір ключів:
+      normalized sku, raw lower, raw without leading zeros, offer_id variants, vendor_code variants
+    """
+    global PRODUCTS_INDEX
+    PRODUCTS_INDEX = {"all_products": [], "by_sku": {}, "by_name": {}, "by_offer": {}}
+
+    try:
+        # text може бути великий — використовуємо iterparse
+        it = ET.iterparse(io.StringIO(text), events=("end",))
+        for event, elem in it:
+            tag = _local_tag(elem.tag).lower()
+            # знаходимо тільки вузли-пропозиції
+            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
+                elem.clear()
+                continue
+
+            offer_id = (elem.attrib.get("id") or "").strip()
+            group_id = (elem.attrib.get("group_id") or elem.attrib.get("group") or "").strip()
+
+            # стандартні поля (використовуємо ваш _find_first_text якщо є)
+            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "vendorCode", "sku", "vendor", "vendor_code"]) or ""
+            name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
+            description = _find_first_text(elem, ["description", "desc"]) or ""
+            price_txt = _find_first_text(elem, ["price", "cost"]) or ""
+            try:
+                drop_price = float(price_txt)
+            except Exception:
+                drop_price = None
+
+            # pictures
+            pictures = []
+            for c in list(elem):
+                ln = _local_tag(c.tag)
+                if ln in ("picture", "image", "img"):
+                    txt = (c.text or "").strip()
+                    if txt:
+                        pictures.append(txt)
+
+            # sizes / stock / available
+            sizes = []
+            raw_skus = []
+            stock_qty = 0
+            available = True
+            for c in list(elem):
+                ln = _local_tag(c.tag)
+                if ln in ("param", "attribute"):
+                    pname = (c.attrib.get("name") or c.attrib.get("k") or "").strip().lower()
+                    ptxt = (c.text or "").strip()
+                    if pname and ("размер" in pname or "size" in pname or "розмір" in pname):
+                        if ptxt:
+                            sizes.append(ptxt)
+                if ln in ("quantity", "stock", "quantity_in_stock"):
+                    try:
+                        stock_qty = int((c.text or "0").strip())
+                    except Exception:
+                        pass
+                if ln in ("available",):
+                    av = (c.text or "").strip().lower()
+                    if av in ("false", "0", "no"):
+                        available = False
+
+            # fallback vendor_code: спробуємо знайти в різних місцях
+            if not vendor_code:
+                vendor_code = _find_first_text(elem, ["vendorCode", "vendor_code", "vendorcode", "vendor"]) or ""
+                if not vendor_code and description:
+                    m = re.search(r'(?:артикул|артікул|sku|код|article)[:\s\-]*([0-9A-Za-z\-]{2,30})', description, flags=re.I)
+                    if m:
+                        vendor_code = m.group(1).strip()
+
+            # raw_skus збираємо: offer_id, vendor_code, можливі варіанти param
+            if offer_id:
+                raw_skus.append(offer_id)
+            if vendor_code:
+                raw_skus.append(vendor_code)
+
+            # у деяких файлах vendorCode може бути в <param> або атрибутах — ще раз скануємо params
+            for c in elem.findall(".//param"):
+                pname = (c.attrib.get("name") or "").lower()
+                if "vendor" in pname or "art" in pname or "sku" in pname:
+                    ptxt = (c.text or "").strip()
+                    if ptxt:
+                        raw_skus.append(ptxt)
+
+            # unique raw_skus
+            raw_skus = [r for r in dict.fromkeys([r for r in raw_skus if r])]
+
+            # main normalized sku (для product.sku)
+            main_key = vendor_code or offer_id or (raw_skus[0] if raw_skus else "")
+            sku_normalized = normalize_sku(main_key or "") or (main_key or "").lower()
+
+            product = {
+                "offer_id": offer_id,
+                "group_id": group_id,
+                "raw_skus": raw_skus,
+                "raw_sku": raw_skus[0] if raw_skus else (vendor_code or offer_id or ""),
+                "sku": sku_normalized,
+                "vendor_code": vendor_code,
+                "name": name,
+                "description": description,
+                "pictures": pictures,
+                "sizes": list(dict.fromkeys(sizes)) if sizes else [],
+                "drop_price": drop_price,
+                "stock_qty": stock_qty,
+                "available": available,
+            }
+
+            # додаємо в масив усіх
+            PRODUCTS_INDEX["all_products"].append(product)
+
+            # індекс по offer id
+            if offer_id:
+                PRODUCTS_INDEX["by_offer"][offer_id.lower()] = product
+                PRODUCTS_INDEX["by_offer"][normalize_sku(offer_id) or offer_id.lower()] = product
+
+            # індексуємо під безліччю ключів для надійного пошуку по SKU/vendorCode
+            candidates = set()
+
+            # normalized main sku
+            if sku_normalized:
+                candidates.add(sku_normalized)
+            # main_key raw/lower/no-zero
+            if main_key:
+                mk = main_key.strip().lower()
+                candidates.add(mk)
+                candidates.add(mk.lstrip("0"))
+
+            # offer_id variants
+            if offer_id:
+                offer_low = offer_id.strip().lower()
+                candidates.add(offer_low)
+                candidates.add(normalize_sku(offer_id) or offer_low)
+                candidates.add(offer_low.lstrip("0"))
+
+            # vendor_code variants
+            if vendor_code:
+                vc_low = vendor_code.strip().lower()
+                candidates.add(vc_low)
+                candidates.add(normalize_sku(vendor_code) or vc_low)
+                candidates.add(vc_low.lstrip("0"))
+
+            # raw_skus variants
+            for r in raw_skus:
+                if not r:
+                    continue
+                rv = r.strip()
+                candidates.add(rv.lower())
+                candidates.add((normalize_sku(rv) or rv.lower()))
+                candidates.add(rv.lstrip("0"))
+
+            # заповнюємо by_sku
+            for key in candidates:
+                if key:
+                    PRODUCTS_INDEX["by_sku"][key] = product
+
+            # index by name tokens (quick search)
+            for tok in re.findall(r'\w{3,}', (name or "").lower()):
+                PRODUCTS_INDEX["by_name"].setdefault(tok, []).append(product)
+
+            elem.clear()
+
+        total = len(PRODUCTS_INDEX["all_products"])
+        sample = [(p.get("raw_sku"), p.get("sku")) for p in PRODUCTS_INDEX["all_products"][:5]]
+        logger.debug("Product index built: %s products total. First 5 SKUs (raw,norm): %s", total, sample)
+
+    except Exception:
+        logger.exception("Failed to build products index")
+
+# ---------------- Robust SKU search ----------------
+def find_product_by_sku(sku: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    """
+    Пошук товару по SKU / артикулу / частині назви.
+    Повертає (product_dict_or_None, method_string).
+    method_string: 'by_sku', 'candidate:<key>', 'vendor_code', 'raw_sku', 'offer_id', 'name_contains', 'not_found'
+    """
+    if not sku:
+        return None, "empty"
+
+    raw = str(sku).strip()
+    norm = normalize_sku(raw) or raw.lower()
+
+    logger.debug("Searching product: input=%r, normalized=%r", raw, norm)
+
+    # 1) прямий збіг у by_sku
+    p = PRODUCTS_INDEX["by_sku"].get(norm)
+    if p:
+        return p, "by_sku"
+
+    # 2) пробуємо кілька кандидатів (lower, без ведучих нулів)
+    for cand in (raw.lower(), raw.lstrip("0")):
+        if not cand:
+            continue
+        p = PRODUCTS_INDEX["by_sku"].get(cand)
+        if p:
+            return p, f"candidate:{cand}"
+
+    # 3) лінійний пошук по всіх продуктах (vendorCode / raw_skus / offer_id / name contains)
+    qlow = raw.lower()
+    for p in PRODUCTS_INDEX["all_products"]:
+        # vendorCode (артикул у XML – vendorCode)
+        if qlow == (p.get("vendor_code") or p.get("vendorCode") or "").lower():
+            return p, "vendor_code"
+        # raw_skus (варіанти, group offers)
+        for rs in p.get("raw_skus", []) or []:
+            if qlow == (rs or "").lower() or qlow == (rs or "").lstrip("0").lower():
+                return p, "raw_sku"
+        # offer_id
+        if qlow == (p.get("offer_id") or "").lower():
+            return p, "offer_id"
+        # partial name / description match
+        if qlow in (p.get("name") or "").lower() or qlow in (p.get("description") or "").lower():
+            return p, "name_contains"
+
+    return None, "not_found"
+
+# ---------------- global async loop holder ----------------
+# буде заповнений в main()
+ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
+
 # ініціалізація Google Drive service
 def init_gdrive():
     if not USE_GDRIVE:
@@ -221,307 +548,6 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
             logger.exception("Telethon handler exception for supplier message")
 
     logger.info("Telethon client listening configured for supplier channel.")
-
-# ---------------- Config & Env ----------------
-load_dotenv()
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("taverna")
-logger.setLevel(logging.DEBUG)
-
-def check_env_vars():
-    print("=== Checking ENV variables ===")
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    if not BOT_TOKEN:
-        print("❌ ERROR: BOT_TOKEN is missing")
-        sys.exit(1)
-
-    env_vars = [
-        "BOT_TOKEN", "BOT_USERNAME", "ADMIN_ID",
-        "TEST_CHANNEL", "MAIN_CHANNEL", "TG_API_ID", "TG_API_HASH",
-        "SESSION_NAME", "SUPPLIER_CHANNEL", "SUPPLIER_NAME",
-        "NP_API_KEY", "NP_API_URL", "MYDROP_API_KEY", "MYDROP_EXPORT_URL", "MYDROP_ORDERS_URL", "ORDERS_DIR", "USE_GCS", "GCS_BUCKET",
-        "SERVICE_ACCOUNT_JSON", "USE_GDRIVE", "GDRIVE_FOLDER_ID", "TEST_MODE", "WEBHOOK_URL"
-    ]
-    for var in env_vars:
-        value = os.getenv(var)
-        if value:
-            # mask potentially sensitive values (show only first 4 chars + ...)
-            if var.upper().endswith(("KEY", "TOKEN", "SECRET", "PASSWORD")) or var in ("BOT_TOKEN", "SERVICE_ACCOUNT_JSON", "MYDROP_API_KEY", "NP_API_KEY"):
-                masked = (str(value)[:4] + "...(masked)")
-            else:
-                masked = str(value) if len(str(value)) < 60 else str(value)[:57] + "..."
-            print(f"✅ {var} = {masked}")
-        else:
-            print(f"⚠️ {var} is not set")
-    print("=== End ENV check ===")
-    return BOT_TOKEN
-
-BOT_TOKEN = check_env_vars()
-BOT_USERNAME = os.getenv("BOT_USERNAME")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-TEST_CHANNEL = int(os.getenv("TEST_CHANNEL"))
-MAIN_CHANNEL = os.getenv("MAIN_CHANNEL")
-TEST_CHANNEL_URL = os.getenv("TEST_CHANNEL_URL")
-
-api_id = int(os.getenv("TG_API_ID", "0") or 0)
-api_hash = os.getenv("TG_API_HASH")
-SESSION_NAME = os.getenv("SESSION_NAME")
-SUPPLIER_CHANNEL = os.getenv("SUPPLIER_CHANNEL")
-SUPPLIER_NAME = os.getenv("SUPPLIER_NAME")
-
-NP_API_KEY = os.getenv("NP_API_KEY")
-NP_API_URL = os.getenv("NP_API_URL")
-
-MYDROP_API_KEY = os.getenv("MYDROP_API_KEY")
-MYDROP_EXPORT_URL = os.getenv("MYDROP_EXPORT_URL")
-MYDROP_ORDERS_URL = os.getenv("MYDROP_ORDERS_URL")
-
-ORDERS_DIR = os.getenv("ORDERS_DIR")
-Path(ORDERS_DIR).mkdir(parents=True, exist_ok=True)
-
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
-
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-
-REVIEW_CHAT = int(os.getenv("REVIEW_CHAT", str(ADMIN_ID)))
-BUCKET_NAME = os.getenv("GCS_BUCKET", "taverna-bot-storage")
-
-TELETHON_API_ID = int(os.getenv("TG_API_ID", "0") or 0)
-TELETHON_API_HASH = os.getenv("TG_API_HASH", "")
-TELETHON_SESSION_NAME = os.getenv("SESSION_NAME")
-GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "")
-USE_GDRIVE = os.getenv("USE_GDRIVE", "false").lower() in ("1", "true", "yes")
-SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON", "")
-
-# ---------------- Cache for MyDrop products ----------------
-PRODUCTS_CACHE = {
-    "last_update": None,
-    "data": None
-}
-CACHE_TTL = 900  # 15 хвилин (900 секунд)
-
-PRODUCTS_EXPORT_CACHE: Optional[str] = None
-
-# ---------------- Index for fast lookup ----------------
-PRODUCTS_INDEX = {
-    "by_sku": {},
-    "by_offer": {},
-    "by_name": {},
-    "all_products": []
-}
-INDEX_TTL = 1800  # 30 хвилин — перевобудовувати періодично
-
-def normalize_sku(s: Optional[str]) -> Optional[str]:
-    if not s:
-        return None
-    s = str(s).strip().lower()
-    # remove spaces and leading zeros for numeric-like skus
-    s = re.sub(r'\s+', '', s)
-    if s.isdigit():
-        return str(int(s))  # "0099" -> "99"
-    # keep alnum + - _
-    return re.sub(r'[^a-z0-9\-_]', '', s)
-
-def build_products_index_from_xml(text: str):
-    """
-    Парсимо XML і будуємо індекс товарів:
-      - by_sku: кілька ключів (normalized, raw_lower, raw_no_leading_zeros) -> product dict
-      - by_offer: mapping по offer id (raw.lower() та normalized)
-      - by_name: токени назви -> [product dicts]
-      - all_products: список усіх product dict
-    Product dict стандартизований: keys = offer_id, raw_skus, sku (normalized), vendor_code,
-      name, description, pictures, sizes, drop_price, stock_qty, available
-    """
-    global PRODUCTS_INDEX
-    PRODUCTS_INDEX = {"all_products": [], "by_sku": {}, "by_name": {}, "by_offer": {}}
-    try:
-        it = ET.iterparse(io.StringIO(text), events=("end",))
-        for event, elem in it:
-            tag = _local_tag(elem.tag).lower()
-            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
-                elem.clear()
-                continue
-
-            offer_id = (elem.attrib.get("id") or "").strip()
-            group_id = (elem.attrib.get("group_id") or elem.attrib.get("group") or "").strip()
-
-            # Основні поля з різних можливих тегів
-            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"]) or ""
-            name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
-            description = _find_first_text(elem, ["description", "desc"]) or ""
-            price_txt = _find_first_text(elem, ["price", "cost"]) or ""
-            try:
-                drop_price = float(price_txt)
-            except Exception:
-                drop_price = None
-
-            # pictures (збираємо всі <picture> або <image>)
-            pictures = []
-            for c in list(elem):
-                ln = _local_tag(c.tag)
-                if ln in ("picture", "image", "img"):
-                    txt = (c.text or "").strip()
-                    if txt:
-                        pictures.append(txt)
-
-            # Параметри — наприклад, розміри або інші param name=""
-            sizes = []
-            raw_skus = []
-            stock_qty = 0
-            available = True
-            for c in list(elem):
-                ln = _local_tag(c.tag)
-                if ln == "param" or ln == "attribute":
-                    pname = (c.attrib.get("name") or c.attrib.get("k") or "").strip().lower()
-                    ptxt = (c.text or "").strip()
-                    if pname and ("размер" in pname or "size" in pname or "розмір" in pname):
-                        if ptxt:
-                            sizes.append(ptxt)
-                if ln in ("quantity", "stock", "quantity_in_stock"):
-                    try:
-                        stock_qty = int((c.text or "0").strip())
-                    except Exception:
-                        pass
-                if ln in ("available",):
-                    av = (c.text or "").strip().lower()
-                    if av in ("false", "0", "no"):
-                        available = False
-
-            # fallback: vendor_code може бути в <vendorCode> або в param, або в описі
-            if not vendor_code:
-                # спробуємо знайти атрибут vendorCode або param
-                vc = _find_first_text(elem, ["vendorCode", "vendor_code", "vendorcode"])
-                if vc:
-                    vendor_code = vc
-                else:
-                    # regex fallback у тексті опису
-                    if description:
-                        m = re.search(r'(?:артикул|артікул|sku|код|article)[\s\:\-]*([0-9A-Za-z\-]{2,20})', description, flags=re.I)
-                        if m:
-                            vendor_code = m.group(1).strip()
-
-            # raw_skus: збираємо варіанти
-            if offer_id:
-                raw_skus.append(offer_id)
-            if vendor_code:
-                raw_skus.append(vendor_code)
-
-            # unique
-            raw_skus = [r for r in dict.fromkeys([r for r in raw_skus if r])]
-
-            # нормалізований основний ключ (sku)
-            main_key = vendor_code or offer_id or (raw_skus[0] if raw_skus else "")
-            sku_normalized = normalize_sku(main_key or "") or (main_key or "").lower()
-
-            product = {
-                "offer_id": offer_id,
-                "group_id": group_id,
-                "raw_skus": raw_skus,
-                "raw_sku": raw_skus[0] if raw_skus else (vendor_code or offer_id or ""),
-                "sku": sku_normalized,
-                "vendor_code": vendor_code,
-                "name": name,
-                "description": description,
-                "pictures": pictures,
-                "sizes": list(dict.fromkeys(sizes)) if sizes else [],
-                "drop_price": drop_price,
-                "stock_qty": stock_qty,
-                "available": available,
-            }
-
-            # додаємо в масив усіх
-            PRODUCTS_INDEX["all_products"].append(product)
-
-            # індекс по offer id (raw та нормалізований)
-            if offer_id:
-                PRODUCTS_INDEX["by_offer"][offer_id.lower()] = product
-                noff = normalize_sku(offer_id) or offer_id.lower()
-                PRODUCTS_INDEX["by_offer"][noff] = product
-
-            # індексуємо під кількома ключами для надійного пошуку по SKU
-            candidates = set()
-            if sku_normalized:
-                candidates.add(sku_normalized)
-            if offer_id:
-                candidates.add(normalize_sku(offer_id) or offer_id.lower())
-                candidates.add(offer_id.lower())
-            if vendor_code:
-                candidates.add(normalize_sku(vendor_code) or vendor_code.lower())
-                candidates.add(vendor_code.lower())
-            for r in raw_skus:
-                candidates.add((normalize_sku(r) or r.strip().lower()))
-                candidates.add(r.strip().lower())
-                candidates.add(r.strip().lstrip("0"))
-
-            for key in candidates:
-                if key:
-                    PRODUCTS_INDEX["by_sku"][key] = product
-
-            # index by name tokens
-            for tok in re.findall(r'\w{3,}', (name or "").lower()):
-                PRODUCTS_INDEX["by_name"].setdefault(tok, []).append(product)
-
-            elem.clear()
-
-        total = len(PRODUCTS_INDEX["all_products"])
-        sample = [(p.get("raw_sku"), p.get("sku")) for p in PRODUCTS_INDEX["all_products"][:5]]
-        logger.debug("Product index built: %s products total. First 5 SKUs (raw,norm): %s", total, sample)
-
-    except Exception:
-        logger.exception("Failed to build products index")
-
-# ---------------- Robust SKU search ----------------
-def find_product_by_sku(sku: str) -> Tuple[Optional[Dict[str, Any]], str]:
-    """
-    Пошук товару по SKU / артикулу / частині назви.
-    Повертає (product_dict_or_None, method_string).
-    method_string: 'by_sku', 'candidate:<key>', 'vendor_code', 'raw_sku', 'offer_id', 'name_contains', 'not_found'
-    """
-    if not sku:
-        return None, "empty"
-
-    raw = str(sku).strip()
-    norm = normalize_sku(raw) or raw.lower()
-    by_sku = find_product_by_sku("by_sku", {})
-
-    logger.debug("Searching product: input=%r, normalized=%r", raw, norm)
-
-    # 1) прямий збіг у by_sku
-    p = by_sku.get(norm)
-    if p:
-        return p, "by_sku"
-
-    # 2) пробуємо кілька кандидатів (lower, без ведучих нулів)
-    for cand in (raw.lower(), raw.lstrip("0")):
-        if not cand:
-            continue
-        p = by_sku.get(cand)
-        if p:
-            return p, f"candidate:{cand}"
-
-    # 3) лінійний пошук по всіх продуктах (vendorCode / raw_skus / offer_id / name contains)
-    qlow = raw.lower()
-    for p in find_product_by_sku("all_products", []):
-        # vendorCode (артикул у XML – vendorCode)
-        if qlow == (p.get("vendor_code") or p.get("vendorCode") or "").lower():
-            return p, "vendor_code"
-        # raw_skus (варіанти, group offers)
-        for rs in p.get("raw_skus", []) or []:
-            if qlow == (rs or "").lower() or qlow == (rs or "").lstrip("0").lower():
-                return p, "raw_sku"
-        # offer_id
-        if qlow == (p.get("offer_id") or "").lower():
-            return p, "offer_id"
-        # partial name / description match
-        if qlow in (p.get("name") or "").lower() or qlow in (p.get("description") or "").lower():
-            return p, "name_contains"
-
-    return None, "not_found"
-
-# ---------------- global async loop holder ----------------
-# буде заповнений в main()
-ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
 # ---------------- Aiogram bot ----------------
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
