@@ -289,15 +289,6 @@ def init_gcs():
     """Ініціалізує клієнт Google Cloud Storage, якщо потрібно."""
     if USE_GCS:
         try:
-            storage.Client()
-            logger.info("✅ GCS client initialized successfully.")
-        except Exception:
-            logger.exception("❌ GCS init failed")
-
-def init_gcs():
-    """Ініціалізує клієнт Google Cloud Storage, якщо потрібно."""
-    if USE_GCS:
-        try:
             # Створюємо клієнт. Якщо SERVICE_ACCOUNT_JSON є, він буде використаний.
             storage.Client()
             logger.info("✅ GCS client initialized successfully.")
@@ -458,9 +449,6 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher(storage=MemoryStorage())
 
 router = Router()  # ✅ додаємо це
-
-dp.include_router(router)
-
 
 from aiogram.types import BotCommand
 
@@ -1022,7 +1010,6 @@ async def get_quantity_handler(msg: Message, state: FSMContext):
         reply_markup=cart_menu_keyboard()
     )
 
-# Крок 3: Початок оформлення замовлення (ПІБ)
 @router.callback_query(F.data == "order:start_checkout")
 async def start_checkout_handler(cb: CallbackQuery, state: FSMContext):
     cart = await load_cart(cb.from_user.id)
@@ -1030,8 +1017,41 @@ async def start_checkout_handler(cb: CallbackQuery, state: FSMContext):
         await cb.answer("Ваш кошик порожній!", show_alert=True)
         return
     await state.set_state(OrderForm.full_name)
-    await cb.message.edit_text("Для оформлення замовлення, будь ласка, введіть ваше <b>Прізвище, Ім'я та По-батькові</b>:", parse_mode="HTML")
+    await cb.message.edit_text(
+        "Для оформлення замовлення, будь ласка, введіть ваше <b>Прізвище, Ім'я та По-батькові</b>:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel_checkout")]])
+    )
     await cb.answer()
+
+# Крок 4: Обробка ПІБ (з вашою валідацією!)
+@router.message(OrderForm.full_name)
+async def process_full_name(message: Message, state: FSMContext):
+    # Тут використовується ваша потужна логіка валідації!
+    is_valid, error_message = validate_pib(message.text)
+    if not is_valid:
+        await message.answer(error_message)
+        return
+    
+    # Робимо перші літери великими
+    full_name = " ".join([p.strip().capitalize() for p in message.text.strip().split()])
+    
+    await state.update_data(full_name=full_name)
+    await state.set_state(OrderForm.phone_number)
+    await message.answer("Дякую. Тепер введіть ваш номер телефону:")
+
+# Крок 5: Обробка телефону (з вашою валідацією!)
+@router.message(OrderForm.phone_number)
+async def process_phone_number(message: Message, state: FSMContext):
+    # Використовуємо вашу функцію валідації
+    is_valid, result = validate_phone(message.text)
+    if not is_valid:
+        await message.answer(result) # result тут - це повідомлення про помилку
+        return
+
+    await state.update_data(phone_number=result) # result тут - це нормалізований номер
+    await state.set_state(OrderForm.delivery_address)
+    await message.answer("Чудово. Введіть адресу доставки (місто та номер відділення Нової Пошти):")
 
 @router.message(OrderForm.phone_number, F.text)
 async def process_phone_number_handler(message: Message, state: FSMContext):
@@ -1139,21 +1159,6 @@ async def cmd_refresh_cache(msg: Message):
     else:
         await msg.answer("⚠️ Помилка при оновленні кешу. Перевір логи.")
 
-@router.message(OrderForm.full_name, F.text)
-async def process_full_name_handler(message: Message, state: FSMContext):
-    # Тут використовується ваша потужна логіка валідації!
-    is_valid, error_message = validate_pib(message.text)
-    if not is_valid:
-        await message.answer(error_message)
-        return
-
-    # Робимо перші літери великими
-    full_name = " ".join([p.strip().capitalize() for p in message.text.strip().split()])
-
-    await state.update_data(full_name=full_name)
-    await state.set_state(OrderForm.phone_number)
-    await message.answer("Дякую. Тепер введіть ваш номер телефону:")
-
 # --- Телефон (validated) ---
 # Мобільні та стаціонарні коди — можна доповнювати в разі потреби
 VALID_MOBILE_CODES = {
@@ -1225,38 +1230,6 @@ def suggest_reorder_pib(parts: List[str]) -> Optional[str]:
         return " ".join(suggested)
     return None
 
-# --- Артикул або назва ---
-import io
-import re
-from html import unescape
-import xml.etree.ElementTree as ET
-from typing import Optional, Dict, Any
-
-def apply_markup(price: Optional[float]) -> Optional[int]:
-    """Додає +33% до ціни і округлює до гривні (int)."""
-    try:
-        if price is None:
-            return None
-        return int(round(float(price) * 1.33))
-    except Exception:
-        return None
-
-# ---------------- Size keyboard ----------------
-def build_size_keyboard(products: List[dict]) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(row_width=3)
-    buttons = []
-    for p in products:
-        size = p.get("param_name_Размер") or p.get("sizes", [])[0] if p.get("sizes") else "—"
-        offer_id = p.get("offer_id")
-        buttons.append(InlineKeyboardButton(
-            text=f"Розмір - {size}",
-            callback_data=f"choose_size:{offer_id}:{size}"
-        ))
-    if buttons:
-        kb.add(*buttons)
-    kb.add(InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="order:cancel"))
-    return kb
-
 # --- Розрахунок ціни для клієнта (ВИПРАВЛЕНО) ---
 
 def aggressive_round_up(n):
@@ -1280,233 +1253,6 @@ def calculate_final_price(drop_price: float) -> int:
     with_markup = drop_price * 1.33
     rounded_price = aggressive_round_up(with_markup)
     return rounded_price
-
-# --- FSM: отримання артикулу або назви (updated: support component size selection) ---
-@router.message(Command("debug_find"))
-async def cmd_debug_find(msg: Message):
-    if msg.from_user.id != ADMIN_ID:
-        await msg.answer("⚠️ Тільки адміністратору.")
-        return
-    parts = (msg.text or "").split(maxsplit=1)
-    if len(parts) < 2:
-        await msg.answer("Використання: /debug_find <query>")
-        return
-    q = parts[1].strip()
-    text = await load_products_export(force=True)
-    if not text:
-        await msg.answer("⚠️ Фід пустий.")
-        return
-
-    found = []
-    try:
-        # використовуємо і ту ж logiку: iterparse і збір мінімального summary
-        it = ET.iterparse(io.StringIO(text), events=("end",))
-        qlow = q.lower()
-        for event, elem in it:
-            tag = _local_tag(elem.tag).lower()
-            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
-                continue
-
-            offer_id = (elem.attrib.get("id") or "").strip()
-            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "sku", "articul", "article", "code"]) or ""
-            name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
-            desc = _find_first_text(elem, ["description", "desc"]) or ""
-            searchable = " ".join([offer_id.lower(), vendor_code.lower(), name.lower(), desc.lower()])
-            if qlow in searchable:
-                child_map = []
-                for c in list(elem):
-                    ln = _local_tag(c.tag)
-                    txt = (c.text or "").strip()
-                    child_map.append(f"{ln}={txt[:120]}")
-                summary = f"id={offer_id} | sku={vendor_code or '-'} | name={name or '-'}"
-                found.append(summary + "\n" + "; ".join(child_map))
-                if len(found) >= 10:
-                    elem.clear()
-                    break
-            elem.clear()
-    except Exception:
-        logger.exception("debug_find failed")
-    if not found:
-        await msg.answer("No matches")
-    else:
-        await msg.answer("Matches:\n\n" + "\n\n".join(found))
-
-async def resolve_callback_chat_id(cb: CallbackQuery, state: Optional[FSMContext] = None) -> Optional[int]:
-    """
-    Безпечний спосіб дістати chat_id у callback'ах.
-    Перевага: намагаємось взяти з state.data['chat_id'], якщо нема — беремо cb.from_user.id, якщо і цього нема — cb.message.chat.id.
-    Повертає None якщо нічого не вдалось дістати.
-    """
-    data = {}
-    try:
-        if state is not None:
-            data = await state.get_data() or {}
-    except Exception:
-        # state може бути None або недоступний у цьому контексті
-        data = {}
-
-    chat_id = data.get("chat_id")
-    if not chat_id:
-        # пріоритет — відправник callback (звичайний випадок)
-        try:
-            chat_id = cb.from_user.id
-        except Exception:
-            chat_id = None
-
-    # fallback — якщо callback прив'язаний до повідомлення в чаті
-    if not chat_id:
-        try:
-            chat_id = cb.message.chat.id
-        except Exception:
-            chat_id = None
-
-    return chat_id
-
-async def add_product_to_cart(state: FSMContext, product: dict, size_text: str, qty: int, chat_id: Optional[int] = None):
-    """Додає товар у кошик, зберігає у state і оновлює (або створює) footer-повідомлення з підсумком.
-
-    - state: FSMContext поточного користувача
-    - product: dict (має містити принаймні 'sku','name','final_price')
-    - size_text: текст розмірів/опцій для цієї позиції
-    - qty: кількість (int)
-    - chat_id: необов'язково — chat id для редагування/створення footer; якщо не передано, спробуємо взяти з state
-    """
-    data = await state.get_data()
-    # знайдемо chat_id: найперше від переданого параметру, інакше з state
-    chat_id = chat_id or data.get("chat_id") or data.get("user_chat_id") or data.get("pib_chat")
-
-    cart = data.get("cart_items") or []
-    try:
-        unit_price = int(round(float(product.get("final_price") or 0)))
-    except Exception:
-        unit_price = 0
-
-    item = {
-        "sku": product.get("sku") or "",
-        "name": product.get("name") or product.get("title") or "Товар",
-        "size_text": size_text or "—",
-        "qty": int(qty or 1),
-        "unit_price": unit_price
-    }
-    cart.append(item)
-    await state.update_data(cart_items=cart)
-
-    # підсумок
-    total = sum(int(it.get("unit_price", 0)) * int(it.get("qty", 1)) for it in cart)
-
-    # Оновлюємо футер: пріоритет - ensure_or_update_cart_footer(chat_id) (якщо визначена),
-    # інакше робимо fallback з USER_CART_MSG / cart_footer_kb.
-    try:
-        if chat_id is None:
-            logger.warning("add_product_to_cart: chat_id not found in state or args — footer не буде відредаговано")
-            return
-
-        # якщо в коді є функція ensure_or_update_cart_footer — використовуємо її
-        if "ensure_or_update_cart_footer" in globals():
-            await ensure_or_update_cart_footer(chat_id)
-            return
-
-        # fallback: вручну створюємо/редагуємо footer
-        kb = cart_footer_kb(total) if "cart_footer_kb" in globals() else InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"🧾 ТУТ ВАША КОРЗИНА — Загальна: {total} грн", callback_data="cart:view")],
-        ])
-
-        meta = USER_CART_MSG.get(chat_id)
-        if meta:
-            try:
-                await bot.edit_message_text(
-                    f"🧾 Ваша корзина — Загальна сума: {total} грн",
-                    chat_id=meta["chat_id"],
-                    message_id=meta["message_id"],
-                    reply_markup=kb
-                )
-                return
-            except Exception:
-                USER_CART_MSG.pop(chat_id, None)
-
-        sent = await bot.send_message(chat_id, f"🧾 Ваша корзина — Загальна сума: {total} грн", reply_markup=kb)
-        USER_CART_MSG[chat_id] = {"chat_id": sent.chat.id, "message_id": sent.message_id}
-    except Exception:
-        logger.exception("add_product_to_cart: failed to update/send footer")
-
-# ---------- Unified async function to add product to cart ----------
-async def add_product_to_cart(state: FSMContext, product: Dict[str, Any], size_text: str, qty: int, chat_id: Optional[int] = None) -> Dict[str, Any]:
-    """
-    Додає товар у корзину користувача.
-    - state: FSMContext (щоб працювати з даними сесії)
-    - product: dict із ключами name, sku, final_price (або price)
-    - size_text: рядок/опис розмірів (наприклад: "Штани: 48, Футболка: M")
-    - qty: кількість (int)
-    - chat_id: необов'язково — якщо не переданий, спробуємо знайти у state.data
-    Повертає оновлений cart dict (structure {'items': [...]})
-    """
-    data = await state.get_data()
-    # визначаємо chat_id
-    c_id = chat_id or data.get("chat_id") or data.get("user_chat_id") or (data.get("from_user_id") if data.get("from_user_id") else None)
-    if not c_id:
-        # на випадок, коли немає chat_id — від user object з state або помилка
-        # спробуємо з message context з state (зазвичай хендлери викликають цю функцію всередині message/callback, тому має бути доступ)
-        # якщо немає — кидаємо ValueError
-        raise ValueError("chat_id not found: передайте chat_id у виклик add_product_to_cart або збережіть його у state")
-
-    # сформуємо item
-    unit_price = product.get("final_price") or product.get("price") or 0
-    try:
-        unit_price = int(unit_price)
-    except Exception:
-        try:
-            unit_price = int(float(unit_price))
-        except Exception:
-            unit_price = 0
-
-    item = {
-        "sku": product.get("sku") or "",
-        "name": product.get("name") or "",
-        "sizes": size_text or "—",
-        "qty": int(qty),
-        "unit_price": unit_price,
-        "drop_price": product.get("drop_price"),
-        "added_at": datetime.now().isoformat()
-    }
-
-    # завантажимо існуючу корзину, додамо позицію, збережемо
-    cart_obj = load_cart(c_id)
-    items = cart_obj.get("items") or []
-    items.append(item)
-    cart_obj["items"] = items
-    save_cart(c_id, cart_obj)
-
-    # оновлюємо в state (щоб інші частини коду бачили поточну корзину)
-    await state.update_data(cart_items=items)
-
-    # оновлюємо/створюємо футер-кнопку корзини в чаті
-    try:
-        await ensure_or_update_cart_footer(c_id)
-    except Exception:
-        logger.exception("Failed to update_or_send_cart_footer after add_product_to_cart for %s", c_id)
-
-    return cart_obj
-
-# --- Кількість товару ---
-@router.message(OrderForm.quantity)
-async def state_amount(msg: Message, state: FSMContext):
-    try:
-        qty = int(msg.text.strip())
-        if qty < 1:
-            raise ValueError
-    except ValueError:
-        await msg.answer("❌ Введіть правильне число (мінімум 1).")
-        return
-
-    data = await state.get_data()
-    max_stock = data.get("stock_qty")
-
-    if max_stock is not None and qty > max_stock:
-        await msg.answer(
-            f"⚠️ Доступна кількість цього товару: <b>{max_stock} шт.</b>\n"
-            f"Будь ласка, введіть іншу кількість:"
-        )
-        return
 
     # Збираємо item для корзини
     item = {
@@ -1544,39 +1290,6 @@ async def state_amount(msg: Message, state: FSMContext):
     # переходимо до вибору доставки (юзер може натиснути кнопку "Оберіть спосіб доставки")
     await state.set_state(OrderForm.delivery)
 
-# ---------------- Cart: clear ----------------
-@router.callback_query(F.data == "cart:clear")
-async def cart_clear(cb: CallbackQuery, state: FSMContext):
-    # Беремо chat id з cb (надійно), не використовуємо walrus
-    chat_id = None
-    try:
-        data = await state.get_data()
-    except Exception:
-        data = {}
-
-    chat_id = data.get("chat_id") or (cb.from_user.id if hasattr(cb, "from_user") else None)
-    if chat_id is None:
-        # fallback: якщо не вдалось визначити - використаємо cb.message.chat.id
-        try:
-            chat_id = cb.message.chat.id
-        except Exception:
-            chat_id = None
-
-    if chat_id is not None:
-        clear_cart(chat_id)
-
-        # видаляємо footer повідомлення, якщо воно збережено
-        meta = USER_CART_MSG.pop(chat_id, None)
-        if meta:
-            try:
-                await bot.delete_message(meta.get("chat_id", chat_id), meta.get("message_id"))
-            except Exception:
-                # не критично — ігноруємо
-                pass
-
-    await cb.message.answer("❌ Замовлення повністю скасовано. Можете почати оформлення заново.")
-    await cb.answer()
-
 def add_to_cart(chat_id: int, item: Dict[str, Any]) -> None:
     """Додає item до USER_CARTS[chat_id]. item must have keys: name, sku, price, qty, sizes"""
     USER_CARTS.setdefault(chat_id, []).append(item)
@@ -1603,43 +1316,6 @@ def format_cart_contents(cart_items: List[Dict[str, Any]]) -> str:
     lines.append("\nДля повного скасування натисніть: ❌ Повністю скасувати замовлення")
     return "\n".join(lines)
     
-@router.message(OrderForm.confirm)
-async def state_confirm(msg: Message, state: FSMContext):
-    data = await state.get_data()
-
-    # збираємо всі дані з state (спрощено для прикладу)
-    pib = data.get("pib", "—")
-    phone = data.get("phone", "—")
-    product = data.get("last_product", {})
-    size = data.get("size", "—")
-    amount = data.get("amount", 1)
-    address = data.get("address", "—")
-
-    sku = product.get("sku") or product.get("raw_sku") or "—"
-    name = product.get("name") or "—"
-    final_price = aggressive_round((product.get("drop_price") or 0) * 1.33) * int(amount)
-
-    summary = (
-        "🧾 Підсумок замовлення:\n\n"
-        f"👤 ПІБ: {pib}\n"
-        f"📱 Телефон: {phone}\n"
-        f"📌 Артикул: {sku}\n"
-        f"📛 Назва: {name}\n"
-        f"📏 Розмір: {size}\n"
-        f"🔢 Кількість: {amount}\n"
-        f"🏠 Адреса: {address}\n\n"
-        f"💰 Сума до сплати: {final_price} грн"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("✅ Підтвердити замовлення", callback_data="confirm:ok")],
-    ] + build_nav_kb().inline_keyboard)
-
-    if product.get("pictures"):
-        await msg.answer_photo(product["pictures"][0], caption=summary, reply_markup=kb)
-    else:
-        await msg.answer(summary, reply_markup=kb)
-
 # ---------------- MyDrop integration ----------------
 async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int] = None):
     """
