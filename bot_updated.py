@@ -1763,7 +1763,7 @@ async def state_phone(msg: Message, state: FSMContext):
         normalized_phone = f"+380{digits}"
         await state.update_data(phone=normalized_phone)
         await msg.answer("Введіть артикул або назву товару:")
-        await  if operator_code in VALID_MOBILE_CODES
+        if operator_code in VALID_MOBILE_CODES
         return
 
     await msg.answer(f"❌ Невідомий код оператора/міста ({digits[:4]}...). Введіть дійсний український номер.")
