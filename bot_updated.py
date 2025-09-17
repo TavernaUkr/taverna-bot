@@ -272,8 +272,6 @@ async def init_gdrive():
     except Exception:
         logger.exception("❌ GDrive init failed")
 
-GDRIVE_SERVICE = init_gdrive()
-
 def gdrive_upload_file(local_path: str, mime_type: str, filename: str, parent_folder_id: str):
     if not GDRIVE_SERVICE:
         return None
@@ -285,6 +283,16 @@ def gdrive_upload_file(local_path: str, mime_type: str, filename: str, parent_fo
     except Exception:
         logger.exception("❌ GDrive upload failed")
         return None
+
+def init_gcs():
+    """Ініціалізує клієнт Google Cloud Storage, якщо потрібно."""
+    if USE_GCS:
+        try:
+            # Створюємо клієнт. Якщо SERVICE_ACCOUNT_JSON є, він буде використаний.
+            storage.Client()
+            logger.info("✅ GCS client initialized successfully.")
+        except Exception:
+            logger.exception("❌ GCS init failed")
 
 # ---------------- Telethon: supplier -> repost to MAIN_CHANNEL with deep-link ----------------
 # матчери для артикулу в тексті поста
@@ -1282,192 +1290,6 @@ def apply_markup(price: Optional[float]) -> Optional[int]:
         return int(round(float(price) * 1.33))
     except Exception:
         return None
-
-# ---------------- improved check_article_or_name ----------------
-def _local_tag(tag: str) -> str:
-    """Повертає локальне ім'я тега без namespace."""
-    if not tag:
-        return ""
-    if "}" in tag:
-        return tag.split("}", 1)[1]
-    return tag
-
-def _find_first_numeric_text(elem, candidates):
-    """Шукає перший під-елемент з тегом в candidates, який може бути числом (float)."""
-    for child in elem.iter():
-        name = _local_tag(child.tag).lower()
-        if any(c in name for c in candidates):
-            txt = (child.text or "").strip()
-            try:
-                if txt:
-                    return float(txt)
-            except Exception:
-                # спробуємо витягти цифри в тексті, наприклад "1 234.56" або "1234,56"
-                t = txt.replace(" ", "").replace(",", ".")
-                try:
-                    return float(t)
-                except Exception:
-                    continue
-    return None
-
-def _find_first_text(elem, tags: list[str]) -> Optional[str]:
-    """
-    Робочий case-insensitive пошук тексту у будь-якому під-елементі.
-    Повертає перший текст, де локальний тег містить один із candidates.
-    (більш стійкий до namespace / змішаного регістру)
-    """
-    if not tags:
-        return None
-    tags_l = [t.lower() for t in tags]
-    for child in elem.iter():
-        name = _local_tag(child.tag).lower()
-        txt = (child.text or "").strip()
-        if not txt:
-            continue
-        # точний збіг або вхождення (щоб спіймати vendorCode, vendor_code, Vendor, sku і т.д.)
-        for t in tags_l:
-            if t == name or t in name or name in t:
-                return txt
-    return None
-
-def _find_first_numeric(elem, tags: List[str]) -> Optional[float]:
-    """
-    Шукає перший тег з числом серед можливих назв.
-    Повертає float або None.
-    """
-    for t in tags:
-        # шукаємо як піделемент (case-insensitive локальний тег)
-        for child in elem.findall(f".//{t}"):
-            if child is None or not child.text:
-                continue
-            txt = child.text.strip().replace(",", ".").replace(" ", "")
-            try:
-                return float(txt)
-            except Exception:
-                # якщо не вдалось, пробуємо витягнути число regex-ом
-                m = re.search(r"[\d]+(?:[.,]\d+)?", child.text)
-                if m:
-                    try:
-                        return float(m.group(0).replace(",", "."))
-                    except:
-                        continue
-    return None
-
-def parse_components_from_description(desc: str):
-    """
-    Простий парсер, що витягує компоненти/опції з description.
-    Повертає список компонентів у форматі: [{"name": "Розмір", "options": ["S","M","L"]}, ...]
-    """
-    if not desc:
-        return None
-    out = []
-    # знаходимо патерни типу "Розмір: S, M, L" або "Size: 55-57, 58-60"
-    lines = re.split(r'[\n\r]+', desc)
-    for line in lines:
-        if ':' not in line:
-            continue
-        left, right = line.split(':', 1)
-        key = left.strip()
-        vals = re.split(r'[;,/\\\|\s]+', right.strip())
-        opts = []
-        for v in vals:
-            vv = v.strip()
-            if not vv:
-                continue
-            # приймаємо буквені і цифрові розміри
-            if re.match(r'^[XSMLxlm0-9\-]+$', vv):
-                opts.append(vv)
-        if opts:
-            out.append({"name": key, "options": sorted(set(opts), key=lambda x: x)})
-    return out if out else None
-
-async def find_component_sizes(product_name: str) -> Dict[str, List[str]]:
-    """
-    Повертає мапу компонент->list_of_sizes.
-    Якщо кеш фіда порожній — автопідвантажуємо.
-    Робимо помірковано: namespace-стійкий парсер через iterparse.
-    """
-    # автопідвантажити фід, якщо порожній
-    if not PRODUCTS_CACHE.get("data"):
-        await load_products_export(force=False)
-
-    text = PRODUCTS_CACHE.get("data")
-    res: Dict[str, List[str]] = {}
-    if not text:
-        return res
-
-    name_lower = (product_name or "").lower()
-
-    # які компоненти шукаємо — за ключовими словами в назві продукту
-    to_search = [kw for kw in COMPONENT_KEYWORDS if kw in name_lower]
-    if not to_search:
-        to_search = COMPONENT_KEYWORDS.copy()
-
-    try:
-        it = ET.iterparse(io.StringIO(text), events=("end",))
-        for event, elem in it:
-            tag = _local_tag(elem.tag).lower()
-            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
-                elem.clear()
-                continue
-
-            prod_name = (_find_first_text(elem, ["name", "title"]) or "").strip().lower()
-            if not prod_name:
-                elem.clear()
-                continue
-
-            # чи підпадає продукт під наші ключі?
-            matched_components = [kw for kw in to_search if kw in prod_name]
-            if not matched_components:
-                elem.clear()
-                continue
-
-            sizes = set()
-            for p in elem.iter():
-                pt = _local_tag(p.tag).lower()
-                # param-like tags
-                if "param" in pt or pt in ("attribute", "property", "option"):
-                    pname = (p.attrib.get("name") or "").lower() if isinstance(p.attrib, dict) else ""
-                    ptext = (p.text or "").strip()
-                    if not ptext:
-                        continue
-                    # якщо ім'я параметру натякає на розмір — беремо всі сегменти
-                    if any(x in pname for x in ("size", "размер", "розмір", "разм")) or pname.strip() in ("размер", "size", "розмір"):
-                        for seg in re.split(r'[;,/\\\s]+', ptext):
-                            if seg:
-                                sizes.add(seg.strip())
-                        continue
-                    # шукаємо формати "44-46", буквені розміри, двозначні числа
-                    for r in re.findall(r'\b\d{2,3}-\d{2,3}\b', ptext):
-                        sizes.add(r)
-                    for r in re.findall(r'\b(?:XS|S|M|L|XL|XXL|XXXL)\b', ptext, flags=re.I):
-                        sizes.add(r.upper())
-
-            # fallback: шукати розміри у назві продукту
-            if not sizes:
-                for r in re.findall(r"\b\d{2,3}-\d{2,3}\b", prod_name):
-                    sizes.add(r)
-                for l in re.findall(r"\b([XSML]{1,3})\b", prod_name.upper()):
-                    sizes.add(l)
-
-            if sizes:
-                for comp in matched_components:
-                    res.setdefault(comp, []).extend(list(sizes))
-
-            elem.clear()
-
-        # унікалізуємо і сортуємо опції
-        for k, v in list(res.items()):
-            uniq = sorted(set(x.strip() for x in v if x and x.strip()))
-            if uniq:
-                res[k] = uniq
-            else:
-                res.pop(k, None)
-
-    except Exception:
-        logger.exception("Error while scanning product feed for component sizes")
-
-    return res
 
 # ---------------- Size keyboard ----------------
 def build_size_keyboard(products: List[dict]) -> InlineKeyboardMarkup:
@@ -2597,29 +2419,35 @@ async def main():
     global bot, dp, ASYNC_LOOP
     ASYNC_LOOP = asyncio.get_running_loop()
 
-    try:
-        if USE_GDRIVE: await init_gdrive()
-        if USE_GCS: init_gcs()
-    except Exception:
-        logger.exception("Failed to initialize cloud storage services.")
+    # Ініціалізуємо хмарні сервіси
+    if USE_GDRIVE: await init_gdrive()
+    if USE_GCS: init_gcs()
 
+    # Налаштовуємо бота та диспетчер
     storage = MemoryStorage()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=storage)
+
+    # ВАЖЛИВО: Підключаємо роутер ТІЛЬКИ ОДИН РАЗ
     dp.include_router(router)
 
-    if TG_API_ID and TG_API_HASH:
+    # Запускаємо Telethon клієнт у фоновому режимі
+    if api_id and api_hash:
         asyncio.create_task(start_telethon_client(ASYNC_LOOP))
 
+    # Запускаємо веб-сервер для вебхуків
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 8080))), daemon=True).start()
 
+    # Встановлюємо команди та вебхук
+    await setup_commands()
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
-    logger.info("Bot started and webhook is set.")
+    logger.info("✅ Bot started and webhook is set to %s", WEBHOOK_URL)
 
+    # Завантажуємо товари в кеш при старті
     await refresh_products_cache_on_startup()
-    await setup_commands()
 
+    # Тримаємо програму живою
     await asyncio.Event().wait()
     
     # ---------------- start Telethon ----------------
