@@ -1269,52 +1269,6 @@ def calculate_final_price(drop_price: float) -> int:
     rounded_price = aggressive_round_up(with_markup)
     return rounded_price
 
-    # Збираємо item для корзини
-    item = {
-        "name": data.get("product_name") or data.get("article") or "Товар",
-        "sku": data.get("article") or data.get("product_name") or "",
-        "price": data.get("price") or data.get("final_price") or 0,
-        "qty": qty,
-        "sizes": data.get("selected_sizes") or {}
-    }
-    chat_id = msg.chat.id
-    add_to_cart(chat_id, item)
-
-        # оновлюємо/відправляємо футер корзини
-    await update_or_send_cart_footer(chat_id, bot)
-
-    # ПОВІДОМЛЕННЯ І КНОПКИ ДЛЯ ПРОДОВЖЕННЯ
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🧾 Вибрати товар на каналі", url=f"https://t.me/{BOT_USERNAME}?start=order_test_12345")],
-        [InlineKeyboardButton(text="🔎 Ввести артикул/назву", callback_data="flow:back:article")],
-        [InlineKeyboardButton(text="🚚 Обрати спосіб доставки / Перейти до оплати", callback_data="flow:to:delivery")]
-    ])
-    await msg.answer("✅ Товар додано до корзини.\nЩо бажаєте зробити далі?", reply_markup=kb)
-
-    # Залишаємо у state лише інфо про користувача (pib, phone), видаляємо тимчасові product-поля
-    keep = {k: v for k, v in (await state.get_data()).items() if k in ("pib", "phone", "mode")}
-    await state.clear()
-    await state.update_data(**keep)
-
-    # чекаємо на подальший вибір користувача (якщо user натисне 'flow:to:delivery' чи 'flow:back:article' — потрібні обробники)
-
-    # Показуємо футер-кнопку кошика з сумою
-    cart_text, total = await get_cart_summary(state)
-    await msg.answer(f"🛒 Ваша корзина: Загальна сума — {total} грн", reply_markup=cart_footer_keyboard(total))
-
-    # переходимо до вибору доставки (юзер може натиснути кнопку "Оберіть спосіб доставки")
-    await state.set_state(OrderForm.delivery)
-
-def add_to_cart(chat_id: int, item: Dict[str, Any]) -> None:
-    """Додає item до USER_CARTS[chat_id]. item must have keys: name, sku, price, qty, sizes"""
-    USER_CARTS.setdefault(chat_id, []).append(item)
-
-def get_cart_items(chat_id: int) -> List[Dict[str, Any]]:
-    return USER_CARTS.get(chat_id, [])
-
-def format_cart_contents(cart_items: List[Dict[str, Any]]) -> str:
-    if not cart_items:
-        return "🛒 Ваша корзина порожня."
     lines = ["🧾 Вміст корзини:"]
     for i, it in enumerate(cart_items, 1):
         sizes = it.get("sizes") or {}
