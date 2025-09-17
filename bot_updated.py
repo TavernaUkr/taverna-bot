@@ -254,21 +254,23 @@ def find_product_by_sku(raw: str) -> Optional[list]:
 # буде заповнений в main()
 ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
 
-# ініціалізація Google Drive service
-def init_gdrive():
-    if not USE_GDRIVE:
-        return None
+async def init_gdrive():
+    global G_DRIVE_SERVICE
+    # Ця змінна тепер береться з глобального контексту напряму
+    sa_json = os.getenv("SERVICE_ACCOUNT_JSON", "")
+    if not USE_GDRIVE or not sa_json:
+        return
     try:
-        import json
-        if SERVICE_ACCOUNT_JSON.strip().startswith("{"):
-            info = json.loads(SERVICE_ACCOUNT_JSON)
-            creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive.file"])
+        if sa_json.strip().startswith("{"):
+            creds_dict = json.loads(sa_json)
+            creds = Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/drive'])
         else:
-            creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_JSON, scopes=["https://www.googleapis.com/auth/drive.file"])
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
+            creds = Credentials.from_service_account_file(sa_json, scopes=['https://www.googleapis.com/auth/drive'])
+
+        G_DRIVE_SERVICE = build('drive', 'v3', credentials=creds)
+        logger.info("✅ GDrive initialized successfully.")
     except Exception:
         logger.exception("❌ GDrive init failed")
-        return None
 
 GDRIVE_SERVICE = init_gdrive()
 
@@ -458,6 +460,7 @@ async def setup_commands():
 
 # ---------------- FSM ----------------
 class OrderForm(StatesGroup):
+    quantity = State()
     pib = State()
     phone = State()
     article = State()
