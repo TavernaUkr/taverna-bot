@@ -143,105 +143,86 @@ def normalize_sku(s: str) -> str:
 
 # ... (попередній код без змін) ...
 
-# ---------------- Build product index (ФІНАЛЬНА, НАЙНАДІЙНІША ВЕРСІЯ) ----------------
+# ---------------- Build product index (ФІНАЛЬНА, РОБОЧА ВЕРСІЯ) ----------------
 def build_products_index_from_xml(text: str):
     """
-    Фінальна версія парсера, яка читає дані з XML напряму, без складних допоміжних функцій.
-    Це гарантує, що назва, ціна та артикул будуть прочитані коректно.
+    Фінальна, найнадійніша версія парсера.
+    Вона гарантовано знаходить та обробляє кожен <offer> у вашому файлі.
     """
     global PRODUCTS_INDEX
     PRODUCTS_INDEX = {
-        "all_products": [], "by_sku": defaultdict(list), "by_name": defaultdict(list),
-        "by_offer": {}, "by_base_name": defaultdict(list), "by_vendor": defaultdict(list), "by_id": {},
+        "all_products": [], "by_sku": defaultdict(list),
     }
     try:
-        # Використовуємо ітеративний парсинг для економії пам'яті
+        # Використовуємо ітеративний парсинг для великих файлів
         it = ET.iterparse(io.StringIO(text), events=("end",))
+        
+        product_count = 0
         for _, elem in it:
-            # Обробляємо тільки теги <offer>
-            if elem.tag != 'offer':
-                elem.clear()
-                continue
+            # Обробляємо тільки теги <offer>, щоб уникнути сміття
+            if elem.tag == 'offer':
+                # --- Прямий та надійний парсинг ключових полів ---
+                offer_id = elem.attrib.get("id", "").strip()
+                
+                name_tag = elem.find('name')
+                name = name_tag.text.strip() if name_tag is not None and name_tag.text else ""
+                
+                price_tag = elem.find('price')
+                price_txt = price_tag.text.strip() if price_tag is not None and price_tag.text else "0"
+                try:
+                    drop_price = float(price_txt)
+                except (ValueError, TypeError):
+                    drop_price = None
 
-            # --- 1. Прямий та надійний парсинг ключових полів ---
-            offer_id = elem.attrib.get("id", "").strip()
-            
-            name_tag = elem.find('name')
-            name = name_tag.text.strip() if name_tag is not None and name_tag.text else ""
-            
-            price_tag = elem.find('price')
-            price_txt = price_tag.text.strip() if price_tag is not None and price_tag.text else "0"
-            try:
-                drop_price = float(price_txt)
-            except (ValueError, TypeError):
-                drop_price = None
+                vendor_code_tag = elem.find('vendorCode')
+                vendor_code = vendor_code_tag.text.strip() if vendor_code_tag is not None and vendor_code_tag.text else ""
 
-            vendor_code_tag = elem.find('vendorCode')
-            vendor_code = vendor_code_tag.text.strip() if vendor_code_tag is not None and vendor_code_tag.text else ""
+                # Пропускаємо товари, які не мають ключових даних для продажу
+                if not offer_id or not name or not drop_price:
+                    elem.clear()
+                    continue
+                
+                # --- Парсинг додаткових полів ---
+                description_tag = elem.find('description')
+                description = description_tag.text.strip() if description_tag is not None and description_tag.text else ""
+                pictures = [pic.text.strip() for pic in elem.findall('picture') if pic.text]
+                sizes = [p.text.strip() for p in elem.findall('param') if p.attrib.get('name', '').lower() in ('размер', 'розмір', 'size') and p.text]
 
-            # Пропускаємо товари, які не мають ключових даних
-            if not offer_id or not name or not drop_price:
-                elem.clear()
-                continue
-            
-            # --- 2. Парсинг інших полів ---
-            description_tag = elem.find('description')
-            description = description_tag.text.strip() if description_tag is not None and description_tag.text else ""
-            
-            pictures = [pic.text.strip() for pic in elem.findall('picture') if pic.text]
-            
-            sizes = []
-            for param in elem.findall('param'):
-                if param.attrib.get('name', '').lower() in ('размер', 'розмір', 'size'):
-                    if param.text:
-                        sizes.append(param.text.strip())
+                # --- Створення та індексація товару ---
+                product = {
+                    "offer_id": offer_id, "vendor_code": vendor_code, "name": name,
+                    "description": description, "pictures": pictures, "sizes": sizes, "drop_price": drop_price,
+                }
+                PRODUCTS_INDEX["all_products"].append(product)
 
-            # --- 3. Створення та індексація товару ---
-            product = {
-                "offer_id": offer_id,
-                "vendor_code": vendor_code,
-                "name": name,
-                "description": description,
-                "pictures": pictures,
-                "sizes": sizes,
-                "drop_price": drop_price,
-            }
-            PRODUCTS_INDEX["all_products"].append(product)
-
-            # Індексуємо за всіма можливими ключами
-            keys_to_index = {offer_id, vendor_code, normalize_sku(vendor_code), normalize_sku(offer_id)}
-            for key in keys_to_index:
-                if key:
-                    PRODUCTS_INDEX["by_sku"][key].append(product)
-            
-            # Очищуємо пам'ять
-            elem.clear()
-
-        logger.info(f"✅ Product index built: {len(PRODUCTS_INDEX['all_products'])} products total.")
+                # Індексуємо за всіма можливими ключами
+                keys_to_index = {offer_id, vendor_code, normalize_sku(vendor_code), normalize_sku(offer_id)}
+                for key in keys_to_index:
+                    if key:
+                        PRODUCTS_INDEX["by_sku"][key].append(product)
+                
+                product_count += 1
+                elem.clear() # Очищуємо пам'ять
+        
+        logger.info(f"✅ Product index built: {product_count} products total.")
 
     except Exception:
-        logger.exception("❌ Critical error in build_products_index_from_xml")
+        logger.exception("❌ CRITICAL ERROR during XML parsing")
 
-# ---------------- Robust SKU search (ФІНАЛЬНА ВЕРСІЯ) ----------------
+# ---------------- Robust SKU search (ФІНАЛЬНА ВЕРСІЯ З ФІЛЬТРАЦІЄЮ) ----------------
 def find_product_by_sku(raw: str) -> Optional[list]:
     """
     Фінальна версія пошуку, яка жорстко фільтрує "порожні" товари.
-    1. Знаходить усіх можливих кандидатів.
-    2. Викидає зі списку всіх, у кого немає назви або ціни.
-    3. Сортує решту за релевантністю.
     """
-    if not raw:
-        return None
+    if not raw: return None
 
     raw = str(raw).strip()
     norm = normalize_sku(raw)
     by_sku = PRODUCTS_INDEX.get("by_sku", {})
     
-    # --- Етап 1: Збираємо абсолютно всіх кандидатів ---
+    # --- Етап 1: Збираємо всіх кандидатів ---
     all_candidates = []
     processed_offers = set()
-
-    # Поєднуємо пошук по точному збігу та частковому
     for key, products in by_sku.items():
         if raw in key or norm in key:
             for p in products:
@@ -251,19 +232,14 @@ def find_product_by_sku(raw: str) -> Optional[list]:
                     processed_offers.add(offer_id)
 
     if not all_candidates:
-        logger.debug("Lookup failed: No candidates found for SKU=%s", raw)
+        logger.debug(f"Lookup failed for SKU='{raw}': No candidates found.")
         return None
 
     # --- Етап 2: ЖОРСТКА ФІЛЬТРАЦІЯ ---
-    # Залишаємо тільки ті товари, в яких є і назва, і ціна.
-    # Це найважливіший крок, який прибирає "сміття".
-    good_candidates = [
-        p for p in all_candidates 
-        if p.get("name") and p.get("drop_price")
-    ]
+    good_candidates = [p for p in all_candidates if p.get("name") and p.get("drop_price")]
 
     if not good_candidates:
-        logger.warning(f"Lookup warning for SKU='{raw}': Found {len(all_candidates)} candidates, but all were filtered out (missing name or price).")
+        logger.warning(f"Lookup warning for SKU='{raw}': Found {len(all_candidates)} raw candidates, but all were filtered out.")
         return None
 
     # --- Етап 3: Сортування тільки "хороших" кандидатів ---
@@ -271,25 +247,16 @@ def find_product_by_sku(raw: str) -> Optional[list]:
     for p in good_candidates:
         score = 0
         vendor_code_norm = normalize_sku(p.get("vendor_code", ""))
-        
-        if norm == vendor_code_norm:
-            score = 100  # Ідеальний збіг
-        elif norm in vendor_code_norm:
-            score = 90   # "1056" є в "A1056"
-        else:
-            score = 10   # Інший збіг
+        if norm == vendor_code_norm: score = 100
+        elif norm in vendor_code_norm: score = 90
+        else: score = 10
         candidates_with_scores.append({"product": p, "score": score})
 
     sorted_candidates = sorted(candidates_with_scores, key=lambda x: x["score"], reverse=True)
     final_products = [item["product"] for item in sorted_candidates]
     
-    if final_products:
-        best_match = sorted_candidates[0]
-        logger.debug(
-            f"Lookup success for SKU='{raw}': Found {len(final_products)} valid products. "
-            f"Best match score: {best_match['score']}, name: '{best_match['product'].get('name')}', "
-            f"vc: '{best_match['product'].get('vendor_code')}'"
-        )
+    best_match = sorted_candidates[0]
+    logger.debug(f"Lookup success for SKU='{raw}': Found {len(final_products)} valid products. Best match: {best_match['product'].get('name')}")
     
     return final_products
 
