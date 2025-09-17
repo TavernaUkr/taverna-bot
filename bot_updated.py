@@ -3710,6 +3710,116 @@ async def add_more_items_handler(cb: CallbackQuery, state: FSMContext):
     )
     await cb.answer()
 
+# --- Обробники для кошика та головного меню ---
+
+# Обробник команди /basket - показує кошик
+@router.message(Command("basket"))
+async def show_cart_command_handler(msg: Message, state: FSMContext):
+    await show_cart(msg.from_user.id, msg.chat.id, bot, state)
+
+# Обробник колбеку show_cart - також показує кошик
+@router.callback_query(F.data == "show_cart")
+async def show_cart_callback_handler(cb: CallbackQuery, state: FSMContext):
+    # Видаляємо попереднє повідомлення, щоб не було дублів
+    await cb.message.delete()
+    await show_cart(cb.from_user.id, cb.message.chat.id, bot, state)
+    await cb.answer()
+
+# Головна функція для відображення кошика
+async def show_cart(user_id: int, chat_id: int, bot: Bot, state: FSMContext):
+    cart = await load_cart(user_id)
+    
+    if not cart:
+        await bot.send_message(
+            chat_id,
+            "🛒 Ваш кошик порожній.",
+            reply_markup=empty_cart_keyboard()
+        )
+        return
+
+    cart_text_lines = ["<b>🛒 Ваш кошик:</b>\n"]
+    total_price = 0
+    
+    # Створюємо список кнопок для очищення окремих товарів
+    clear_buttons = []
+    
+    # Проходимо по товарах в кошику
+    for item_key, item in cart.items():
+        item_price = item.get("drop_price", 0) * item.get("quantity", 0)
+        final_price = calculate_final_price(item_price)
+        total_price += final_price
+        
+        cart_text_lines.append(
+            f"• <b>{item['name']}</b>\n"
+            f"  Розмір: {item['size']}, К-сть: {item['quantity']}\n"
+            f"  Ціна: {final_price} грн"
+        )
+        # Додаємо кнопку "Видалити" для кожного товару
+        clear_buttons.append(
+            [InlineKeyboardButton(
+                text=f"❌ Видалити «{item['name']}»",
+                callback_data=f"cart:remove:{item_key}"
+            )]
+        )
+
+    cart_text_lines.append(f"\n<b>✨ Загальна сума: {total_price} грн</b>")
+    
+    # Створюємо фінальну клавіатуру
+    kb = InlineKeyboardMarkup(inline_keyboard=clear_buttons + [
+        [InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="order:start_checkout")],
+        [InlineKeyboardButton(text="🗑️ Повністю очистити кошик", callback_data="cart:clear_all")],
+        [InlineKeyboardButton(text="➕ Додати ще товар", callback_data="add_more_items")]
+    ])
+    
+    await bot.send_message(chat_id, "\n".join(cart_text_lines), parse_mode="HTML", reply_markup=kb)
+
+# Обробник для кнопки "Повністю очистити кошик"
+@router.callback_query(F.data == "cart:clear_all")
+async def clear_all_cart_handler(cb: CallbackQuery, state: FSMContext):
+    await save_cart(cb.from_user.id, {}) # Зберігаємо порожній кошик
+    await cb.message.edit_text(
+        "✅ Кошик повністю очищено.",
+        reply_markup=empty_cart_keyboard()
+    )
+    await cb.answer()
+
+# Обробник для видалення одного товару з кошика
+@router.callback_query(F.data.startswith("cart:remove:"))
+async def remove_item_cart_handler(cb: CallbackQuery, state: FSMContext):
+    item_key_to_remove = cb.data.split(":")[2]
+    cart = await load_cart(cb.from_user.id)
+    
+    if item_key_to_remove in cart:
+        del cart[item_key_to_remove]
+        await save_cart(cb.from_user.id, cart)
+        await cb.answer("✅ Товар видалено з кошика.")
+        # Оновлюємо вигляд кошика
+        await cb.message.delete()
+        await show_cart(cb.from_user.id, cb.message.chat.id, bot, state)
+    else:
+        await cb.answer("Помилка: товар вже видалено.", show_alert=True)
+
+# Клавіатура для порожнього кошика
+def empty_cart_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Додати товар", callback_data="add_more_items")]
+    ])
+
+# Обробник для початку оформлення замовлення
+@router.callback_query(F.data == "order:start_checkout")
+async def start_checkout_handler(cb: CallbackQuery, state: FSMContext):
+    cart = await load_cart(cb.from_user.id)
+    if not cart:
+        await cb.answer("Ваш кошик порожній!", show_alert=True)
+        return
+        
+    await state.set_state(OrderForm.full_name)
+    await cb.message.edit_text(
+        "Для оформлення замовлення, будь ласка, введіть ваше <b>Прізвище та Ім'я</b>:",
+        parse_mode="HTML"
+    )
+    await cb.answer()
+
 @router.message(OrderForm.confirm)
 async def state_confirm(msg: Message, state: FSMContext):
     data = await state.get_data()
