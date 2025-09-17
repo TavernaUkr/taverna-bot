@@ -459,6 +459,9 @@ async def setup_commands():
         logger.exception("Cannot set bot commands (non-fatal).")
 
 # ---------------- FSM ----------------
+class SearchState(StatesGroup):
+    waiting_for_input = State() # Стан очікування назви або артикула
+
 class OrderForm(StatesGroup):
     quantity = State()
     full_name = State()
@@ -819,11 +822,6 @@ update_or_send_cart_footer = ensure_or_update_cart_footer
 # ---------------- Routers / Handlers ----------------
 # --- Replace all other CommandStart handlers with this single unified handler ---
 async def _present_product_and_ask_confirm(msg: Message, state: FSMContext, product: Dict[str, Any]):
-    """
-    Допоміжна функція: показує фото/назву товару, зберігає product у state як last_found_product
-    і виводить кнопки: ✅ Підтвердити | ⬅️ Назад
-    Встановлює стан OrderForm.article (щоб далі обробляти підтвердження/вибір).
-    """
     await state.update_data(last_found_product=product, article=product.get("sku") or product.get("sku") or "")
     # спробуємо надіслати перше фото (якщо є)
     pic = product.get("picture") or product.get("image") or product.get("images") or None
@@ -851,7 +849,7 @@ async def _present_product_and_ask_confirm(msg: Message, state: FSMContext, prod
     else:
         await msg.answer(caption, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-    await state.set_state(OrderForm.article)
+    await state.set_state(SearchState.waiting_for_input)
     return
 
 def format_currency(value: Optional[float]) -> str:
@@ -1066,6 +1064,28 @@ async def cmd_start_deep_link(msg: Message, command: CommandObject, state: FSMCo
     except Exception:
         logger.exception("Deep link processing error")
         await msg.answer("Помилка обробки запиту. Спробуйте ще раз.")
+
+@router.message(SearchState.waiting_for_input, F.text)
+async def handle_manual_search(message: Message, state: FSMContext):
+    search_query = message.text.strip()
+    await state.clear() # Очищуємо стан пошуку
+
+    # Використовуємо нашу існуючу функцію пошуку
+    product_group = find_product_by_sku(search_query)
+    
+    if not product_group:
+        await message.answer(f"❌ На жаль, за запитом «{search_query}» нічого не знайдено.")
+        return
+
+    # Якщо товар знайдено, ми просто запускаємо той самий deep-link обробник,
+    # але передаємо йому дані напряму. Це дозволяє не дублювати код.
+    # Створюємо "фейковий" об'єкт CommandObject для сумісності
+    fake_command = CommandObject(
+        prefix="/",
+        command="start",
+        args=f"manual_search__sku_{product_group[0]['vendor_code'] or product_group[0]['offer_id']}"
+    )
+    await cmd_start_deep_link(message, fake_command, state)
 
 # ---------------- Command: /find ----------------
 RESULTS_PER_PAGE = 10
@@ -1653,8 +1673,8 @@ async def process_full_name(message: Message, state: FSMContext):
             await state.remove_data("pib_suggestion")
             await msg.answer(f"✅ ПІБ прийнято: {suggested}")
             await msg.answer("Введіть телефон\n(У форматі: +38(0ХХ)ХХХ ХХ ХХ , 38(0ХХ)ХХХ ХХ ХХ , (0ХХ)ХХХ ХХ ХХ):")
-            await push_flow(state, OrderForm.phone)
-            await state.set_state(OrderForm.phone)
+            await push_flow(state, OrderForm.phone_number)
+            await state.set_state(OrderForm.phone_number)
             return
         else:
             await msg.answer("Нема збереженої пропозиції для підтвердження. Будь ласка, введіть ПІБ у форматі: Прізвище Ім'я По-батькові.")
@@ -1679,8 +1699,8 @@ async def process_full_name(message: Message, state: FSMContext):
     "📱 Введіть ваш номер телефону\n(У форматі: +38(0ХХ)ХХХ ХХ ХХ , 38(0ХХ)ХХХ ХХ ХХ , (0ХХ)ХХХ ХХ ХХ):",
     reply_markup=build_nav_kb()
 )
-        await push_flow(state, OrderForm.phone)
-        await state.set_state(OrderForm.phone)
+        await push_flow(state, OrderForm.phone_number)
+        await state.set_state(OrderForm.phone_number)
         return
 
     # якщо третя НЕ виглядає як по-батькові, спробуємо запропонувати перестановку, якщо є ознаки по-батькові в іншому місці
@@ -1743,7 +1763,7 @@ async def state_phone(msg: Message, state: FSMContext):
         normalized_phone = f"+380{digits}"
         await state.update_data(phone=normalized_phone)
         await msg.answer("Введіть артикул або назву товару:")
-        await state.set_state(OrderForm.article)
+        await  if operator_code in VALID_MOBILE_CODES
         return
 
     await msg.answer(f"❌ Невідомий код оператора/міста ({digits[:4]}...). Введіть дійсний український номер.")
@@ -2153,7 +2173,7 @@ async def show_product_and_ask_quantity(msg: Message, state: FSMContext, product
         "👉 Введіть кількість товару (число):",
     reply_markup=build_nav_kb()
 )
-    await state.set_state(OrderForm.amount)
+    await state.set_state(OrderForm.quantity)
 
 async def find_component_sizes(product_name: str) -> Dict[str, List[str]]:
     """
@@ -2400,7 +2420,7 @@ async def size_continue_handler(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("👉 Введіть кількість товару (число):",
     reply_markup=build_nav_kb()
 )
-    await state.set_state(OrderForm.amount)
+    await state.set_state(OrderForm.quantity)
     await cb.answer()
 
 # ---------------- Callback: вибір розміру + кількості ----------------
@@ -2434,7 +2454,7 @@ async def cb_choose_size(callback: CallbackQuery, state: FSMContext):
         f"✅ Ви обрали розмір: {size}\n\n👉 Введіть кількість товару (число):",
         reply_markup=kb
     )
-    await state.set_state(OrderForm.amount)
+    await state.set_state(OrderForm.quantity)
     await callback.answer()
 
 # ---------------- Обробка введеної кількості ----------------
@@ -2492,7 +2512,7 @@ async def amount_entered(msg: Message, state: FSMContext):
         await query.message.answer(format_product_message(product, mode=(await state.get_data()).get("mode", "client"), include_intro=False) + "\n\n👉 Введіть кількість товару (число):",
     reply_markup=build_nav_kb()
 )
-        await state.set_state(OrderForm.amount)
+        await state.set_state(OrderForm.quantity)
         await query.answer()
         return
 
@@ -2500,7 +2520,7 @@ async def cb_suggest_back(cb: CallbackQuery, state: FSMContext):
     # ask to enter article/name again
     await state.update_data(last_suggestion=None)
     await cb.message.answer("🔙 Повернулись назад. Введіть артикул або назву товару:")
-    await state.set_state(OrderForm.article)
+    await state.set_state(SearchState.waiting_for_input)
     await cb.answer()
 
 # ---------------- Callback: перегляд кошика ----------------
@@ -2675,7 +2695,7 @@ async def cb_sizes_continue(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("👉 Введіть кількість товару (число):",
     reply_markup=build_nav_kb()
 )
-    await state.set_state(OrderForm.amount)
+    await state.set_state(OrderForm.quantity)
 
 @router.callback_query(F.data.startswith("size:"))
 async def cb_size_select(cb: CallbackQuery, state: FSMContext):
@@ -2893,18 +2913,18 @@ async def suggest_confirm(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("👉 Введіть кількість товару (число):",
     reply_markup=build_nav_kb()
 )
-    await state.set_state(OrderForm.amount)
+    await state.set_state(OrderForm.quantity)
     await cb.answer()
 
 @router.callback_query(F.data == "nav:enter_article")
 async def nav_enter_article(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(OrderForm.article)
+    await state.set_state(SearchState.waiting_for_input)
     await cb.message.answer("🔍 Введіть артикул або назву товару для пошуку:")
     await cb.answer()
 
 @router.callback_query(F.data == "nav:back_to_article")
 async def nav_back_to_article(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(OrderForm.article)
+    await state.set_state(SearchState.waiting_for_input)
     await cb.message.answer("↩️ Повернулися — введіть артикул або назву товару:")
     await cb.answer()
 
@@ -2951,7 +2971,7 @@ async def cb_product_confirm(cb: CallbackQuery, state: FSMContext):
                 "👉 Введіть кількість товару (число):",
     reply_markup=build_nav_kb()
 )
-            await state.set_state(OrderForm.amount)
+            await state.set_state(OrderForm.quantity)
             await cb.answer()
             return
         kb = build_size_keyboard(0, opts)
@@ -2978,14 +2998,14 @@ async def cb_product_confirm(cb: CallbackQuery, state: FSMContext):
         "👉 Введіть кількість товару (число):",
     reply_markup=build_nav_kb()
 )
-    await state.set_state(OrderForm.amount)
+    await state.set_state(OrderForm.quantity)
     await cb.answer()
 
 # --- manual search (перевести користувача на введення артикулу/назви) ---
 @router.callback_query(F.data == "flow:manual_search")
 async def cb_manual_search(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("Введіть артикул або назву товару:")
-    await state.set_state(OrderForm.article)
+    await state.set_state(SearchState.waiting_for_input)
     await cb.answer()
 
 # --- back navigation handler: callback_data = flow:back:<state_name> (e.g. flow:back:pib) ---
@@ -2999,28 +3019,28 @@ async def cb_flow_back(cb: CallbackQuery, state: FSMContext):
         return
 
     if to == "pib":
-        await state.set_state(OrderForm.pib)
+        await state.set_state(OrderForm.full_name)
         await cb.message.answer("Повернулись.📝 Введіть ваше ПІБ:",
     reply_markup=build_nav_kb()
 )
     elif to == "phone":
-        await push_flow(state, OrderForm.phone)
-        await state.set_state(OrderForm.phone)
+        await push_flow(state, OrderForm.phone_number)
+        await state.set_state(OrderForm.phone_number)
         await cb.message.answer("Повернулись.📱 Введіть телефон:",
     reply_markup=build_nav_kb()
 )
     elif to == "article":
-        await state.set_state(OrderForm.article)
+        await state.set_state(SearchState.waiting_for_input)
         await cb.message.answer("Повернулись. Введіть 🆔 артикул або  🔖 назву товару:",
     reply_markup=build_nav_kb()
 )
     elif to == "amount":
-        await state.set_state(OrderForm.amount)
+        await state.set_state(OrderForm.quantity)
         await cb.message.answer("Повернулись. Введіть кількість товару:",
     reply_markup=build_nav_kb()
 )
     else:
-        await state.set_state(OrderForm.article)
+        await state.set_state(SearchState.waiting_for_input)
         await cb.message.answer("Повернулись. Введіть 🆔 артикул або  🔖 назву товару:",
     reply_markup=build_nav_kb()
 )
@@ -3069,7 +3089,7 @@ async def cb_product_confirm(cb: CallbackQuery, state: FSMContext):
                 "👉 Введіть кількість товару (число):",
     reply_markup=build_nav_kb()
 )
-            await state.set_state(OrderForm.amount)
+            await state.set_state(OrderForm.quantity)
             await cb.answer()
             return
         kb = build_size_keyboard(0, opts)
@@ -3096,14 +3116,14 @@ async def cb_product_confirm(cb: CallbackQuery, state: FSMContext):
         "👉 Введіть кількість товару (число):",
     reply_markup=build_nav_kb()
 )
-    await state.set_state(OrderForm.amount)
+    await state.set_state(OrderForm.quantity)
     await cb.answer()
 
 # --- manual search (перевести користувача на введення артикулу/назви) ---
 @router.callback_query(F.data == "flow:manual_search")
 async def cb_manual_search(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("Введіть артикул або назву товару:")
-    await state.set_state(OrderForm.article)
+    await state.set_state(SearchState.waiting_for_input)
     await cb.answer()
 
 # --- back navigation handler: callback_data = flow:back:<state_name> (e.g. flow:back:pib) ---
@@ -3117,34 +3137,34 @@ async def cb_flow_back(cb: CallbackQuery, state: FSMContext):
         return
 
     if to == "pib":
-        await state.set_state(OrderForm.pib)
+        await state.set_state(OrderForm.full_name)
         await cb.message.answer("Повернулись.📝 Введіть ваше ПІБ:",
     reply_markup=build_nav_kb()
 )
     elif to == "phone":
-        await state.set_state(OrderForm.phone)
+        await state.set_state(OrderForm.phone_number)
         await cb.message.answer("Повернулись.📱 Введіть телефон:",
     reply_markup=build_nav_kb()
 )
     elif to == "article":
-        await state.set_state(OrderForm.article)
+        await state.set_state(SearchState.waiting_for_input)
         await cb.message.answer("Повернулись. Введіть 🆔 артикул або  🔖 назву товару:",
     reply_markup=build_nav_kb()
 )
     elif to == "amount":
-        await state.set_state(OrderForm.amount)
+        await state.set_state(OrderForm.quantity)
         await cb.message.answer("Повернулись. Введіть кількість товару:",
     reply_markup=build_nav_kb()
 )
     else:
-        await state.set_state(OrderForm.article)
+        await state.set_state(SearchState.waiting_for_input)
         await cb.message.answer("Повернулись. Введіть 🆔 артикул або  🔖 назву товару:",
     reply_markup=build_nav_kb()
 )
     await cb.answer()
 
 # --- Кількість товару ---
-@router.message(OrderForm.amount)
+@router.message(OrderForm.quantity)
 async def state_amount(msg: Message, state: FSMContext):
     try:
         qty = int(msg.text.strip())
@@ -3210,7 +3230,7 @@ async def cb_choose_from_channel(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "choose:by_name")
 async def cb_choose_by_name(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("Введіть назву або артикул товару для пошуку:")
-    await state.set_state(OrderForm.article)
+    await state.set_state(SearchState.waiting_for_input)
     await cb.answer()
 
 # --- cart open / clear / checkout ---
@@ -3255,7 +3275,7 @@ async def cb_cart_checkout(cb: CallbackQuery, state: FSMContext):
 async def cb_flow_back_article(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await cb.message.answer("Введіть артикул або назву товару:")
-    await state.set_state(OrderForm.article)
+    await state.set_state(SearchState.waiting_for_input)
 
 @router.callback_query(F.data == "flow:to:delivery")
 async def cb_flow_to_delivery(cb: CallbackQuery, state: FSMContext):
@@ -3319,7 +3339,8 @@ async def cb_choose_from_channel(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "choose:by_name")
 async def cb_choose_by_name(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("Введіть назву або артикул товару для пошуку:")
-    await state.set_state(OrderForm.article)
+    # Правильний стан:
+    await state.set_state(SearchState.waiting_for_input)
     await cb.answer()
 
 # --- cart open / clear / checkout ---
@@ -3821,7 +3842,7 @@ async def cb_article_confirm_exact(call: CallbackQuery, state: FSMContext):
         # без розмірів — питаємо кількість
         await call.message.answer("👉 Введіть кількість товару (число):", reply_markup=build_nav_kb())
         await state.update_data(last_product=product)
-        await state.set_state(OrderForm.amount)
+        await state.set_state(OrderForm.quantity)
 
 @router.callback_query(F.data == "flow:back_to_start")
 async def cb_back_to_start(call: CallbackQuery, state: FSMContext):
