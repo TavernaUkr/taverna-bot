@@ -1065,7 +1065,6 @@ async def cb_flow_back(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("Повернулись на початок. Введіть артикул або натисніть кнопку Замовити під постом.", reply_markup=None)
     await cb.answer()
 
-
 @router.callback_query(F.data.startswith("page:"))
 async def cb_find_page(query: CallbackQuery, state: FSMContext):
     page = int(query.data.split(":")[1])
