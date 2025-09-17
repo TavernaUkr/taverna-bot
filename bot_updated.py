@@ -1258,32 +1258,6 @@ def aggressive_round_up(n):
         base = 10**(length - 2)
         return math.ceil(n / base) * base
     return math.ceil(n)
-
-def calculate_final_price(drop_price: float) -> int:
-    """
-    Розраховує фінальну ціну для клієнта з націнкою 33% та округленням.
-    """
-    if not drop_price:
-        return 0
-    with_markup = drop_price * 1.33
-    rounded_price = aggressive_round_up(with_markup)
-    return rounded_price
-
-    lines = ["🧾 Вміст корзини:"]
-    for i, it in enumerate(cart_items, 1):
-        sizes = it.get("sizes") or {}
-        sizes_txt = ", ".join([f"{k}:{v}" for k, v in sizes.items()]) if sizes else "—"
-        price = it.get("price") or "—"
-        qty = it.get("qty") or 1
-        subtotal = (int(price) if isinstance(price, (int, float, str)) and str(price).isdigit() else price)
-        lines.append(
-            f"{i}. {it.get('name','Товар')} ({sizes_txt}) — {price} грн × {qty} = "
-            f"{int(price)*int(qty) if isinstance(price,(int,float)) or str(price).isdigit() else '—'}"
-        )
-    total = cart_total(cart_items)
-    lines.append(f"\n💰 Загальна сума: {total} грн.")
-    lines.append("\nДля повного скасування натисніть: ❌ Повністю скасувати замовлення")
-    return "\n".join(lines)
     
 # ---------------- MyDrop integration ----------------
 async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int] = None):
