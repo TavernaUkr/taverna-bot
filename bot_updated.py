@@ -986,25 +986,40 @@ async def select_size_handler(cb: CallbackQuery, state: FSMContext):
 # Крок 2: Користувач вводить кількість
 @router.message(OrderForm.quantity)
 async def get_quantity_handler(msg: Message, state: FSMContext):
+    # Перевіряємо, чи введено число
     if not msg.text or not msg.text.isdigit() or int(msg.text) < 1:
         await msg.answer("Будь ласка, введіть кількість у вигляді числа (наприклад: 1).")
         return
-    
+        
     quantity = int(msg.text)
     user_data = await state.get_data()
     offer_id = user_data.get('current_offer_id')
+    
+    # Перевіряємо, чи є в нас товар для додавання
+    if not offer_id:
+        await msg.answer("Щось пішло не так. Будь ласка, почніть пошук товару знову.")
+        await state.clear()
+        return
+        
     product = PRODUCTS_INDEX["by_offer"].get(offer_id)
     
+    # Завантажуємо кошик користувача
     cart = await load_cart(msg.from_user.id)
+    
+    # Додаємо або оновлюємо товар в кошику
     cart[str(offer_id)] = {
         "name": product.get("name"), "vendor_code": product.get("vendor_code"),
         "size": product.get("sizes")[0] if product.get("sizes") else 'N/A',
         "quantity": quantity, "drop_price": product.get("drop_price"), "offer_id": offer_id,
     }
     
+    # Зберігаємо оновлений кошик
     await save_cart(msg.from_user.id, cart)
+    
+    # Очищуємо стан FSM, щоб користувач міг шукати інші товари
     await state.clear()
     
+    # Повідомляємо користувача та пропонуємо подальші дії
     await msg.answer(
         f"✅ Товар «<b>{product.get('name')}</b>» додано до кошика.", parse_mode="HTML",
         reply_markup=cart_menu_keyboard()
@@ -1274,7 +1289,7 @@ def calculate_final_price(drop_price: float) -> int:
         [InlineKeyboardButton(text="🔎 Ввести артикул/назву", callback_data="flow:back:article")],
         [InlineKeyboardButton(text="🚚 Обрати спосіб доставки / Перейти до оплати", callback_data="flow:to:delivery")]
     ])
-        await msg.answer("✅ Товар додано до корзини.\nЩо бажаєте зробити далі?", reply_markup=kb)
+    await msg.answer("✅ Товар додано до корзини.\nЩо бажаєте зробити далі?", reply_markup=kb)
 
     # Залишаємо у state лише інфо про користувача (pib, phone), видаляємо тимчасові product-поля
     keep = {k: v for k, v in (await state.get_data()).items() if k in ("pib", "phone", "mode")}
@@ -1443,31 +1458,31 @@ async def main():
     # Ініціалізуємо хмарні сервіси
     if USE_GDRIVE: await init_gdrive()
     if USE_GCS: init_gcs()
-
+        
     # Налаштовуємо бота та диспетчер
     storage = MemoryStorage()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=storage)
-
-    # ВАЖЛИВО: Підключаємо роутер ТІЛЬКИ ОДИН РАЗ
+    
+    # Підключаємо роутер ТІЛЬКИ ОДИН РАЗ
     dp.include_router(router)
 
-    # Запускаємо Telethon клієнт у фоновому режимі
+    # Запускаємо Telethon
     if api_id and api_hash:
         asyncio.create_task(start_telethon_client(ASYNC_LOOP))
 
-    # Запускаємо веб-сервер для вебхуків
+    # Запускаємо веб-сервер
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 8080))), daemon=True).start()
-
+    
     # Встановлюємо команди та вебхук
     await setup_commands()
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     logger.info("✅ Bot started and webhook is set to %s", WEBHOOK_URL)
-
-    # Завантажуємо товари в кеш при старті
+    
+    # Завантажуємо товари при старті
     await refresh_products_cache_on_startup()
-
+    
     # Тримаємо програму живою
     await asyncio.Event().wait()
     
