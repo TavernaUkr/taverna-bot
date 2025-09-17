@@ -2251,27 +2251,19 @@ def build_size_keyboard(products: List[dict]) -> InlineKeyboardMarkup:
     kb.add(InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="order:cancel"))
     return kb
 
-def aggressive_round(price: float) -> int:
+# --- Розрахунок ціни для клієнта (ВИПРАВЛЕНО) ---
+
+def aggressive_round_up(n):
     """
-    Aggressive rounding (round up) to 'nice' numbers:
-      - <100 -> nearest 5
-      - <1000 -> nearest 10
-      - <5000 -> nearest 50
-      - >=5000 -> nearest 100
-    Always rounds UP (ceil) to favor business rounding rules you described.
+    Ваша функція для агресивного округлення ціни.
     """
-    if price is None:
-        return None
-    p = float(price)
-    if p < 100:
-        base = 5
-    elif p < 1000:
-        base = 10
-    elif p < 5000:
-        base = 50
-    else:
-        base = 100
-    return int(math.ceil(p / base) * base)
+    if n < 100:
+        return math.ceil(n / 10) * 10
+    length = len(str(int(n)))
+    if length > 2:
+        base = 10**(length - 2)
+        return math.ceil(n / base) * base
+    return math.ceil(n)
 
 def calculate_final_price(drop_price: float) -> int:
     """
@@ -2279,9 +2271,7 @@ def calculate_final_price(drop_price: float) -> int:
     """
     if not drop_price:
         return 0
-    # Націнка +33%
     with_markup = drop_price * 1.33
-    # Агресивне округлення (логіка з вашого файлу)
     rounded_price = aggressive_round_up(with_markup)
     return rounded_price
 
