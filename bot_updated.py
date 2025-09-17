@@ -143,25 +143,22 @@ def normalize_sku(s: str) -> str:
 
 # ... (попередній код без змін) ...
 
-# ---------------- Build product index (ФІНАЛЬНА, РОБОЧА ВЕРСІЯ) ----------------
+# ---------------- Build product index (ФІНАЛЬНА ВЕРСІЯ + by_offer) ----------------
 def build_products_index_from_xml(text: str):
     """
-    Фінальна, найнадійніша версія парсера.
-    Вона гарантовано знаходить та обробляє кожен <offer> у вашому файлі.
+    Фінальна версія парсера. Читає дані напряму та створює всі необхідні індекси.
     """
     global PRODUCTS_INDEX
     PRODUCTS_INDEX = {
-        "all_products": [], "by_sku": defaultdict(list),
+        "all_products": [], 
+        "by_sku": defaultdict(list),
+        "by_offer": {}  # <-- ПОВЕРНУЛИ ЦЕЙ ІНДЕКС
     }
     try:
-        # Використовуємо ітеративний парсинг для великих файлів
         it = ET.iterparse(io.StringIO(text), events=("end",))
-        
         product_count = 0
         for _, elem in it:
-            # Обробляємо тільки теги <offer>, щоб уникнути сміття
             if elem.tag == 'offer':
-                # --- Прямий та надійний парсинг ключових полів ---
                 offer_id = elem.attrib.get("id", "").strip()
                 
                 name_tag = elem.find('name')
@@ -177,35 +174,34 @@ def build_products_index_from_xml(text: str):
                 vendor_code_tag = elem.find('vendorCode')
                 vendor_code = vendor_code_tag.text.strip() if vendor_code_tag is not None and vendor_code_tag.text else ""
 
-                # Пропускаємо товари, які не мають ключових даних для продажу
                 if not offer_id or not name or not drop_price:
                     elem.clear()
                     continue
                 
-                # --- Парсинг додаткових полів ---
                 description_tag = elem.find('description')
                 description = description_tag.text.strip() if description_tag is not None and description_tag.text else ""
                 pictures = [pic.text.strip() for pic in elem.findall('picture') if pic.text]
                 sizes = [p.text.strip() for p in elem.findall('param') if p.attrib.get('name', '').lower() in ('размер', 'розмір', 'size') and p.text]
 
-                # --- Створення та індексація товару ---
                 product = {
                     "offer_id": offer_id, "vendor_code": vendor_code, "name": name,
                     "description": description, "pictures": pictures, "sizes": sizes, "drop_price": drop_price,
                 }
                 PRODUCTS_INDEX["all_products"].append(product)
 
-                # Індексуємо за всіма можливими ключами
+                # <-- ДОДАЛИ ІНДЕКСАЦІЮ ЗА OFFER_ID
+                if offer_id:
+                    PRODUCTS_INDEX["by_offer"][offer_id] = product
+
                 keys_to_index = {offer_id, vendor_code, normalize_sku(vendor_code), normalize_sku(offer_id)}
                 for key in keys_to_index:
                     if key:
                         PRODUCTS_INDEX["by_sku"][key].append(product)
                 
                 product_count += 1
-                elem.clear() # Очищуємо пам'ять
+                elem.clear()
         
         logger.info(f"✅ Product index built: {product_count} products total.")
-
     except Exception:
         logger.exception("❌ CRITICAL ERROR during XML parsing")
 
@@ -984,7 +980,8 @@ async def cmd_start_deep_link(msg: Message, command: CommandObject, state: FSMCo
     Handler for deep-links like: t.me/bot?start=order_test_12345__sku_1056
     """
     try:
-        args = (command.args or "").split("__")
+        # Розбираємо аргументи
+        args = (command.args or "").replace("order_", "").split("__")
         payload = {}
         for arg in args:
             if "=" in arg:
@@ -995,52 +992,72 @@ async def cmd_start_deep_link(msg: Message, command: CommandObject, state: FSMCo
                 if len(parts) > 1:
                     payload["sku"] = parts[-1]
         
-        logger.info("Start deep link: %s", command.args)
-        logger.info("Start deep link: %s", payload)
-
+        # Визначаємо, чи це тестовий режим (для адміна)
+        is_test_mode = "test" in command.args
+        
         sku = payload.get("sku")
         if sku:
-            # ВИПРАВЛЕНО: обробляємо список товарів
             product_group = find_product_by_sku(sku)
             if product_group:
-                # Беремо перший товар як основний для відображення
                 main_product = product_group[0]
                 
-                # Збираємо всі унікальні розміри з групи
-                sizes = sorted(list(set(p.get("sizes")[0] for p in product_group if p.get("sizes"))))
-
-                # Формуємо повідомлення
-                caption = (
-                    f"<b>{main_product['name']}</b>\n\n"
-                    f"Артикул: <code>{main_product['vendor_code']}</code>\n"
-                    f"Ціна: {main_product['drop_price']} грн"
-                )
+                # Готуємо опис: замінюємо <br /> на новий рядок
+                description = main_product.get("description", "").replace("<br />", "\n")
                 
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=size, callback_data=f"select_size:{p['offer_id']}")]
-                    for p in product_group if (size := (p.get("sizes")[0] if p.get("sizes") else None))
-                ] + [[InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")]])
+                # Розраховуємо ціни
+                drop_price = main_product.get("drop_price")
+                final_price = calculate_final_price(drop_price)
+
+                # Формуємо текст повідомлення
+                caption_lines = [
+                    f"<b>{main_product['name']}</b>",
+                    f"\nАртикул: <code>{main_product['vendor_code'] or sku}</code>",
+                    f"💰 Ціна: <b>{final_price} грн</b>"
+                ]
+                # Якщо тестовий режим, додаємо дроп-ціну
+                if is_test_mode:
+                    caption_lines.append(f"🤫 <i>Дроп: {drop_price} грн</i>")
+                
+                caption_lines.append(f"\n{description}")
+                
+                caption = "\n".join(caption_lines)
+
+                # Збираємо унікальні розміри з усієї групи товарів
+                sizes_with_offers = []
+                unique_sizes = set()
+                for p in product_group:
+                    for size in p.get("sizes", []):
+                        if size not in unique_sizes:
+                            sizes_with_offers.append({"size": size, "offer_id": p["offer_id"]})
+                            unique_sizes.add(size)
+
+                # Створюємо кнопки розмірів
+                kb_rows = []
+                # Створюємо до 3-х кнопок в одному ряду
+                chunk_size = 3
+                for i in range(0, len(sizes_with_offers), chunk_size):
+                    row = [
+                        InlineKeyboardButton(
+                            text=item["size"],
+                            callback_data=f"select_size:{item['offer_id']}"
+                        ) for item in sizes_with_offers[i:i + chunk_size]
+                    ]
+                    kb_rows.append(row)
+                
+                kb_rows.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")])
+                kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
                 if main_product.get("pictures"):
                     await msg.answer_photo(
                         photo=main_product["pictures"][0],
                         caption=caption,
-                        reply_markup=kb
+                        reply_markup=kb,
+                        parse_mode="HTML"
                     )
                 else:
-                    await msg.answer(caption, reply_markup=kb)
-
+                    await msg.answer(caption, reply_markup=kb, parse_mode="HTML")
             else:
                 await msg.answer(f"Товар з артикулом {sku} не знайдено.")
-        else:
-            await state.clear()
-            await msg.answer(
-                "Вітаю! 👋\n\n"
-                "Я — ваш бот-помічник для замовлень.\n"
-                "Ви можете знайти товар за артикулом або перейти на канал, щоб обрати.",
-                reply_markup=main_menu_keyboard() # Потрібно створити цю клавіатуру
-            )
-
     except Exception:
         logger.exception("Deep link processing error")
         await msg.answer("Помилка обробки запиту. Спробуйте ще раз.")
@@ -2258,6 +2275,18 @@ def aggressive_round(price: float) -> int:
     else:
         base = 100
     return int(math.ceil(p / base) * base)
+
+def calculate_final_price(drop_price: float) -> int:
+    """
+    Розраховує фінальну ціну для клієнта з націнкою 33% та округленням.
+    """
+    if not drop_price:
+        return 0
+    # Націнка +33%
+    with_markup = drop_price * 1.33
+    # Агресивне округлення (логіка з вашого файлу)
+    rounded_price = aggressive_round_up(with_markup)
+    return rounded_price
 
 # --- FSM: отримання артикулу або назви (updated: support component size selection) ---
 @router.message(Command("debug_find"))
@@ -3598,11 +3627,61 @@ async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
     await bot.send_message(cb.from_user.id, "✅ Замовлення відправлено. Очікуйте підтвердження.")
     await state.clear()
 
+# Обробник натискання на кнопку "Скасувати"
 @router.callback_query(F.data == "order:cancel")
-async def cb_order_cancel(cb: CallbackQuery, state: FSMContext):
+async def cancel_order_handler(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await cb.message.edit_text("Замовлення скасовано.")
+    await cb.message.edit_text("Замовлення скасовано. Ви можете почати спочатку.", reply_markup=main_menu_keyboard())
     await cb.answer()
+
+# Крок 1: Користувач натискає на кнопку з розміром
+@router.callback_query(F.data.startswith("select_size:"))
+async def select_size_handler(cb: CallbackQuery, state: FSMContext):
+    offer_id = cb.data.split(":")[1]
+    
+    # Знаходимо товар за offer_id в нашому індексі
+    product = PRODUCTS_INDEX["by_offer"].get(offer_id)
+    
+    if not product:
+        await cb.answer("Помилка, товар не знайдено. Спробуйте ще раз.", show_alert=True)
+        return
+        
+    # Зберігаємо обраний товар в стані FSM
+    await state.update_data(
+        selected_product_offer_id=offer_id,
+        product_name=product.get('name'),
+        product_vendor_code=product.get('vendor_code'),
+        product_size=product.get('sizes')[0] if product.get('sizes') else 'N/A',
+        drop_price=product.get('drop_price')
+    )
+    
+    # Переходимо до наступного кроку: введення кількості
+    await state.set_state(OrderForm.quantity)
+    
+    # Редагуємо повідомлення, щоб користувач бачив свій вибір
+    await cb.message.edit_caption(
+        caption=f"✅ Ви обрали: <b>{product.get('name')}</b>\n"
+                f"Розмір: <b>{product.get('sizes')[0] if product.get('sizes') else 'N/A'}</b>\n\n"
+                f"Тепер введіть кількість товару (наприклад, 1):",
+        parse_mode="HTML"
+    )
+    await cb.answer()
+
+# Крок 2: Користувач вводить кількість
+@router.message(OrderForm.quantity)
+async def get_quantity_handler(msg: Message, state: FSMContext):
+    # Перевіряємо, чи введено число
+    if not msg.text or not msg.text.isdigit() or int(msg.text) < 1:
+        await msg.answer("Будь ласка, введіть кількість у вигляді числа (наприклад: 1, 2, 3...)")
+        return
+        
+    quantity = int(msg.text)
+    # Зберігаємо кількість
+    await state.update_data(quantity=quantity)
+    
+    # Переходимо до наступного кроку
+    await state.set_state(OrderForm.full_name)
+    await msg.answer("Чудово! Тепер введіть ваше <b>Прізвище та Ім'я</b>:", parse_mode="HTML")
 
 @router.callback_query(F.data.startswith("article:confirm_exact"))
 async def cb_confirm_exact(call: CallbackQuery, state: FSMContext):
