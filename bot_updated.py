@@ -461,15 +461,10 @@ async def setup_commands():
 # ---------------- FSM ----------------
 class OrderForm(StatesGroup):
     quantity = State()
-    pib = State()
-    phone = State()
-    article = State()
-    size = State()
-    amount = State()
-    delivery = State()
-    address = State()
-    payment = State()
-    note = State()
+    full_name = State()
+    phone_number = State()
+    delivery_address = State()
+    comment = State()
     confirm = State()
 
 # ---------------- FSM States ----------------
@@ -1019,7 +1014,8 @@ async def cmd_start_deep_link(msg: Message, command: CommandObject, state: FSMCo
                 
                 caption = "\n".join(caption_lines)
 
-                # Збираємо унікальні розміри з усієї групи товарів
+# ... всередині cmd_start_deep_link ...
+# Збираємо унікальні розміри з усієї групи товарів
                 sizes_with_offers = []
                 unique_sizes = set()
                 for p in product_group:
@@ -1028,10 +1024,22 @@ async def cmd_start_deep_link(msg: Message, command: CommandObject, state: FSMCo
                             sizes_with_offers.append({"size": size, "offer_id": p["offer_id"]})
                             unique_sizes.add(size)
 
+                # Сортуємо розміри: спочатку числа, потім текст
+                def sort_key(item):
+                    size_str = item['size']
+                    # Витягуємо перше число з рядка, якщо воно є
+                    numeric_part = re.search(r'\d+', size_str)
+                    if numeric_part:
+                        return (0, int(numeric_part.group()))
+                    else:
+                        # Якщо чисел немає, сортуємо за текстом
+                        return (1, size_str)
+
+                sizes_with_offers.sort(key=sort_key)
+
                 # Створюємо кнопки розмірів
                 kb_rows = []
-                # Створюємо до 3-х кнопок в одному ряду
-                chunk_size = 3
+                chunk_size = 3 # Кількість кнопок в ряду
                 for i in range(0, len(sizes_with_offers), chunk_size):
                     row = [
                         InlineKeyboardButton(
@@ -1040,7 +1048,7 @@ async def cmd_start_deep_link(msg: Message, command: CommandObject, state: FSMCo
                         ) for item in sizes_with_offers[i:i + chunk_size]
                     ]
                     kb_rows.append(row)
-                
+
                 kb_rows.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")])
                 kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
@@ -3618,10 +3626,10 @@ async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "order:cancel")
 async def cancel_order_handler(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    # Замінюємо фото на текст і показуємо головне меню
-    await cb.message.edit_text(
+    await cb.message.delete()  # Видаляємо повідомлення з товаром
+    await cb.message.answer(
         "Замовлення скасовано. Ви можете почати пошук знову.",
-        reply_markup=main_menu_keyboard() # Клавіатура з кнопками "Пошук", "Канал"
+        reply_markup=main_menu_keyboard()
     )
     await cb.answer()
 
@@ -3632,23 +3640,21 @@ async def select_size_handler(cb: CallbackQuery, state: FSMContext):
     product = PRODUCTS_INDEX["by_offer"].get(offer_id)
     
     if not product:
-        await cb.answer("Помилка, товар не знайдено. Спробуйте ще раз.", show_alert=True)
+        await cb.answer("Помилка, товар не знайдено.", show_alert=True)
         return
         
-    # Зберігаємо тимчасову інформацію про обраний товар
     await state.update_data(
         current_offer_id=offer_id,
         current_name=product.get('name'),
         current_size=product.get('sizes')[0] if product.get('sizes') else 'N/A'
     )
-    
-    # Встановлюємо стан "очікування кількості"
     await state.set_state(OrderForm.quantity)
     
     await cb.message.edit_caption(
         caption=f"✅ Ви обрали: <b>{product.get('name')}</b> (Розмір: {product.get('sizes')[0]})\n\n"
                 f"Тепер введіть бажану кількість:",
-        parse_mode="HTML"
+        parse_mode="HTML",
+        reply_markup=None # Прибираємо кнопки розмірів
     )
     await cb.answer()
 
