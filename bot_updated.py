@@ -90,6 +90,7 @@ TEST_CHANNEL_URL = os.getenv("TEST_CHANNEL_URL")
 api_id = int(os.getenv("TG_API_ID", "0") or 0)
 api_hash = os.getenv("TG_API_HASH", "")
 SESSION_NAME = os.getenv("SESSION_NAME", "bot1")
+SUPPLIER_CHANNEL = os.getenv("SUPPLIER_CHANNEL")
 supplier_channel = os.getenv("SUPPLIER_CHANNEL")
 supplier_name = os.getenv("SUPPLIER_NAME", "Supplier")
 
@@ -288,6 +289,15 @@ def init_gcs():
     """Ініціалізує клієнт Google Cloud Storage, якщо потрібно."""
     if USE_GCS:
         try:
+            storage.Client()
+            logger.info("✅ GCS client initialized successfully.")
+        except Exception:
+            logger.exception("❌ GCS init failed")
+
+def init_gcs():
+    """Ініціалізує клієнт Google Cloud Storage, якщо потрібно."""
+    if USE_GCS:
+        try:
             # Створюємо клієнт. Якщо SERVICE_ACCOUNT_JSON є, він буде використаний.
             storage.Client()
             logger.info("✅ GCS client initialized successfully.")
@@ -319,7 +329,7 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
         TELETHON_CLIENT = TelegramClient(SESSION_NAME, api_id, api_hash, loop=loop)
         await TELETHON_CLIENT.start()
         TELETHON_STARTED = True
-        logger.info("Telethon client started; listening supplier channel: %s", SUPPLIER_CHANNEL)
+        logger.info("Telethon client started; listening supplier channel: %s", supplier_channel)
     except Exception:
         logger.exception("Failed to start Telethon client")
         return
@@ -441,7 +451,7 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
         except Exception:
             logger.exception("Telethon handler exception for supplier message")
 
-    logger.info("Telethon client listening configured for supplier channel.")
+    logger.info("Telethon client listening configured for SUPPLIER CHANNEL.")
 
 # ---------------- Aiogram bot ----------------
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -764,50 +774,6 @@ def format_product_message(product: dict, mode: str = "client", include_intro: b
         lines.append(f"💰 Ціна для клієнта: {final_price if final_price is not None else '—'} грн")
     return "\n".join(lines)
 
-# alias (якщо десь викликають render_product_text)
-def render_product_text(product: dict, mode: str = "client", include_intro: bool = True) -> str:
-    return format_product_message(product, mode=mode, include_intro=include_intro)
-
-# Wrapper для сумісності з ранішнім кодом
-def render_product_text(product: dict, mode: str = "client", include_intro: bool = True) -> str:
-    return format_product_message(product, mode=mode, include_intro=include_intro)
-
-# ---------------- Robust SKU search + product display ----------------
-async def display_product(callback: CallbackQuery, raw_sku: str, state: FSMContext):
-    """
-    Виводимо товар для вибору розміру і додавання в кошик.
-    Підтримуємо мульти-розміри, кнопки кошика та навігаційні кнопки.
-    """
-    products = find_product_by_sku(raw_sku)
-    if not products:
-        await callback.answer("⚠️ Товар не знайдено.", show_alert=True)
-        return
-
-    # вибираємо перший для тексту, якщо це група
-    product_text = render_product_text(products[0], mode="client")
-    kb = build_size_keyboard(products) if len(products) > 1 else InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Продовжити", callback_data=f"choose_size:{products[0]['offer_id']}:{products[0].get('param_name_Размер', '—')}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="flow:back_to_start")],
-        [InlineKeyboardButton(text="❌ Скасувати замовлення", callback_data="order:cancel")]
-    ])
-
-    # надсилаємо фото, якщо є
-    if products[0].get("pictures"):
-        await callback.message.answer_photo(
-            products[0]["pictures"][0],
-            caption=product_text,
-            reply_markup=kb
-        )
-    else:
-        await callback.message.answer(
-            product_text,
-            reply_markup=kb
-        )
-
-    # Зберігаємо стан для корзини
-    await state.update_data(last_products=products, last_selected_product=products[0])
-    await callback.answer()
-
 @router.message(CommandStart(deep_link=True))
 async def cmd_start_deep_link(msg: Message, command: CommandObject, state: FSMContext):
     """
@@ -1066,22 +1032,6 @@ async def start_checkout_handler(cb: CallbackQuery, state: FSMContext):
     await state.set_state(OrderForm.full_name)
     await cb.message.edit_text("Для оформлення замовлення, будь ласка, введіть ваше <b>Прізвище, Ім'я та По-батькові</b>:", parse_mode="HTML")
     await cb.answer()
-
-@router.callback_query(F.data == "flow:back_to_start")
-async def cb_flow_back(cb: CallbackQuery, state: FSMContext):
-    await state.clear()
-    await cb.message.answer("Повернулись на початок. Введіть артикул або натисніть кнопку Замовити під постом.", reply_markup=None)
-    await cb.answer()
-
-@router.callback_query(F.data.startswith("page:"))
-async def cb_find_page(query: CallbackQuery, state: FSMContext):
-    page = int(query.data.split(":")[1])
-    data = await state.get_data()
-    matches = data.get("find_results", [])
-
-    kb = paginate_products(matches, page)
-    await query.message.edit_reply_markup(reply_markup=kb)
-    await query.answer()
 
 @router.message(OrderForm.phone_number, F.text)
 async def process_phone_number_handler(message: Message, state: FSMContext):
@@ -1381,36 +1331,6 @@ async def cmd_debug_find(msg: Message):
     else:
         await msg.answer("Matches:\n\n" + "\n\n".join(found))
 
-# ---------------- Product rendering ----------------
-def render_product_text(product: dict, mode: str = "client", include_intro: bool = True) -> str:
-    sku_line = product.get("sku") or product.get("raw_sku") or "—"
-    name = product.get("name") or "—"
-    desc = product.get("description") or ""
-    sizes = product.get("param_name_Размер") or "—"
-    color = product.get("param_name_Цвет") or "—"
-    stock_qty = product.get("quantity_in_stock") or 0
-    stock_text = "Є ✅" if stock_qty > 0 else "Немає ❌"
-    drop_price = product.get("drop_price")
-    final_price = aggressive_round(drop_price * 1.33) if drop_price else None
-
-    lines = []
-    if include_intro:
-        lines.append("🧾 Розпочнемо оформлення. Ось вибраний товар:")
-    lines.append("✅ Знайдено товар:")
-    lines.append(f"📌 Артикул: {sku_line}")
-    lines.append(f"📛 Назва: {name}")
-    if desc:
-        lines.append(f"📝 Опис: {desc[:400]}{'...' if len(desc) > 400 else ''}")
-    lines.append(f"📏 Розмір: {sizes}")
-    lines.append(f"🎨 Колір: {color}")
-    lines.append(f"📦 Наявність: {stock_text} (кількість: {stock_qty})")
-    if mode == "test":
-        lines.append(f"💵 Дроп ціна: {drop_price if drop_price is not None else '—'} грн")
-        lines.append(f"💰 Орієнтовна ціна: {final_price if final_price is not None else '—'} грн")
-    else:
-        lines.append(f"💰 Ціна для клієнта: {final_price if final_price is not None else '—'} грн")
-    return "\n".join(lines)
-
 async def resolve_callback_chat_id(cb: CallbackQuery, state: Optional[FSMContext] = None) -> Optional[int]:
     """
     Безпечний спосіб дістати chat_id у callback'ах.
@@ -1567,281 +1487,6 @@ async def add_product_to_cart(state: FSMContext, product: Dict[str, Any], size_t
 
     return cart_obj
 
-@router.callback_query(F.data == "suggest:confirm")
-async def suggest_confirm(cb: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    last = data.get("last_suggestion")
-    if not last:
-        await cb.answer("Нема даних для підтвердження.")
-        return
-    # treat last as confirmed product
-    await state.update_data(article=last.get("sku") or last.get("offer_id"), product_name=last.get("name"), components=last.get("components"), price=last.get("final_price"), stock=last.get("stock"))
-    await cb.message.answer("✅ Товар підтверджено. Продовжимо оформлення.")
-    # продовжити: якщо є компоненти — показати перший, інакше запит кількості
-    comps = last.get("components") or []
-    if comps:
-        first = comps[0]
-        opts = first.get("options") or []
-        if opts:
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=str(opt), callback_data=f"size:0:{i}")] for i,opt in enumerate(opts)] + [[InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")]])
-            await cb.message.answer(f"📏 Виберіть розмір для: <b>{first['name']}</b>", reply_markup=kb)
-            await state.set_state(OrderForm.size)
-            await cb.answer()
-            return
-    # інакше — питати кількість
-    await cb.message.answer("👉 Введіть кількість товару (число):",
-    reply_markup=build_nav_kb()
-)
-    await state.set_state(OrderForm.quantity)
-    await cb.answer()
-
-@router.callback_query(F.data == "nav:enter_article")
-async def nav_enter_article(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(SearchState.waiting_for_input)
-    await cb.message.answer("🔍 Введіть артикул або назву товару для пошуку:")
-    await cb.answer()
-
-@router.callback_query(F.data == "nav:back_to_article")
-async def nav_back_to_article(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(SearchState.waiting_for_input)
-    await cb.message.answer("↩️ Повернулися — введіть артикул або назву товару:")
-    await cb.answer()
-
-# --- Confirm suggestion callback ---
-@router.callback_query(F.data == "product:confirm")
-async def cb_product_confirm(cb: CallbackQuery, state: FSMContext):
-    """
-    Підтвердження того, що suggestion — і починаємо стандартний flow як при точному збігу.
-    Беремо product з last_suggestion у state.
-    """
-    data = await state.get_data()
-    product = data.get("last_suggestion")
-    if not product:
-        await cb.answer("Нема запропонованого товару для підтвердження.")
-        return
-
-    # Позитив: зберігаємо у state як вибраний товар
-    await state.update_data(
-        article=product.get("sku"),
-        product_name=product.get("name"),
-        stock=product.get("stock"),
-        stock_qty=product.get("stock_qty"),
-        price=product.get("final_price"),
-        components=product.get("components") or []
-    )
-
-    # Видаляємо last_suggestion (необов'язково)
-    await state.remove_data("last_suggestion")
-
-    # Починаємо flow: якщо є components => size selection, інакше - quantity
-    components = product.get("components") or []
-    stock_text = product.get("stock_text") or product.get("stock") or "Немає"
-
-    if components:
-        await state.update_data(selected_sizes={})
-        comp0 = components[0]
-        opts = comp0.get("options") or []
-        if not opts:
-            await cb.message.answer(
-                f"✅ Підтверджено товар:\n"
-                f"🔖 <b>{product.get('name')}</b>\n"
-                f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
-                f"📦 Наявність: <b>{stock_text}</b>\n\n"
-                "👉 Введіть кількість товару (число):",
-    reply_markup=build_nav_kb()
-)
-            await state.set_state(OrderForm.quantity)
-            await cb.answer()
-            return
-        kb = build_size_keyboard(0, opts)
-        await cb.message.answer(
-            f"✅ Підтверджено товар:\n"
-            f"🔖 <b>{product.get('name')}</b>\n"
-            f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
-            f"📦 Наявність: <b>{stock_text}</b>\n\n"
-            f"📏 Виберіть розмір для: <b>{comp0.get('name')}</b>",
-            reply_markup=kb
-        )
-        await state.set_state(OrderForm.size)
-        await cb.answer()
-        return
-
-    # якщо немає компонентів
-    await cb.message.answer(
-        f"✅ Підтверджено товар:\n"
-        f"🔖 <b>{product.get('name')}</b>\n"
-        f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
-        f"📦 Наявність: <b>{stock_text}</b>\n"
-        f"💰 Ціна для клієнта: {product.get('final_price') or '—'} грн\n"
-        f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн\n\n"
-        "👉 Введіть кількість товару (число):",
-    reply_markup=build_nav_kb()
-)
-    await state.set_state(OrderForm.quantity)
-    await cb.answer()
-
-# --- manual search (перевести користувача на введення артикулу/назви) ---
-@router.callback_query(F.data == "flow:manual_search")
-async def cb_manual_search(cb: CallbackQuery, state: FSMContext):
-    await cb.message.answer("Введіть артикул або назву товару:")
-    await state.set_state(SearchState.waiting_for_input)
-    await cb.answer()
-
-# --- back navigation handler: callback_data = flow:back:<state_name> (e.g. flow:back:pib) ---
-@router.callback_query(F.data.startswith("flow:back:"))
-async def cb_flow_back(cb: CallbackQuery, state: FSMContext):
-    # розбираємо куди повертатися
-    try:
-        _, _, to = cb.data.split(":", 2)
-    except:
-        await cb.answer("Невірна команда повернення.")
-        return
-
-    if to == "pib":
-        await state.set_state(OrderForm.full_name)
-        await cb.message.answer("Повернулись.📝 Введіть ваше ПІБ:",
-    reply_markup=build_nav_kb()
-)
-    elif to == "phone":
-        await push_flow(state, OrderForm.phone_number)
-        await state.set_state(OrderForm.phone_number)
-        await cb.message.answer("Повернулись.📱 Введіть телефон:",
-    reply_markup=build_nav_kb()
-)
-    elif to == "article":
-        await state.set_state(SearchState.waiting_for_input)
-        await cb.message.answer("Повернулись. Введіть 🆔 артикул або  🔖 назву товару:",
-    reply_markup=build_nav_kb()
-)
-    elif to == "amount":
-        await state.set_state(OrderForm.quantity)
-        await cb.message.answer("Повернулись. Введіть кількість товару:",
-    reply_markup=build_nav_kb()
-)
-    else:
-        await state.set_state(SearchState.waiting_for_input)
-        await cb.message.answer("Повернулись. Введіть 🆔 артикул або  🔖 назву товару:",
-    reply_markup=build_nav_kb()
-)
-    await cb.answer()
-
-# --- Confirm suggestion callback ---
-@router.callback_query(F.data == "product:confirm")
-async def cb_product_confirm(cb: CallbackQuery, state: FSMContext):
-    """
-    Підтвердження того, що suggestion — і починаємо стандартний flow як при точному збігу.
-    Беремо product з last_suggestion у state.
-    """
-    data = await state.get_data()
-    product = data.get("last_suggestion")
-    if not product:
-        await cb.answer("Нема запропонованого товару для підтвердження.")
-        return
-
-    # Позитив: зберігаємо у state як вибраний товар
-    await state.update_data(
-        article=product.get("sku"),
-        product_name=product.get("name"),
-        stock=product.get("stock"),
-        stock_qty=product.get("stock_qty"),
-        price=product.get("final_price"),
-        components=product.get("components") or []
-    )
-
-    # Видаляємо last_suggestion (необов'язково)
-    await state.remove_data("last_suggestion")
-
-    # Починаємо flow: якщо є components => size selection, інакше - quantity
-    components = product.get("components") or []
-    stock_text = product.get("stock_text") or product.get("stock") or "Немає"
-
-    if components:
-        await state.update_data(selected_sizes={})
-        comp0 = components[0]
-        opts = comp0.get("options") or []
-        if not opts:
-            await cb.message.answer(
-                f"✅ Підтверджено товар:\n"
-                f"🔖 <b>{product.get('name')}</b>\n"
-                f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
-                f"📦 Наявність: <b>{stock_text}</b>\n\n"
-                "👉 Введіть кількість товару (число):",
-    reply_markup=build_nav_kb()
-)
-            await state.set_state(OrderForm.quantity)
-            await cb.answer()
-            return
-        kb = build_size_keyboard(0, opts)
-        await cb.message.answer(
-            f"✅ Підтверджено товар:\n"
-            f"🔖 <b>{product.get('name')}</b>\n"
-            f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
-            f"📦 Наявність: <b>{stock_text}</b>\n\n"
-            f"📏 Виберіть розмір для: <b>{comp0.get('name')}</b>",
-            reply_markup=kb
-        )
-        await state.set_state(OrderForm.size)
-        await cb.answer()
-        return
-
-    # якщо немає компонентів
-    await cb.message.answer(
-        f"✅ Підтверджено товар:\n"
-        f"🔖 <b>{product.get('name')}</b>\n"
-        f"🆔 Артикул: <b>{product.get('sku')}</b>\n"
-        f"📦 Наявність: <b>{stock_text}</b>\n"
-        f"💰 Ціна для клієнта: {product.get('final_price') or '—'} грн\n"
-        f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн\n\n"
-        "👉 Введіть кількість товару (число):",
-    reply_markup=build_nav_kb()
-)
-    await state.set_state(OrderForm.quantity)
-    await cb.answer()
-
-# --- manual search (перевести користувача на введення артикулу/назви) ---
-@router.callback_query(F.data == "flow:manual_search")
-async def cb_manual_search(cb: CallbackQuery, state: FSMContext):
-    await cb.message.answer("Введіть артикул або назву товару:")
-    await state.set_state(SearchState.waiting_for_input)
-    await cb.answer()
-
-# --- back navigation handler: callback_data = flow:back:<state_name> (e.g. flow:back:pib) ---
-@router.callback_query(F.data.startswith("flow:back:"))
-async def cb_flow_back(cb: CallbackQuery, state: FSMContext):
-    # розбираємо куди повертатися
-    try:
-        _, _, to = cb.data.split(":", 2)
-    except:
-        await cb.answer("Невірна команда повернення.")
-        return
-
-    if to == "pib":
-        await state.set_state(OrderForm.full_name)
-        await cb.message.answer("Повернулись.📝 Введіть ваше ПІБ:",
-    reply_markup=build_nav_kb()
-)
-    elif to == "phone":
-        await state.set_state(OrderForm.phone_number)
-        await cb.message.answer("Повернулись.📱 Введіть телефон:",
-    reply_markup=build_nav_kb()
-)
-    elif to == "article":
-        await state.set_state(SearchState.waiting_for_input)
-        await cb.message.answer("Повернулись. Введіть 🆔 артикул або  🔖 назву товару:",
-    reply_markup=build_nav_kb()
-)
-    elif to == "amount":
-        await state.set_state(OrderForm.quantity)
-        await cb.message.answer("Повернулись. Введіть кількість товару:",
-    reply_markup=build_nav_kb()
-)
-    else:
-        await state.set_state(SearchState.waiting_for_input)
-        await cb.message.answer("Повернулись. Введіть 🆔 артикул або  🔖 назву товару:",
-    reply_markup=build_nav_kb()
-)
-    await cb.answer()
-
 # --- Кількість товару ---
 @router.message(OrderForm.quantity)
 async def state_amount(msg: Message, state: FSMContext):
@@ -1898,134 +1543,6 @@ async def state_amount(msg: Message, state: FSMContext):
 
     # переходимо до вибору доставки (юзер може натиснути кнопку "Оберіть спосіб доставки")
     await state.set_state(OrderForm.delivery)
-
-# --- choose from channel / by name placeholders ---
-@router.callback_query(F.data == "choose:from_channel")
-async def cb_choose_from_channel(cb: CallbackQuery, state: FSMContext):
-    # Тут можна направити користувача у репостований канал або пояснити, як вибрати
-    await cb.message.answer("Щоб вибрати товар на каналі — відкрийте пост у каналі та натисніть кнопку «Замовити» під потрібним товаром. Якщо ви тут — можете обрати 'Вибрати товар по назві/артикулу'.")
-    await cb.answer()
-
-# --- cart open / clear / checkout ---
-@router.callback_query(F.data == "cart:open")
-async def cb_cart_open(cb: CallbackQuery):
-    chat_id = cb.message.chat.id
-    items = get_cart_items(chat_id)
-    text = format_cart_contents(items)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="cart:checkout")],
-        [InlineKeyboardButton(text="❌ Повністю скасувати замовлення", callback_data="cart:clear")],
-        [InlineKeyboardButton(text="↩️ Повернутись", callback_data="flow:back:article")]
-    ])
-    try:
-        await cb.message.answer(text, reply_markup=kb)
-    except Exception:
-        logger.exception("Failed to open cart for chat %s", chat_id)
-    await cb.answer()
-
-@router.callback_query(F.data == "cart:clear")
-async def cb_cart_clear(cb: CallbackQuery):
-    chat_id = cb.message.chat.id
-    clear_cart(chat_id)
-    # оновимо футер — видалимо або виведемо порожній
-    try:
-        await update_or_send_cart_footer(chat_id, bot)
-    except Exception:
-        pass
-    await cb.message.answer("🧾 Корзина очищена.")
-    await cb.answer()
-
-@router.callback_query(F.data == "cart:checkout")
-async def cb_cart_checkout(cb: CallbackQuery, state: FSMContext):
-    # переходимо до процесу оформлення (наприклад: вибір доставки)
-    # зберігаємо, що ми в режимі checkout
-    await state.update_data(checkout=True)
-    await cb.message.answer("Оформлення замовлення. Оберіть службу доставки:", reply_markup=delivery_keyboard())
-    await state.set_state(OrderForm.delivery)
-    await cb.answer()
-
-@router.callback_query(F.data == "flow:back:article")
-async def cb_flow_back_article(cb: CallbackQuery, state: FSMContext):
-    await cb.answer()
-    await cb.message.answer("Введіть артикул або назву товару:")
-    await state.set_state(SearchState.waiting_for_input)
-
-@router.callback_query(F.data == "flow:to:delivery")
-async def cb_flow_to_delivery(cb: CallbackQuery, state: FSMContext):
-    await cb.answer()
-    await cb.message.answer("Оберіть службу доставки:", reply_markup=delivery_keyboard())
-    await state.set_state(OrderForm.delivery)
-
-    # підсумок: показати та попросити обрати доставку/оплату (якщо ще не обрано)
-    text, total = await get_cart_summary(state)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оберіть службу доставки", callback_data="flow:delivery")],
-        [InlineKeyboardButton(text="Оберіть тип оплати", callback_data="flow:payment")],
-        [InlineKeyboardButton(text="Підтвердити і відправити замовлення (зараз)", callback_data="cart:confirm_send")],
-        [InlineKeyboardButton(text="Назад", callback_data="flow:back:article")],
-    ])
-    await cb.message.answer(text + f"\n\n🔢 Підсумок до оплати: {total} грн", reply_markup=kb)
-    await cb.answer()
-
-@router.callback_query(F.data == "cart:confirm_send")
-async def cb_cart_confirm_send(cb: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    cart = data.get("cart", [])
-    if not cart:
-        await cb.answer("Кошик порожній.")
-        return
-
-    # Формуємо payload для MyDrop/адміна
-    payload = {
-        "pib": data.get("pib"),
-        "phone": data.get("phone"),
-        "products": cart,
-        "delivery": data.get("delivery"),
-        "address": data.get("address"),
-        "payment": data.get("payment"),
-        "note": data.get("note"),
-        "mode": data.get("mode", "real")
-    }
-
-    # Якщо тестовий режим — НЕ відправляємо в MyDrop, а надсилаємо вам (ADMIN_ID) на перевірку
-    if data.get("mode") == "test":
-        await bot.send_message(ADMIN_ID, f"🧾 Тестове замовлення (на перевірку):\n{json.dumps(payload, ensure_ascii=False, indent=2)}")
-        await cb.message.answer("✅ Замовлення надіслано на перевірку адміністратору.")
-        # не очищаємо cart автоматично — чекаємо підтвердження адміном
-    else:
-        # відправка в MyDrop асинхронно
-        asyncio.create_task(create_mydrop_order(payload, notify_chat=ADMIN_ID))
-        await cb.message.answer("✅ Замовлення відправлено постачальнику (MyDrop).")
-        # очищаємо cart після відправки
-        await state.update_data(cart=[])
-
-    await cb.answer()
-
-# --- Обробники кнопок вибору наступного товару та корзини ---
-# --- choose from channel / by name placeholders ---
-@router.callback_query(F.data == "choose:from_channel")
-async def cb_choose_from_channel(cb: CallbackQuery, state: FSMContext):
-    # Тут можна направити користувача у репостований канал або пояснити, як вибрати
-    await cb.message.answer("Щоб вибрати товар на каналі — відкрийте пост у каналі та натисніть кнопку «Замовити» під потрібним товаром. Якщо ви тут — можете обрати 'Вибрати товар по назві/артикулу'.")
-    await cb.answer()
-
-@router.callback_query(F.data == "choose:by_name")
-async def cb_choose_by_name(cb: CallbackQuery, state: FSMContext):
-    await cb.message.answer("Введіть назву або артикул товару для пошуку:")
-    # Правильний стан:
-    await state.set_state(SearchState.waiting_for_input)
-    await cb.answer()
-
-# --- cart open / clear / checkout ---
-@router.callback_query(F.data == "cart:open")
-async def cb_cart_open(cb: CallbackQuery, state: FSMContext):
-    text, total = await get_cart_summary(state)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Оформити замовлення", callback_data="cart:checkout")],
-        [InlineKeyboardButton(text="❌ Повністю скасувати замовлення", callback_data="cart:clear")],
-    ])
-    await cb.message.answer(text, reply_markup=kb)
-    await cb.answer()
 
 # ---------------- Cart: clear ----------------
 @router.callback_query(F.data == "cart:clear")
@@ -2085,126 +1602,6 @@ def format_cart_contents(cart_items: List[Dict[str, Any]]) -> str:
     lines.append(f"\n💰 Загальна сума: {total} грн.")
     lines.append("\nДля повного скасування натисніть: ❌ Повністю скасувати замовлення")
     return "\n".join(lines)
-
-@router.callback_query(F.data == "cart:checkout")
-async def cb_cart_checkout(cb: CallbackQuery, state: FSMContext):
-    # Перевірка: є товари?
-    data = await state.get_data()
-    cart = data.get("cart", [])
-    if not cart:
-        await cb.answer("Кошик порожній.")
-        return
-
-    # підсумок: показати та попросити обрати доставку/оплату (якщо ще не обрано)
-    text, total = await get_cart_summary(state)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Оберіть службу доставки", callback_data="flow:delivery")],
-        [InlineKeyboardButton(text="Оберіть тип оплати", callback_data="flow:payment")],
-        [InlineKeyboardButton(text="Підтвердити і відправити замовлення (зараз)", callback_data="cart:confirm_send")],
-        [InlineKeyboardButton(text="Назад", callback_data="flow:back:article")],
-    ])
-    await cb.message.answer(text + f"\n\n🔢 Підсумок до оплати: {total} грн", reply_markup=kb)
-    await cb.answer()
-
-@router.callback_query(F.data == "cart:confirm_send")
-async def cb_cart_confirm_send(cb: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    cart = data.get("cart", [])
-    if not cart:
-        await cb.answer("Кошик порожній.")
-        return
-
-    # Формуємо payload для MyDrop/адміна
-    payload = {
-        "pib": data.get("pib"),
-        "phone": data.get("phone"),
-        "products": cart,
-        "delivery": data.get("delivery"),
-        "address": data.get("address"),
-        "payment": data.get("payment"),
-        "note": data.get("note"),
-        "mode": data.get("mode", "real")
-    }
-
-    # Якщо тестовий режим — НЕ відправляємо в MyDrop, а надсилаємо вам (ADMIN_ID) на перевірку
-    if data.get("mode") == "test":
-        await bot.send_message(ADMIN_ID, f"🧾 Тестове замовлення (на перевірку):\n{json.dumps(payload, ensure_ascii=False, indent=2)}")
-        await cb.message.answer("✅ Замовлення надіслано на перевірку адміністратору.")
-        # не очищаємо cart автоматично — чекаємо підтвердження адміном
-    else:
-        # відправка в MyDrop асинхронно
-        asyncio.create_task(create_mydrop_order(payload, notify_chat=ADMIN_ID))
-        await cb.message.answer("✅ Замовлення відправлено постачальнику (MyDrop).")
-        # очищаємо cart після відправки
-        await state.update_data(cart=[])
-
-    await cb.answer()
-
-# --- Підтвердження (оновлений — показує selected_sizes якщо є) ---
-@router.callback_query(F.data == "order:confirm")
-async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    mode = data.get("mode", "client")
-    selected_sizes = data.get("selected_sizes") or {}
-    if selected_sizes:
-        sizes_text = "; ".join([f"{k} — {v}" for k, v in selected_sizes.items()])
-    else:
-        sizes_text = data.get("size") or "—"
-
-    order_text = (
-        "📦 НОВЕ ЗАМОВЛЕННЯ\n\n"
-        f"👤 ПІБ: {data.get('pib')}\n"
-        f"📞 Телефон: {data.get('phone')}\n"
-        f"🔖 Товар: {data.get('product_name')} (SKU: {data.get('article')})\n"
-        f"📏 Розміри: {sizes_text}\n"
-        f"📦 Наявність: {data.get('stock')}\n"
-        f"🔢 Кількість: {data.get('amount', 1)} шт.\n"
-        f"🚚 Служба: {data.get('delivery')}\n"
-        f"📍 Адреса/відділення: {data.get('address')}\n"
-        f"💳 Тип оплати: {data.get('payment')}\n"
-        f"📝 Примітка: {data.get('note')}\n"
-        f"🕒 Час: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-    )
-
-    # показуємо підсумок користувачу
-    try:
-        await cb.message.edit_text(order_text, reply_markup=None)
-    except Exception:
-        await cb.message.answer(order_text)
-    await cb.answer()
-
-    # TEST mode: не відправляємо в MyDrop, а надсилаємо адміну для перевірки/підтвердження
-    if mode == "test":
-        payload_for_prefill = dict(data)
-        payload_for_prefill["selected_sizes"] = selected_sizes
-        # формуємо посилання для відкриття у MyDrop (наприклад)
-        link = f"https://mydrop.com.ua/orders/new?prefill={json.dumps(payload_for_prefill, ensure_ascii=False)}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Відкрити форму MyDrop (prefill)", url=link)]
-        ])
-        # Надсилаємо адміну повний текст для перевірки + посилання на prefill
-        await bot.send_message(REVIEW_CHAT, f"🛠 Перевірка замовлення (TEST MODE):\n\n{order_text}", reply_markup=kb)
-        # повідомляємо користувачу
-        await bot.send_message(cb.from_user.id, "✅ Замовлення надіслано адміністратору для перевірки. Ви отримаєте відповідь незабаром.")
-        # Очистити state (але зберегти, якщо потрібно)
-        await state.clear()
-        return
-
-    # CLIENT mode: створюємо замовлення в MyDrop як раніше (фонова задача)
-    payload = dict(data)
-    payload["selected_sizes"] = selected_sizes
-    asyncio.create_task(create_mydrop_order(payload, notify_chat=ADMIN_ID))
-    await bot.send_message(cb.from_user.id, "✅ Замовлення відправлено. Очікуйте підтвердження.")
-    await state.clear()
-
-# Обробник для кнопки "Додати ще товар"
-@router.callback_query(F.data == "add_more_items")
-async def add_more_items_handler(cb: CallbackQuery, state: FSMContext):
-    await cb.message.edit_text(
-        "Ви можете знайти товар за артикулом або перейти на канал.",
-        reply_markup=main_menu_keyboard()
-    )
-    await cb.answer()
     
 @router.message(OrderForm.confirm)
 async def state_confirm(msg: Message, state: FSMContext):
@@ -2242,58 +1639,6 @@ async def state_confirm(msg: Message, state: FSMContext):
         await msg.answer_photo(product["pictures"][0], caption=summary, reply_markup=kb)
     else:
         await msg.answer(summary, reply_markup=kb)
-
-@router.callback_query(F.data == "confirm:ok")
-async def cb_confirm_ok(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-
-    # TODO: інтеграція з MyDrop (або тестовий лог для початку)
-    logger.info("✅ Замовлення підтверджено: %s", data)
-
-    await call.message.answer("✅ Дякуємо! Ваше замовлення прийнято.")
-    await state.clear()
-
-@router.callback_query(F.data == "article:confirm_exact")
-async def cb_article_confirm_exact(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    data = await state.get_data()
-    product = data.get("last_suggestion") or data.get("last_product")
-    if not product:
-        await call.message.answer("Нема товару для підтвердження.")
-        return
-
-    sizes = product.get("sizes") or []
-    if sizes:
-        # показати вибір розміру
-        buttons = [[InlineKeyboardButton(text=size, callback_data=f"choose_size:{product['sku']}:{size}")] for size in sizes]
-        buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="flow:back_to_start")])
-        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await call.message.answer("Оберіть розмір:", reply_markup=kb)
-        await state.update_data(last_product=product)
-        await state.set_state(OrderForm.size)
-    else:
-        # без розмірів — питаємо кількість
-        await call.message.answer("👉 Введіть кількість товару (число):", reply_markup=build_nav_kb())
-        await state.update_data(last_product=product)
-        await state.set_state(OrderForm.quantity)
-
-@router.callback_query(F.data == "flow:back_to_start")
-async def cb_back_to_start(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    prev = await pop_flow(state)
-    if prev:
-        # prev — це ім'я стану, встановлюємо його
-        await state.set_state(prev)
-        await call.message.answer("Повертаюсь назад...")
-    else:
-        await call.message.answer("Нема куди повертатися — починаємо спочатку.")
-        await state.clear()
-
-@router.callback_query(F.data == "flow:cancel_order")
-async def cb_cancel_order(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    await state.clear()
-    await call.message.answer("❌ Замовлення скасовано. Якщо бажаєте — почніть знову /start.")
 
 # ---------------- MyDrop integration ----------------
 async def create_mydrop_order(payload: Dict[str, Any], notify_chat: Optional[int] = None):
