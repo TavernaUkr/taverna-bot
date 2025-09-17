@@ -708,39 +708,6 @@ async def ensure_or_update_cart_footer(chat_id: int, user_id: int, bot_instance:
 send_or_update_cart_footer = ensure_or_update_cart_footer
 update_or_send_cart_footer = ensure_or_update_cart_footer
 
-# ---------------- Routers / Handlers ----------------
-# --- Replace all other CommandStart handlers with this single unified handler ---
-async def _present_product_and_ask_confirm(msg: Message, state: FSMContext, product: Dict[str, Any]):
-    await state.update_data(last_found_product=product, article=product.get("sku") or product.get("sku") or "")
-    # спробуємо надіслати перше фото (якщо є)
-    pic = product.get("picture") or product.get("image") or product.get("images") or None
-    caption = (
-        f"🔖 <b>{product.get('name') or 'Товар'}</b>\n"
-        f"🆔 Артикул: <b>{product.get('sku') or '-'}</b>\n"
-        f"📦 Наявність: <b>{product.get('stock') or '—'}</b>\n"
-        f"💰 Орієнтовна ціна (з націнкою): {product.get('final_price') or '—'} грн\n"
-        f"💵 Дроп ціна: {product.get('drop_price') or '—'} грн\n"
-    )
-    kb = build_nav_kb(extra_buttons=[
-        [InlineKeyboardButton("✅ Підтвердити", callback_data="article:confirm")]
-])
-    if pic:
-        try:
-            # якщо picture - list, візьмемо перший
-            if isinstance(pic, (list, tuple)) and pic:
-                pic_url = pic[0]
-            else:
-                pic_url = pic
-            await msg.answer_photo(photo=pic_url, caption=caption, parse_mode=ParseMode.HTML, reply_markup=kb)
-        except Exception:
-            # fallback на текстове повідомлення
-            await msg.answer(caption, parse_mode=ParseMode.HTML, reply_markup=kb)
-    else:
-        await msg.answer(caption, parse_mode=ParseMode.HTML, reply_markup=kb)
-
-    await state.set_state(SearchState.waiting_for_input)
-    return
-
 def format_currency(value: Optional[float]) -> str:
     if value is None:
         return "— грн"
@@ -1215,69 +1182,20 @@ async def cmd_refresh_cache(msg: Message):
     else:
         await msg.answer("⚠️ Помилка при оновленні кешу. Перевір логи.")
 
-# --- FSM: отримання ПІБ ---
-@router.message(OrderForm.full_name)
-async def process_full_name(message: Message, state: FSMContext):
-    text = (msg.text or "").strip()
-    # Якщо користувач відповідає "так" — можлива автоматична підтверджена перестановка
-    if text.lower() == "так":
-        data = await state.get_data()
-        suggested = data.get("pib_suggestion")
-        if suggested:
-            # приймаємо запропоновану перестановку
-            await state.update_data(pib=suggested)
-            await state.remove_data("pib_suggestion")
-            await msg.answer(f"✅ ПІБ прийнято: {suggested}")
-            await msg.answer("Введіть телефон\n(У форматі: +38(0ХХ)ХХХ ХХ ХХ , 38(0ХХ)ХХХ ХХ ХХ , (0ХХ)ХХХ ХХ ХХ):")
-            await push_flow(state, OrderForm.phone_number)
-            await state.set_state(OrderForm.phone_number)
-            return
-        else:
-            await msg.answer("Нема збереженої пропозиції для підтвердження. Будь ласка, введіть ПІБ у форматі: Прізвище Ім'я По-батькові.")
-            return
-
-    parts = text.split()
-    if len(parts) != 3:
-        await msg.answer("❌ Введіть повністю ваше ПІБ -\n(У форматі: Прізвище Ім'я По-батькові - 3 слова):")
+@router.message(OrderForm.full_name, F.text)
+async def process_full_name_handler(message: Message, state: FSMContext):
+    # Тут використовується ваша потужна логіка валідації!
+    is_valid, error_message = validate_pib(message.text)
+    if not is_valid:
+        await message.answer(error_message)
         return
 
-    # перевіряємо, чи всі частини написані кирилицею / містять принаймні 2 символи
-    if not all(is_cyrillic_word(p) for p in parts):
-        await msg.answer("❌ Кожна частина ПІБ має бути українськими літерами (дозволені дефіси та апостроф).\nСпробуйте ще раз.")
-        return
+    # Робимо перші літери великими
+    full_name = " ".join([p.strip().capitalize() for p in message.text.strip().split()])
 
-    # якщо третя частина має суфікс по-батькові — приймаємо
-    if looks_like_patronymic(parts[2]):
-        # приймаємо як валідний ПІБ
-        normalized = " ".join([p.strip().title() for p in parts])
-        await state.update_data(pib=normalized)
-        await msg.answer(
-    "📱 Введіть ваш номер телефону\n(У форматі: +38(0ХХ)ХХХ ХХ ХХ , 38(0ХХ)ХХХ ХХ ХХ , (0ХХ)ХХХ ХХ ХХ):",
-    reply_markup=build_nav_kb()
-)
-        await push_flow(state, OrderForm.phone_number)
-        await state.set_state(OrderForm.phone_number)
-        return
-
-    # якщо третя НЕ виглядає як по-батькові, спробуємо запропонувати перестановку, якщо є ознаки по-батькові в іншому місці
-    suggested = suggest_reorder_pib(parts)
-    if suggested:
-        # збережемо пропозицію в state та запропонуємо підтвердження
-        await state.update_data(pib_suggestion=suggested)
-        await msg.answer(
-            f"⚠️ Схоже, по-батькові не на третьому місці.\n"
-            f"Ви ввели: <b>{text}</b>\n"
-            f"Можливо ви мали на увазі: <b>{suggested}</b>\n"
-            "Якщо це вірно — напишіть «так», і я збережу ПІБ. Інакше введіть ПІБ у форматі Прізвище Ім'я По-батькові."
-        )
-        return
-
-    # якщо не змогли нічого запропонувати — попросимо переформулювати
-    await msg.answer(
-        "❌ Третя частина не схожа на по-батькові. Будь ласка, введіть ПІБ у форматі: Прізвище Ім'я По-батькові.\n"
-        "Приклад: Петренко Іван Олександрович"
-    )
-    return
+    await state.update_data(full_name=full_name)
+    await state.set_state(OrderForm.phone_number)
+    await message.answer("Дякую. Тепер введіть ваш номер телефону:")
 
 # --- Телефон (validated) ---
 # Мобільні та стаціонарні коди — можна доповнювати в разі потреби
@@ -1463,222 +1381,6 @@ def parse_components_from_description(desc: str):
         if opts:
             out.append({"name": key, "options": sorted(set(opts), key=lambda x: x)})
     return out if out else None
-
-async def check_article_or_name(query: str) -> Optional[Dict[str, Any]]:
-    """
-    Fast search using PRODUCTS_INDEX if available; otherwise fallback to iterparse.
-    Returns product dict or None.
-    """
-    q = str(query or "").strip()
-    if not q:
-        return None
-    qlow = q.lower().strip()
-
-    # ensure we have index
-    if not find_product_by_sku("all_products"):
-        text = await load_products_export(force=False)
-        if not text:
-            return None
-
-    # 1) exact offer_id match
-    prod = PRODUCTS_INDEX["by_offer"].get(qlow)
-    if prod:
-        return prod
-
-    # 2. точний пошук по SKU (враховуємо 0999 vs 999)
-    candidates = [qlow]
-    if qlow.isdigit():
-        candidates.append(qlow.lstrip("0"))  # "0999" -> "999"
-    for cand in candidates:
-        prod = PRODUCTS_INDEX["by_sku"].get(cand)
-        if prod:
-            return prod
-
-    # 3) numeric query -> try sku by stripped numeric
-    if re.fullmatch(r"\d{2,}", qlow):
-        # try zero-padded / same
-        k = qlow.lstrip("0")
-        for candidate in (qlow, k):
-            p = PRODUCTS_INDEX["by_sku"].get(candidate)
-            if p:
-                return p
-
-    # 4) name exact or substring search: attempt token matching
-    qtokens = re.findall(r"[0-9A-Za-z\u0400-\u04FF\-\+]{2,}", qlow)
-    if qtokens:
-        # try to find products that contain all tokens (intersection)
-        sets = []
-        for t in qtokens:
-            s = PRODUCTS_INDEX["by_name"].get(t)
-            if s:
-                sets.append(s)
-        if sets:
-            # intersection of token sets (convert to sku keys)
-            candidates = None
-            for s in sets:
-                if candidates is None:
-                    candidates = set(s)
-                else:
-                    candidates &= set(s)
-            # build candidate list of product dicts
-            if candidates:
-                # find first candidate product in by_sku/by_offer
-                for key in candidates:
-                    # key might be sku or offer or name token; try lookup
-                    p = PRODUCTS_INDEX["by_sku"].get(key) or PRODUCTS_INDEX["by_offer"].get(key)
-                    if p:
-                        # mark as suggestion if not exact
-                        if qlow in (p.get("name","").lower(), p.get("sku","").lower(), p.get("offer_id","").lower()):
-                            p["suggestion"] = False
-                        else:
-                            p["suggestion"] = True
-                        return p
-
-    # 5) fallback: full-text scan of name substrings (cheap)
-    qshort = qlow
-    for p in PRODUCTS_INDEX["all_products"]:
-        name = (p.get("name") or "").lower()
-        if qshort == name or (qshort in name and len(qshort) >= 3):
-            p["suggestion"] = True if qshort not in (p.get("sku","").lower(), p.get("offer_id","").lower()) else False
-            return p
-
-    # 6) last resort: try heavy iterparse as before (copy previous behavior)
-    try:
-        text = PRODUCTS_CACHE.get("data")
-        if not text:
-            text = await load_products_export()
-            if not text:
-                return None
-        it = ET.iterparse(io.StringIO(text), events=("end",))
-        for event, elem in it:
-            tag = _local_tag(elem.tag).lower()
-            if not (tag.endswith("offer") or tag.endswith("item") or tag.endswith("product")):
-                elem.clear()
-                continue
-            offer_id = (elem.attrib.get("id") or "").strip()
-            name = _find_first_text(elem, ["name", "title", "product", "model"]) or ""
-            vendor_code = _find_first_text(elem, ["vendorcode", "vendor_code", "vendorCode", "sku", "articul", "article", "code"]) or ""
-            if not vendor_code:
-                v = elem.find("vendorCode")
-                if v is not None and v.text:
-                    vendor_code = v.text.strip()
-            searchable = " ".join([offer_id.lower(), vendor_code.lower(), name.lower()])
-            if qlow in searchable and len(qlow) >= 2:
-                # use existing parsing within this block to assemble product dict
-                # (for brevity, re-use small subset)
-                drop_price = _find_first_numeric(elem, ["price", "cost", "drop", "drop_price"])
-                retail_price = _find_first_numeric(elem, ["rrc", "retail", "oldprice"])
-                stock_qty = None
-                qtxt = _find_first_text(elem, ["quantity_in_stock", "quantity", "stock_qty", "stock", "available_quantity", "count", "amount"])
-                if qtxt:
-                    qd = re.findall(r'\d+', qtxt.replace(" ", ""))
-                    if qd:
-                        try: stock_qty = int(qd[0])
-                        except: stock_qty = None
-                p = {
-                  "name": name, "sku": vendor_code or offer_id,
-                  "offer_id": offer_id,
-                  "drop_price": float(drop_price) if drop_price is not None else None,
-                  "retail_price": float(retail_price) if retail_price is not None else None,
-                  "final_price": apply_markup(drop_price) if drop_price is not None else None,
-                  "stock_text": None, "stock_qty": stock_qty
-                }
-                elem.clear()
-                p["suggestion"] = True
-                return p
-            elem.clear()
-    except Exception:
-        logger.exception("fallback iterparse failed in check_article_or_name")
-
-    return None
-
-# ---------------- Helpers: component size search ----------------
-COMPONENT_KEYWORDS = ["шап", "шапка", "рукав", "рукави", "рукавиц", "рукавич", "баф", "балаклав", "комплект"]
-
-async def show_product_and_ask_quantity(msg: Message, state: FSMContext, product: Dict[str, Any]):
-    """
-    Показує фото, назву товару, ціни (дроп і з націнкою),
-    доступні розміри або запитує кількість.
-    Зберігає у state базову інформацію про product.
-    """
-    # збережемо в state основні поля
-    await state.update_data(
-        article=product.get("sku"),
-        product_name=product.get("name"),
-        stock=product.get("stock_text"),
-        stock_qty=product.get("stock_qty"),
-        price=product.get("final_price"),
-        components=product.get("components")
-    )
-
-    # визначимо режим
-    sdata = await state.get_data()
-    mode = sdata.get("mode", "client")
-
-    def _price_block(prod):
-        drop_price = prod.get("drop_price")
-        final_price = prod.get("final_price") or (apply_markup(drop_price) if drop_price else None)
-
-        if mode == "test":
-            return (
-                f"💰 Орієнтовна ціна (з націнкою): {final_price or '—'} грн\n"
-                f"💵 Дроп ціна: {drop_price or '—'} грн\n"
-            )
-        else:
-            return f"💰 Ціна для клієнта: {final_price or '—'} грн\n"
-
-    # Надішлемо фото, якщо є
-    pic = product.get("picture")
-    try:
-        if pic:
-            pic_url = pic[0] if isinstance(pic, (list, tuple)) else pic
-            await bot.send_photo(
-                msg.chat.id,
-                photo=pic_url,
-                caption=(
-                    f"📌 <b>{product.get('name') or 'Товар'}</b>\n"
-                    f"🆔 Артикул: <b>{product.get('sku') or '—'}</b>"
-                ),
-                parse_mode=ParseMode.HTML
-            )
-    except Exception:
-        pass  # якщо не вдалось фото — ігноруєм
-
-    stock_text = product.get("stock_text") or "—"
-    components = product.get("components")
-    sizes = product.get("sizes") or []
-
-    # Якщо є компоненти (наприклад, розміри з опціями)
-    if components:
-        first = components[0]
-        opts = first.get("options") or []
-        if opts:
-            kb = build_size_keyboard(0, opts)
-            await msg.answer(
-                f"✅ Знайдено товар:\n"
-                f"📌 <b>{product.get('name')}</b>\n"
-                f"🆔 Артикул: <b>{product.get('sku') or '—'}</b>\n"
-                f"📦 Наявність: <b>{stock_text}</b>\n"
-                f"{_price_block(product)}\n"
-                f"📏 Виберіть розмір для: <b>{first.get('name') or 'Розмір'}</b>",
-                reply_markup=kb
-            )
-            await state.set_state(OrderForm.size)
-            return
-
-    # Якщо немає компонентів — просто показуємо і просимо кількість
-    sizes_text = f"\n📏 Розміри: {', '.join(sizes)}" if sizes else ""
-    await msg.answer(
-        f"✅ Знайдено товар:\n"
-        f"📌 <b>{product.get('name')}</b>\n"
-        f"🆔 Артикул: <b>{product.get('sku') or '—'}</b>\n"
-        f"📦 Наявність: <b>{stock_text}</b>\n"
-        f"{_price_block(product)}"
-        f"{sizes_text}\n\n"
-        "👉 Введіть кількість товару (число):",
-    reply_markup=build_nav_kb()
-)
-    await state.set_state(OrderForm.quantity)
 
 async def find_component_sizes(product_name: str) -> Dict[str, List[str]]:
     """
@@ -3242,39 +2944,32 @@ def run_flask():
 
 # ---------------- Main ----------------
 async def main():
-    global bot, dp
-    
-    # Спочатку ініціалізуємо хмарні сервіси
+    global bot, dp, ASYNC_LOOP
+    ASYNC_LOOP = asyncio.get_running_loop()
+
     try:
-        if USE_GDRIVE:
-            await init_gdrive() # <--- ВИПРАВЛЕНО: Додано await
-        if USE_GCS:
-            init_gcs()
+        if USE_GDRIVE: await init_gdrive()
+        if USE_GCS: init_gcs()
     except Exception:
         logger.exception("Failed to initialize cloud storage services.")
 
-    # Налаштовуємо бота та диспетчер
     storage = MemoryStorage()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=storage)
     dp.include_router(router)
 
-    # Запускаємо Telethon клієнт у фоновому режимі
     if TG_API_ID and TG_API_HASH:
-        asyncio.create_task(run_telethon_client())
+        asyncio.create_task(start_telethon_client(ASYNC_LOOP))
 
-    # Запускаємо веб-сервер для вебхуків
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 8080))), daemon=True).start()
-    
-    # Встановлюємо вебхук
+
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     logger.info("Bot started and webhook is set.")
-    
-    # Одразу завантажуємо товари в кеш
+
     await refresh_products_cache_on_startup()
-    
-    # Тримаємо програму живою
+    await setup_commands()
+
     await asyncio.Event().wait()
     
     # ---------------- start Telethon ----------------
