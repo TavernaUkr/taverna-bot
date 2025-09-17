@@ -2966,51 +2966,6 @@ async def cb_cart_confirm_send(cb: CallbackQuery, state: FSMContext):
 
     await cb.answer()
 
-# --- Доставка ---
-@router.callback_query(F.data.startswith("delivery:"))
-async def cb_delivery(cb: CallbackQuery, state: FSMContext):
-    delivery = cb.data.split(":")[1]
-    await state.update_data(delivery=delivery)
-    if delivery == "np":
-        await cb.message.answer("Введіть місто для доставки (Нова Пошта):")
-        await state.set_state(OrderForm.address)
-    else:
-        await msg.answer("📍 Введіть адресу або відділення служби доставки:", reply_markup=build_nav_kb())
-        await state.set_state(OrderForm.address)
-    await cb.answer()
-
-@router.message(OrderForm.address)
-async def state_address(msg: Message, state: FSMContext):
-    await state.update_data(address=msg.text)
-    await msg.answer("Оберіть тип оплати:", reply_markup=payment_keyboard())
-    await state.set_state(OrderForm.payment)
-
-# --- Оплата ---
-@router.callback_query(F.data.startswith("pay:"))
-async def cb_payment(cb: CallbackQuery, state: FSMContext):
-    payment = cb.data.split(":")[1]
-    await state.update_data(payment=payment)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("Оплата при отриманні", callback_data="payment:cod")],
-        [InlineKeyboardButton("Передплата на карту", callback_data="payment:prepay")],
-] + build_nav_kb().inline_keyboard)
-    await msg.answer("💳 Оберіть спосіб оплати:", reply_markup=kb)
-    await state.set_state(OrderForm.note)
-    await cb.answer()
-
-# --- Примітка ---
-@router.message(OrderForm.note)
-async def state_note(msg: Message, state: FSMContext):
-    note = msg.text.strip()
-    await state.update_data(note=note)
-    await msg.answer(
-    "📝 Додайте примітку до замовлення\n(або натисніть 'Пропустити'):",
-    reply_markup=build_nav_kb(extra_buttons=[
-        [InlineKeyboardButton("⏭ Пропустити", callback_data="notes:skip")]
-    ])
-)
-    await state.set_state(OrderForm.confirm)
-
 # --- Підтвердження (оновлений — показує selected_sizes якщо є) ---
 @router.callback_query(F.data == "order:confirm")
 async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
