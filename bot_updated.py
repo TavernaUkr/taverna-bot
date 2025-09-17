@@ -160,17 +160,12 @@ def build_products_index_from_xml(text: str):
         for _, elem in it:
             if elem.tag == 'offer':
                 offer_id = elem.attrib.get("id", "").strip()
-                
                 name_tag = elem.find('name')
                 name = name_tag.text.strip() if name_tag is not None and name_tag.text else ""
-                
                 price_tag = elem.find('price')
                 price_txt = price_tag.text.strip() if price_tag is not None and price_tag.text else "0"
-                try:
-                    drop_price = float(price_txt)
-                except (ValueError, TypeError):
-                    drop_price = None
-
+                try: drop_price = float(price_txt)
+                except (ValueError, TypeError): drop_price = None
                 vendor_code_tag = elem.find('vendorCode')
                 vendor_code = vendor_code_tag.text.strip() if vendor_code_tag is not None and vendor_code_tag.text else ""
 
@@ -195,8 +190,7 @@ def build_products_index_from_xml(text: str):
 
                 keys_to_index = {offer_id, vendor_code, normalize_sku(vendor_code), normalize_sku(offer_id)}
                 for key in keys_to_index:
-                    if key:
-                        PRODUCTS_INDEX["by_sku"][key].append(product)
+                    if key: PRODUCTS_INDEX["by_sku"][key].append(product)
                 
                 product_count += 1
                 elem.clear()
@@ -3631,38 +3625,36 @@ async def cb_order_confirm(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "order:cancel")
 async def cancel_order_handler(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await cb.message.edit_text("Замовлення скасовано. Ви можете почати спочатку.", reply_markup=main_menu_keyboard())
+    # Замінюємо фото на текст і показуємо головне меню
+    await cb.message.edit_text(
+        "Замовлення скасовано. Ви можете почати пошук знову.",
+        reply_markup=main_menu_keyboard() # Клавіатура з кнопками "Пошук", "Канал"
+    )
     await cb.answer()
 
 # Крок 1: Користувач натискає на кнопку з розміром
 @router.callback_query(F.data.startswith("select_size:"))
 async def select_size_handler(cb: CallbackQuery, state: FSMContext):
     offer_id = cb.data.split(":")[1]
-    
-    # Знаходимо товар за offer_id в нашому індексі
     product = PRODUCTS_INDEX["by_offer"].get(offer_id)
     
     if not product:
         await cb.answer("Помилка, товар не знайдено. Спробуйте ще раз.", show_alert=True)
         return
         
-    # Зберігаємо обраний товар в стані FSM
+    # Зберігаємо тимчасову інформацію про обраний товар
     await state.update_data(
-        selected_product_offer_id=offer_id,
-        product_name=product.get('name'),
-        product_vendor_code=product.get('vendor_code'),
-        product_size=product.get('sizes')[0] if product.get('sizes') else 'N/A',
-        drop_price=product.get('drop_price')
+        current_offer_id=offer_id,
+        current_name=product.get('name'),
+        current_size=product.get('sizes')[0] if product.get('sizes') else 'N/A'
     )
     
-    # Переходимо до наступного кроку: введення кількості
+    # Встановлюємо стан "очікування кількості"
     await state.set_state(OrderForm.quantity)
     
-    # Редагуємо повідомлення, щоб користувач бачив свій вибір
     await cb.message.edit_caption(
-        caption=f"✅ Ви обрали: <b>{product.get('name')}</b>\n"
-                f"Розмір: <b>{product.get('sizes')[0] if product.get('sizes') else 'N/A'}</b>\n\n"
-                f"Тепер введіть кількість товару (наприклад, 1):",
+        caption=f"✅ Ви обрали: <b>{product.get('name')}</b> (Розмір: {product.get('sizes')[0]})\n\n"
+                f"Тепер введіть бажану кількість:",
         parse_mode="HTML"
     )
     await cb.answer()
@@ -3670,63 +3662,60 @@ async def select_size_handler(cb: CallbackQuery, state: FSMContext):
 # Крок 2: Користувач вводить кількість
 @router.message(OrderForm.quantity)
 async def get_quantity_handler(msg: Message, state: FSMContext):
-    # Перевіряємо, чи введено число
     if not msg.text or not msg.text.isdigit() or int(msg.text) < 1:
-        await msg.answer("Будь ласка, введіть кількість у вигляді числа (наприклад: 1, 2, 3...)")
+        await msg.answer("Будь ласка, введіть кількість у вигляді числа (наприклад: 1).")
         return
         
     quantity = int(msg.text)
-    # Зберігаємо кількість
-    await state.update_data(quantity=quantity)
+    user_data = await state.get_data()
+    offer_id = user_data.get('current_offer_id')
+    product = PRODUCTS_INDEX["by_offer"].get(offer_id)
+
+    # Завантажуємо кошик користувача
+    cart = await load_cart(msg.from_user.id)
     
-    # Переходимо до наступного кроку
-    await state.set_state(OrderForm.full_name)
-    await msg.answer("Чудово! Тепер введіть ваше <b>Прізвище та Ім'я</b>:", parse_mode="HTML")
+    # Створюємо унікальний ключ для товару в кошику (offer_id)
+    cart_item_key = str(offer_id)
+    
+    # Додаємо або оновлюємо товар в кошику
+    cart[cart_item_key] = {
+        "name": product.get("name"),
+        "vendor_code": product.get("vendor_code"),
+        "size": product.get("sizes")[0] if product.get("sizes") else 'N/A',
+        "quantity": quantity,
+        "drop_price": product.get("drop_price"),
+        "offer_id": offer_id
+    }
+    
+    # Зберігаємо оновлений кошик
+    await save_cart(msg.from_user.id, cart)
+    
+    # Очищуємо стан FSM
+    await state.clear()
+    
+    # Повідомляємо користувача та пропонуємо подальші дії
+    await msg.answer(
+        f"✅ Товар «<b>{product.get('name')}</b>» (Розмір: {product.get('sizes')[0]}, Кількість: {quantity}) додано до кошика.\n\n"
+        f"<i>Ваш кошик буде активний протягом 20 хвилин.</i>",
+        parse_mode="HTML",
+        reply_markup=cart_menu_keyboard() # Клавіатура з кнопками "Перейти в кошик", "Додати ще товар"
+    )
 
-@router.callback_query(F.data.startswith("article:confirm_exact"))
-async def cb_confirm_exact(call: CallbackQuery, state: FSMContext):
-    """
-    Обробка підтвердження товару після точного пошуку.
-    Якщо є розміри → показуємо вибір розміру.
-    Якщо немає → одразу питаємо кількість.
-    """
-    data = await state.get_data()
-    product = data.get("last_product")
+# Допоміжна функція для клавіатури кошика
+def cart_menu_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Перейти в кошик", callback_data="show_cart")],
+        [InlineKeyboardButton(text="➕ Додати ще товар", callback_data="add_more_items")]
+    ])
 
-    if not product:
-        await call.answer("⚠️ Продукт не знайдено у стані. Почніть заново.", show_alert=True)
-        await state.set_state(OrderForm.article)
-        return
-
-    # --- підготовка тексту ---
-    mode = data.get("mode", "client")
-    text = format_product_message(product, mode=mode, include_intro=True)
-
-    sizes = product.get("sizes") or []
-    if sizes:
-        # будуємо клавіатуру з кнопками розмірів
-        buttons = [[InlineKeyboardButton(text=size,
-                                         callback_data=f"choose_size:{product['sku']}:{size}")]
-                   for size in sizes]
-        buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="flow:back_to_start")])
-        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-
-        if product.get("pictures"):
-            await call.message.answer_photo(product["pictures"][0], caption=text, reply_markup=kb)
-        else:
-            await call.message.answer(text, reply_markup=kb)
-
-        await state.set_state(OrderForm.size)
-    else:
-        # якщо немає розмірів → одразу питаємо кількість
-        if product.get("pictures"):
-            await call.message.answer_photo(product["pictures"][0], caption=text)
-        else:
-            await call.message.answer(text)
-
-        await state.set_state(OrderForm.amount)
-
-    await call.answer()
+# Обробник для кнопки "Додати ще товар"
+@router.callback_query(F.data == "add_more_items")
+async def add_more_items_handler(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text(
+        "Ви можете знайти товар за артикулом або перейти на канал.",
+        reply_markup=main_menu_keyboard()
+    )
+    await cb.answer()
 
 @router.message(OrderForm.confirm)
 async def state_confirm(msg: Message, state: FSMContext):
