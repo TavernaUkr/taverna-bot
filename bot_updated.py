@@ -1640,8 +1640,8 @@ async def cmd_refresh_cache(msg: Message):
         await msg.answer("⚠️ Помилка при оновленні кешу. Перевір логи.")
 
 # --- FSM: отримання ПІБ ---
-@router.message(OrderForm.pib)
-async def state_pib(msg: Message, state: FSMContext):
+@router.message(OrderForm.full_name)
+async def process_full_name(message: Message, state: FSMContext):
     text = (msg.text or "").strip()
     # Якщо користувач відповідає "так" — можлива автоматична підтверджена перестановка
     if text.lower() == "так":
@@ -4036,27 +4036,40 @@ def run_flask():
 
 # ---------------- Main ----------------
 async def main():
-    global ASYNC_LOOP, WEBHOOK_URL
-    ASYNC_LOOP = asyncio.get_running_loop()
+    global bot, dp
     
-    # Запускаємо Flask healthcheck/webhook endpoint в окремому потоці
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("Flask thread started (healthcheck + webhook endpoint).")
-
-    # Спроба виклику startup() dispatcher'а — сумісно з різними версіями aiogram
+    # Ініціалізуємо всі сервіси асинхронно
     try:
-        if hasattr(dp, "startup"):
-            startup = getattr(dp, "startup")
-            if asyncio.iscoroutinefunction(startup):
-                await startup()
-            else:
-                startup()
-            logger.info("Dispatcher startup() executed (if available).")
-        else:
-            logger.info("Dispatcher has no startup() method — skipping warmup.")
+        if USE_GDRIVE:
+            await init_gdrive()
+        if USE_GCS:
+            init_gcs()
     except Exception:
-        logger.exception("Dispatcher warmup failed (non-fatal).")
+        logger.exception("Failed to initialize cloud storage services.")
+
+    storage = MemoryStorage()
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher(storage=storage)
+    dp.include_router(router)
+
+    # Запускаємо Telethon клієнт у фоні
+    if TG_API_ID and TG_API_HASH:
+        asyncio.create_task(run_telethon_client())
+
+    # Запускаємо веб-сервер
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 8080))), daemon=True).start()
+    
+    # Видаляємо старі вебхуки та встановлюємо новий
+    await bot.delete_webhook(drop_pending_updates=True)
+    await bot.set_webhook(WEBHOOK_URL)
+    
+    logger.info("Bot started and webhook is set.")
+    
+    # Запускаємо початкове завантаження кешу
+    await refresh_products_cache_on_startup()
+    
+    # Тримаємо основний процес живим
+    await asyncio.Event().wait()
     
     # ---------------- start Telethon ----------------
     try:
