@@ -1274,7 +1274,7 @@ def calculate_final_price(drop_price: float) -> int:
         [InlineKeyboardButton(text="🔎 Ввести артикул/назву", callback_data="flow:back:article")],
         [InlineKeyboardButton(text="🚚 Обрати спосіб доставки / Перейти до оплати", callback_data="flow:to:delivery")]
     ])
-    await msg.answer("✅ Товар додано до корзини.\nЩо бажаєте зробити далі?", reply_markup=kb)
+        await msg.answer("✅ Товар додано до корзини.\nЩо бажаєте зробити далі?", reply_markup=kb)
 
     # Залишаємо у state лише інфо про користувача (pib, phone), видаляємо тимчасові product-поля
     keep = {k: v for k, v in (await state.get_data()).items() if k in ("pib", "phone", "mode")}
