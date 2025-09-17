@@ -2438,7 +2438,7 @@ async def cb_choose_size(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # ---------------- Обробка введеної кількості ----------------
-@router.message(OrderForm.amount)
+@router.message(OrderForm.quantity)
 async def amount_entered(msg: Message, state: FSMContext):
     data = await state.get_data()
     selected_product = data.get("last_selected_product")
@@ -3967,7 +3967,7 @@ async def main():
     # Спочатку ініціалізуємо хмарні сервіси
     try:
         if USE_GDRIVE:
-            await init_gdrive() # <--- Додаємо await
+            await init_gdrive() # <--- ВИПРАВЛЕНО: Додано await
         if USE_GCS:
             init_gcs()
     except Exception:
