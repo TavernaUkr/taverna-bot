@@ -1718,7 +1718,7 @@ VALID_LANDLINE_CODES = {
     "0312","0372","0342","0622"
 }
 
-@router.message(OrderForm.phone)
+@router.message(OrderForm.phone_number)
 async def state_phone(msg: Message, state: FSMContext):
     phone = msg.text.strip()
     digits = None
@@ -4038,37 +4038,37 @@ def run_flask():
 async def main():
     global bot, dp
     
-    # Ініціалізуємо всі сервіси асинхронно
+    # Спочатку ініціалізуємо хмарні сервіси
     try:
         if USE_GDRIVE:
-            await init_gdrive()
+            await init_gdrive() # <--- Додаємо await
         if USE_GCS:
             init_gcs()
     except Exception:
         logger.exception("Failed to initialize cloud storage services.")
 
+    # Налаштовуємо бота та диспетчер
     storage = MemoryStorage()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=storage)
     dp.include_router(router)
 
-    # Запускаємо Telethon клієнт у фоні
+    # Запускаємо Telethon клієнт у фоновому режимі
     if TG_API_ID and TG_API_HASH:
         asyncio.create_task(run_telethon_client())
 
-    # Запускаємо веб-сервер
+    # Запускаємо веб-сервер для вебхуків
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 8080))), daemon=True).start()
     
-    # Видаляємо старі вебхуки та встановлюємо новий
+    # Встановлюємо вебхук
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
-    
     logger.info("Bot started and webhook is set.")
     
-    # Запускаємо початкове завантаження кешу
+    # Одразу завантажуємо товари в кеш
     await refresh_products_cache_on_startup()
     
-    # Тримаємо основний процес живим
+    # Тримаємо програму живою
     await asyncio.Event().wait()
     
     # ---------------- start Telethon ----------------
