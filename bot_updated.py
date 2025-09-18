@@ -212,22 +212,18 @@ def build_products_index_from_xml(text: str):
     """
     global PRODUCTS_INDEX
     PRODUCTS_INDEX = {
-        "all_products": [], "by_sku": defaultdict(list),
+        "all_products": [], 
+        "by_sku": defaultdict(list),
+        "by_offer": {} # <-- ДОДАНО ІНДЕКС ЗА OFFER_ID
     }
     try:
-        # Використовуємо ітеративний парсинг для великих файлів
         it = ET.iterparse(io.StringIO(text), events=("end",))
-        
         product_count = 0
         for _, elem in it:
-            # Обробляємо тільки теги <offer>, щоб уникнути сміття
             if elem.tag == 'offer':
-                # --- Прямий та надійний парсинг ключових полів ---
                 offer_id = elem.attrib.get("id", "").strip()
-                
                 name_tag = elem.find('name')
                 name = name_tag.text.strip() if name_tag is not None and name_tag.text else ""
-                
                 price_tag = elem.find('price')
                 price_txt = price_tag.text.strip() if price_tag is not None and price_tag.text else "0"
                 try:
@@ -238,35 +234,31 @@ def build_products_index_from_xml(text: str):
                 vendor_code_tag = elem.find('vendorCode')
                 vendor_code = vendor_code_tag.text.strip() if vendor_code_tag is not None and vendor_code_tag.text else ""
 
-                # Пропускаємо товари, які не мають ключових даних для продажу
                 if not offer_id or not name or not drop_price:
                     elem.clear()
                     continue
                 
-                # --- Парсинг додаткових полів ---
                 description_tag = elem.find('description')
                 description = description_tag.text.strip() if description_tag is not None and description_tag.text else ""
                 pictures = [pic.text.strip() for pic in elem.findall('picture') if pic.text]
                 sizes = [p.text.strip() for p in elem.findall('param') if p.attrib.get('name', '').lower() in ('размер', 'розмір', 'size') and p.text]
 
-                # --- Створення та індексація товару ---
                 product = {
                     "offer_id": offer_id, "vendor_code": vendor_code, "name": name,
                     "description": description, "pictures": pictures, "sizes": sizes, "drop_price": drop_price,
                 }
                 PRODUCTS_INDEX["all_products"].append(product)
+                PRODUCTS_INDEX["by_offer"][offer_id] = product # <-- ДОДАНО ІНДЕКСАЦІЮ
 
-                # Індексуємо за всіма можливими ключами
                 keys_to_index = {offer_id, vendor_code, normalize_sku(vendor_code), normalize_sku(offer_id)}
                 for key in keys_to_index:
                     if key:
                         PRODUCTS_INDEX["by_sku"][key].append(product)
                 
                 product_count += 1
-                elem.clear() # Очищуємо пам'ять
+                elem.clear()
         
         logger.info(f"✅ Product index built: {product_count} products total.")
-
     except Exception:
         logger.exception("❌ CRITICAL ERROR during XML parsing")
 
@@ -1160,77 +1152,42 @@ async def cmd_start_deep_link(msg: Message, command: CommandObject, state: FSMCo
 async def cmd_start_show_sku(msg: Message, command: CommandObject, state: FSMContext):
     """
     Обробник для deep-link'ів з каналу: t.me/bot?start=show_sku_...
-    Миттєво показує картку товару для вибору розміру.
+    Миттєво показує повну картку товару та сортовані розміри.
     """
     try:
-        args = command.args.split('_')
-        raw_sku = args[2] # Беремо артикул з "show_sku_ARTYKUL"
+        args_part = command.args.replace("show_sku_", "")
+        raw_sku = args_part.split('_from_')[0]
         
         logger.info(f"Deep link 'show_sku' активовано. Артикул: {raw_sku}")
         
         products = find_product_by_sku(raw_sku)
         if not products:
-            await msg.answer(f"На жаль, товар з артикулом `{raw_sku}` не знайдено. Можливо, він закінчився.")
+            await msg.answer(f"На жаль, товар з артикулом `{raw_sku}` не знайдено.")
             return
 
-        main_product = products[0]
-        
         # --- ФОРМУЄМО КАРТКУ ТОВАРУ ---
-        caption_lines = [
-            f"📦 <b>{main_product.get('name', 'Назва не вказана')}</b>",
-            f"Артикул: <code>{main_product.get('vendor_code', raw_sku)}</code>"
-        ]
+        text_card = format_product_card(products[0], msg.from_user.id)
         
-        drop_price = main_product.get("drop_price")
-        if drop_price:
-            final_price = aggressive_round(float(drop_price) * 1.33)
-            caption_lines.append(f"Ціна: <b>{final_price} грн</b>")
-
-        caption = "\n".join(caption_lines)
-        
-        # --- КЛАВІАТУРА З РОЗМІРАМИ ---
-        size_buttons = []
-        # Групуємо товари по розміру
-        offers_with_sizes = {}
-        for p in products:
-            size = p.get("sizes")[0] if p.get("sizes") else None
-            if size:
-                offers_with_sizes[size] = p.get("offer_id")
-
-        for size, offer_id in offers_with_sizes.items():
-            size_buttons.append(
-                InlineKeyboardButton(text=size, callback_data=f"select_size:{offer_id}")
-            )
-        
-        # Розділяємо кнопки по 4 в ряд для компактності
-        kb_rows = [size_buttons[i:i + 4] for i in range(0, len(size_buttons), 4)]
-
         # --- КНОПКА ПОВЕРНЕННЯ ---
-        # Витягуємо посилання на пост, якщо воно є
-        if "_from_" in command.args:
+        back_url = None
+        if "_from_" in args_part:
             from urllib.parse import unquote
-            post_link_encoded = command.args.split('_from_')[1]
-            post_link = unquote(post_link_encoded)
-            kb_rows.append([InlineKeyboardButton(text="⬅️ Повернутись на канал", url=post_link)])
+            post_link_encoded = args_part.split('_from_')[1]
+            back_url = unquote(post_link_encoded)
 
-        kb_rows.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")])
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+        # --- КЛАВІАТУРА З РОЗМІРАМИ ---
+        keyboard = build_sorted_size_keyboard(products, back_url)
         
         # --- ВІДПРАВКА ---
-        pictures = main_product.get("pictures")
+        pictures = products[0].get("pictures")
         if pictures:
-            await msg.answer_photo(
-                photo=pictures[0],
-                caption=caption,
-                reply_markup=keyboard
-            )
+            await msg.answer_photo(photo=pictures[0], caption=text_card, reply_markup=keyboard)
         else:
-            await msg.answer(caption, reply_markup=keyboard)
+            await msg.answer(text_card, reply_markup=keyboard)
             
     except Exception:
         logger.exception("Помилка обробки deep-link 'show_sku'")
-        await msg.answer("Сталася помилка. Спробуйте перейти на канал та натиснути кнопку ще раз.")
+        await msg.answer("Сталася помилка. Спробуйте ще раз.")
 
 # ---------------- Command: /find ----------------
 RESULTS_PER_PAGE = 10
@@ -1706,7 +1663,6 @@ async def cmd_publish_test(msg: Message):
         await msg.answer("⚠️ TEST_CHANNEL не встановлений у .env")
         return
 
-    # Тестовий текст поста
     text = (
         "🧪 Тестовий пост для перевірки товару:\n\n"
         "👕 Гольф чорний\n"
@@ -1714,44 +1670,26 @@ async def cmd_publish_test(msg: Message):
         "💵 Ціна: 350 грн\n"
         "📏 Доступні розміри: 46–64"
     )
-
-    # Кнопка "Замовити" з deep-link, що веде на товар у боті
     deep_link_url = f"https://t.me/{BOT_USERNAME}?start=show_sku_1056"
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Замовити (Тест)", url=deep_link_url)]
-        ]
-    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Замовити (Тест)", url=deep_link_url)]])
 
     try:
-        # Публікуємо у канал
         sent_message = await bot.send_message(chat_id=TEST_CHANNEL, text=text, reply_markup=kb, parse_mode="HTML")
         
-        # --- ПОКРАЩЕННЯ: Створюємо посилання на пост та відправляємо адміну ---
-        channel_username = str(TEST_CHANNEL) # Для приватних каналів використовуємо ID
-        if sent_message.chat.username:
-             channel_username = sent_message.chat.username
-
-        post_url = f"https://t.me/{channel_username}/{sent_message.message_id}"
+        # --- ПОКРАЩЕННЯ: Правильне посилання для приватних каналів ---
+        # Видаляємо префікс -100 для формування посилання
+        channel_id_for_link = str(sent_message.chat.id).replace("-100", "")
+        post_url = f"https://t.me/c/{channel_id_for_link}/{sent_message.message_id}"
         
-        admin_kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🚀 Переглянути тестовий пост", url=post_url)]
-            ]
-        )
+        admin_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Переглянути тестовий пост", url=post_url)]])
         await msg.answer("✅ Тестовий пост опубліковано.", reply_markup=admin_kb)
 
     except Exception as e:
         logger.exception("Помилка публікації тестового поста в канал")
         fallback_kb = None
         if TEST_CHANNEL_URL:
-            fallback_kb = InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="📢 Відкрити канал вручну", url=TEST_CHANNEL_URL)]]
-            )
-        await msg.answer(
-            f"⚠️ Помилка при публікації: {e}",
-            reply_markup=fallback_kb
-        )
+            fallback_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="📢 Відкрити канал вручну", url=TEST_CHANNEL_URL)]])
+        await msg.answer(f"⚠️ Помилка при публікації: {e}", reply_markup=fallback_kb)
 
 # ---------------- Refresh Cache ----------------
 @router.message(Command("refresh_cache"))
@@ -2418,6 +2356,76 @@ def aggressive_round(price: float) -> int:
     else:
         base = 100
     return int(math.ceil(p / base) * base)
+
+def format_product_card(product: dict, user_id: int) -> str:
+    """Формує повний текст картки товару."""
+    name = product.get('name', 'Назва не вказана')
+    vendor_code = product.get('vendor_code', 'не вказано')
+    description = product.get('description', 'Опис відсутній.')
+    drop_price = product.get('drop_price')
+
+    # Формуємо блок з ціною
+    price_block = []
+    if drop_price:
+        final_price = aggressive_round(float(drop_price) * 1.33)
+        price_block.append(f"<b>💰 Ціна: {final_price} грн</b>")
+        # Якщо це адмін, показуємо дроп ціну
+        if user_id == ADMIN_ID:
+            price_block.append(f"<i>(Дроп: {drop_price} грн)</i>")
+    
+    text_parts = [
+        f"<b>{name}</b>\n",
+        f"<b>Артикул:</b> <code>{vendor_code}</code>\n",
+        "\n".join(price_block),
+        "\n" + "-"*20 + "\n",
+        f"<b>Опис:</b>\n{description}"
+    ]
+    return "\n".join(text_parts)
+
+def build_sorted_size_keyboard(products: list, back_url: str = None) -> InlineKeyboardMarkup:
+    """Створює клавіатуру розмірів у 3 колонки, відсортовану."""
+    offers_with_sizes = {}
+    for p in products:
+        size = p.get("sizes")[0] if p.get("sizes") else None
+        if size:
+            offers_with_sizes[size] = p.get("offer_id")
+
+    # Розділяємо розміри на числові та текстові
+    numeric_sizes = []
+    text_sizes = []
+    for size, offer_id in offers_with_sizes.items():
+        # Спроба витягти перше число з розміру для сортування (напр. з "40-41" беремо 40)
+        numeric_part_match = re.match(r'^\d+', size)
+        if numeric_part_match:
+            numeric_sizes.append((int(numeric_part_match.group(0)), size, offer_id))
+        else:
+            text_sizes.append((size, offer_id))
+    
+    # Сортуємо
+    numeric_sizes.sort()
+    text_sizes.sort()
+
+    sorted_sizes = [item[1:] for item in numeric_sizes] + text_sizes
+
+    # Розкладаємо по 3 колонках
+    buttons = [InlineKeyboardButton(text=size, callback_data=f"select_size:{offer_id}") for size, offer_id in sorted_sizes]
+    
+    kb_rows = []
+    num_buttons = len(buttons)
+    num_rows = (num_buttons + 2) // 3
+    for i in range(num_rows):
+        row = []
+        if i < num_buttons: row.append(buttons[i])
+        if i + num_rows < num_buttons: row.append(buttons[i + num_rows])
+        if i + 2 * num_rows < num_buttons: row.append(buttons[i + 2 * num_rows])
+        if row: kb_rows.append(row)
+
+    # Додаємо кнопки навігації
+    if back_url:
+        kb_rows.append([InlineKeyboardButton(text="⬅️ Повернутись на канал", url=back_url)])
+    kb_rows.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")])
+    
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 # --- FSM: отримання артикулу або назви (updated: support component size selection) ---
 @router.message(Command("debug_find"))
