@@ -42,6 +42,7 @@ from googleapiclient.http import MediaFileUpload
 from html import unescape
 import tempfile
 import google.generativeai as genai
+import random
 
 
 # ---------------- КРОК 1: Ініціалізація базових додатків ----------------
@@ -82,6 +83,7 @@ TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 REVIEW_CHAT = int(os.getenv("REVIEW_CHAT", str(ADMIN_ID)))
+POSTED_IDS_FILE_PATH = os.getenv("POSTED_IDS_FILE_PATH", "posted_ids.txt")
 
 
 # ---------------- КРОК 3: Функція для логування змінних ----------------
@@ -97,7 +99,7 @@ def check_env_vars():
         "TG_API_ID", "TG_API_HASH", "SESSION_NAME", "SUPPLIER_CHANNEL", "SUPPLIER_NAME",
         "MYDROP_API_KEY", "MYDROP_EXPORT_URL", "MYDROP_ORDERS_URL",
         "SERVICE_ACCOUNT_JSON", "USE_GDRIVE", "GDRIVE_FOLDER_ID", 
-        "GDRIVE_ORDERS_FOLDER_NAME", "GEMINI_API_KEY", "WEBHOOK_URL"
+        "GDRIVE_ORDERS_FOLDER_NAME", "GEMINI_API_KEY", "WEBHOOK_URL", "POSTED_IDS_FILE_PATH"
     ]
     for var in env_vars:
         value = os.getenv(var)
@@ -363,6 +365,74 @@ def gdrive_find_or_create_folder(folder_name: str, parent_folder_id: str):
         logger.exception(f"❌ Помилка під час пошуку/створення папки '{folder_name}'")
         return None
 
+# --- Робота з базою даних опублікованих постів ---
+POSTED_IDS = set()
+
+def load_posted_ids():
+    """Завантажує ID вже опублікованих постів з файлу в пам'ять."""
+    global POSTED_IDS
+    try:
+        if os.path.exists(POSTED_IDS_FILE_PATH):
+            with open(POSTED_IDS_FILE_PATH, "r") as f:
+                POSTED_IDS = {line.strip() for line in f if line.strip()}
+            logger.info(f"Завантажено {len(POSTED_IDS)} ID опублікованих постів.")
+    except Exception as e:
+        logger.error(f"Помилка завантаження файлу posted_ids: {e}")
+
+def save_posted_id(post_id: str):
+    """Додає ID нового поста в файл та в кеш у пам'яті."""
+    if post_id not in POSTED_IDS:
+        POSTED_IDS.add(post_id)
+        try:
+            with open(POSTED_IDS_FILE_PATH, "a") as f:
+                f.write(f"{post_id}\n")
+        except Exception as e:
+            logger.error(f"Помилка збереження ID поста {post_id} у файл: {e}")
+
+async def random_post_scheduler():
+    """
+    Фонова задача, яка раз у випадковий проміжок часу постить старий,
+    унікальний пост з каналу постачальника.
+    """
+    await asyncio.sleep(60) # Початкова затримка, щоб бот встиг повністю запуститись
+    logger.info("🚀 Запущено планувальник випадкових постів.")
+
+    while True:
+        try:
+            # 1. Випадкова затримка
+            delay = random.uniform(5 * 60, 30 * 60) # від 5 до 30 хвилин
+            logger.info(f"Планувальник: наступний запуск через {delay/60:.2f} хв.")
+            await asyncio.sleep(delay)
+
+            if not TELETHON_CLIENT or not TELETHON_CLIENT.is_connected():
+                logger.warning("Планувальник: Telethon client не готовий, пропуск ітерації.")
+                continue
+
+            # 2. Отримуємо загальну кількість повідомлень у каналі
+            entity = await TELETHON_CLIENT.get_entity(SUPPLIER_CHANNEL)
+            total_messages = (await TELETHON_CLIENT.get_messages(entity, limit=0)).total
+
+            # 3. Шукаємо випадковий унікальний пост (максимум 20 спроб)
+            for _ in range(20):
+                random_offset = random.randint(0, total_messages - 1)
+                messages = await TELETHON_CLIENT.get_messages(entity, limit=1, offset_id=random_offset)
+                
+                if not messages:
+                    continue
+
+                msg = messages[0]
+                unique_post_id = f"{msg.chat_id}_{msg.id}"
+
+                if unique_post_id not in POSTED_IDS:
+                    logger.info(f"Планувальник: знайдено унікальний старий пост ID: {msg.id}. Обробка...")
+                    # Викликаємо існуючий обробник для обробки цього повідомлення
+                    await supplier_msg_handler(msg.buttons_event if hasattr(msg, 'buttons_event') else msg.message_event if hasattr(msg, 'message_event') else type('obj', (object,), {'message': msg, 'chat_id': msg.chat_id})())
+                    break # Виходимо з циклу пошуку
+            
+        except Exception as e:
+            logger.exception(f"Помилка в планувальнику випадкових постів: {e}")
+            await asyncio.sleep(60) # У разі помилки, чекаємо хвилину
+
 # ---------------- Telethon: supplier -> repost to MAIN_CHANNEL with deep-link ----------------
 # матчери для артикулу в тексті поста
 SKU_REGEX = re.compile(r'(?:артикул|арт\.|артікул|sku|код|vendorCode|vendor_code)[^\d\-:]*([0-9A-Za-z\-\_]{2,30})', flags=re.I)
@@ -384,10 +454,7 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
         return
 
     try:
-        # --- ВИПРАВЛЕНО: Використовуємо глобальні змінні TG_API_ID та TG_API_HASH ---
         TELETHON_CLIENT = TelegramClient(SESSION_NAME, TG_API_ID, TG_API_HASH, loop=loop)
-        # --- КІНЕЦЬ ВИПРАВЛЕННЯ ---
-        
         await TELETHON_CLIENT.start()
         TELETHON_STARTED = True
         logger.info("Telethon client started; listening supplier channel: %s", SUPPLIER_CHANNEL)
@@ -397,11 +464,28 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
 
     @TELETHON_CLIENT.on(events.NewMessage(chats=[SUPPLIER_CHANNEL, TEST_CHANNEL]))
     async def supplier_msg_handler(event: events.NewMessage.Event):
+        try:
+            msg = event.message
+            unique_post_id = f"{msg.chat_id}_{msg.id}"
+            is_new_message = unique_post_id not in POSTED_IDS # Визначаємо, чи це справді новий пост
+
+            # Якщо це новий пост - робимо випадкову затримку
+            if is_new_message:
+                delay = random.uniform(1 * 60, 20 * 60) # від 1 до 20 хвилин
+                logger.info(f"Отримано новий пост {unique_post_id}. Затримка перед постингом: {delay/60:.2f} хв.")
+                await asyncio.sleep(delay)
+
+            # Перевіряємо ще раз, на випадок якщо планувальник опублікував його, поки ми "спали"
+            if unique_post_id in POSTED_IDS:
+                logger.info(f"Пост {unique_post_id} вже було опубліковано. Пропуск.")
+                return
+
         # ... (весь код всередині цього обробника залишається БЕЗ ЗМІН) ...
         try:
             msg = event.message
             text = (msg.message or "") if hasattr(msg, "message") else (msg.raw_text or "")
             is_test_mode = event.chat_id == TEST_CHANNEL
+
 
             if not text and not getattr(msg, "media", None): return
             sku_found = None
@@ -475,6 +559,8 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
                 new_deep_link_url = f"https://t.me/{BOT_USERNAME}?start=show_sku_{vendor_code}_from_{encoded_post_link}"
                 new_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Замовити", url=new_deep_link_url)]])
                 await bot.edit_message_reply_markup(chat_id=target_channel, message_id=sent_message.message_id, reply_markup=new_kb)
+            save_posted_id(unique_post_id)
+            logger.info(f"Пост {unique_post_id} успішно оброблено та додано до бази даних.")
 
         except Exception:
             logger.exception("Telethon handler exception for supplier message")
@@ -1607,9 +1693,35 @@ async def finalize_order(msg: Message, state: FSMContext):
 
     # 4. Відправка на MyDrop API та повідомлення адміну (цей блок залишається)
     try:
-        # ... (тут логіка відправки на MyDrop та адміну, вона залишається без змін) ...
-        # Наприклад:
-        # asyncio.create_task(create_mydrop_order(order_payload, notify_chat=ADMIN_ID))
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "X-API-KEY": os.getenv("MYDROP_API_KEY"),
+                "Content-Type": "application/json"
+            }
+            async with session.post(
+                MYDROP_ORDERS_URL,
+                json=order,
+                headers=headers
+            ) as resp:
+                response = await resp.text()
+                await msg.answer(f"📡 Відповідь від MyDrop:\n{response}")
+    except Exception as e:
+        await msg.answer(f"⚠️ Помилка при відправці на MyDrop API: {e}")
+
+    # 🔹 Повідомлення адміну з файлом замовлення
+    admin_id = os.getenv("ADMIN_CHAT_ID")
+    if admin_id:
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=f"🆕 Нове замовлення #{order_file.stem}\nВід {order['name']} ({order['phone']})"
+            )
+            await bot.send_document(
+                chat_id=admin_id,
+                document=FSInputFile(order_file),
+                caption="📂 JSON-файл замовлення"
+            )
+
         await msg.answer(f"✅ Замовлення сформовано та відправлено в обробку.")
 
     except Exception as e:
@@ -3980,6 +4092,8 @@ async def main():
             logger.info("Dispatcher has no startup() method — skipping warmup.")
     except Exception:
         logger.exception("Dispatcher warmup failed (non-fatal).")
+
+    load_posted_ids() # <--- ДОДАЙТЕ ЦЕЙ РЯДОК
     
     # ---------------- start Telethon ----------------
     try:
@@ -3988,6 +4102,8 @@ async def main():
         logger.info("Telethon start task scheduled.")
     except Exception:
         logger.exception("Failed to schedule Telethon client start")
+
+    asyncio.create_task(random_post_scheduler()) # <--- І ЦЕЙ РЯДОК
 
     # Команди бота
     try:
