@@ -384,7 +384,10 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
         return
 
     try:
-        TELETHON_CLIENT = TelegramClient(SESSION_NAME, api_id, api_hash, loop=loop)
+        # --- ВИПРАВЛЕНО: Використовуємо глобальні змінні TG_API_ID та TG_API_HASH ---
+        TELETHON_CLIENT = TelegramClient(SESSION_NAME, TG_API_ID, TG_API_HASH, loop=loop)
+        # --- КІНЕЦЬ ВИПРАВЛЕННЯ ---
+        
         await TELETHON_CLIENT.start()
         TELETHON_STARTED = True
         logger.info("Telethon client started; listening supplier channel: %s", SUPPLIER_CHANNEL)
@@ -394,8 +397,8 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
 
     @TELETHON_CLIENT.on(events.NewMessage(chats=[SUPPLIER_CHANNEL, TEST_CHANNEL]))
     async def supplier_msg_handler(event: events.NewMessage.Event):
+        # ... (весь код всередині цього обробника залишається БЕЗ ЗМІН) ...
         try:
-            # ... (початок функції без змін: пошук sku, товару і т.д.) ...
             msg = event.message
             text = (msg.message or "") if hasattr(msg, "message") else (msg.raw_text or "")
             is_test_mode = event.chat_id == TEST_CHANNEL
@@ -417,16 +420,12 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
             
             description = await rewrite_text_with_ai(original_description, name)
 
-            # --- ОСНОВНА ЗМІНА: РОБОТА З ПАПКАМИ ТА ІМЕНАМИ ФАЙЛІВ ---
             if USE_GDRIVE and GDRIVE_SERVICE and GDRIVE_FOLDER_ID:
                 try:
-                    # Знаходимо або створюємо папки для фото та постів
                     photo_folder_id = gdrive_find_or_create_folder("FotoLandLiz", GDRIVE_FOLDER_ID)
                     post_folder_id = gdrive_find_or_create_folder("PostLandLiz", GDRIVE_FOLDER_ID)
                     
-                    # 1. Зберігаємо фото
                     if getattr(msg, "media", None) and photo_folder_id:
-                        # Генеруємо унікальне ім'я файлу
                         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
                         photo_filename = f"foto_ark_{vendor_code}_{timestamp}.jpg"
                         
@@ -437,7 +436,6 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
                         tmpf.close()
                         os.remove(tmpf.name)
 
-                    # 2. Зберігаємо текст
                     if post_folder_id:
                         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
                         post_filename = f"post_ark_{vendor_code}_{timestamp}.txt"
@@ -451,9 +449,7 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
 
                 except Exception:
                     logger.exception("Telethon: помилка збереження в GDrive (нефатальна)")
-            # --- КІНЕЦЬ ЗМІНИ ---
-
-            # ... (решта коду функції: розрахунок ціни, формування поста, відправка - залишається БЕЗ ЗМІН) ...
+            
             drop_price = product.get("drop_price")
             final_price = aggressive_round(float(drop_price) * 1.33) if drop_price else None
             price_text = f"<b>{final_price} грн</b>" if final_price else "<b>Ціну уточнюйте</b>"
