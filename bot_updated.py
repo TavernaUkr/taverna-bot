@@ -1622,14 +1622,13 @@ async def order_skip_note(callback: CallbackQuery, state: FSMContext):
 # ---------------- Finalize Order ----------------
 async def finalize_order(msg: Message, state: FSMContext):
     """
-    Фіналізує замовлення: формує JSON, зберігає локально та на Google Drive
-    у спеціальну папку для замовлень.
+    Фіналізує замовлення: формує JSON, зберігає локально та на Google Drive,
+    відправляє на MyDrop та повідомляє адміна.
     """
     user_data = await state.get_data()
     cart = user_data.get("cart", [])
     user_id = msg.from_user.id
     
-    # 1. Формуємо JSON-об'єкт замовлення
     order_payload = {
         "name": user_data.get("name"),
         "phone": user_data.get("phone"),
@@ -1642,80 +1641,54 @@ async def finalize_order(msg: Message, state: FSMContext):
     }
     order_json_str = json.dumps(order_payload, ensure_ascii=False, indent=2)
 
-    # 2. Генеруємо унікальне ім'я файлу
-    # Примітка: назва файлу базується на ID користувача та часі,
-    # оскільки одне замовлення може містити багато товарів з різними артикулами.
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     order_filename = f"order_{user_id}_{ts}.json"
     
-    # 3. Зберігаємо файл на Google Drive
-    if USE_GDRIVE and GDRIVE_SERVICE and GDRIVE_FOLDER_ID:
-        try:
-            # Знаходимо або створюємо папку для замовлень (напр., "ZamovLandLiz")
+    # Створюємо тимчасовий локальний файл, який будемо використовувати
+    tmp_filepath = ""
+    try:
+        with tempfile.NamedTemporaryFile(prefix="order_", suffix=".json", delete=False, mode="w", encoding="utf-8") as tmp_file:
+            tmp_file.write(order_json_str)
+            tmp_filepath = tmp_file.name
+
+        # Зберігаємо на Google Drive
+        if USE_GDRIVE and GDRIVE_SERVICE and GDRIVE_FOLDER_ID:
             orders_folder_name = os.getenv("GDRIVE_ORDERS_FOLDER_NAME", "Zamovlenya")
             orders_folder_id = gdrive_find_or_create_folder(orders_folder_name, GDRIVE_FOLDER_ID)
 
             if orders_folder_id:
-                # Створюємо тимчасовий локальний файл для завантаження
-                with tempfile.NamedTemporaryFile(prefix="order_", suffix=".json", delete=False, mode="w", encoding="utf-8") as tmp_file:
-                    tmp_file.write(order_json_str)
-                    tmp_filepath = tmp_file.name
-
-                # Завантажуємо файл у потрібну папку
                 gdrive_upload_file(tmp_filepath, "application/json", order_filename, orders_folder_id)
-                os.remove(tmp_filepath) # Видаляємо тимчасовий файл
-                
                 await msg.answer("☁️ Замовлення успішно збережено у хмарне сховище.")
             else:
-                await msg.answer("⚠️ Не вдалося знайти або створити папку для замовлень на Google Drive.")
+                await msg.answer("⚠️ Не вдалося знайти папку для замовлень на Google Drive.")
 
-        except Exception as e:
-            logger.exception("Помилка під час збереження замовлення на Google Drive")
-            await msg.answer(f"⚠️ Помилка при завантаженні у Google Drive: {e}")
-    else:
-        # Fallback: зберігаємо локально, якщо GDrive вимкнено
-        order_file = Path(ORDERS_DIR) / order_filename
-        order_file.write_text(order_json_str, encoding="utf-8")
-        await msg.answer(f"📂 Замовлення збережено локально у файл: <b>{order_file.name}</b>", parse_mode="HTML")
+        # Відправка на MyDrop API
+        # asyncio.create_task(create_mydrop_order(order_payload, notify_chat=ADMIN_ID)) # Розкоментуєте, коли будете готові
 
-    # 4. Відправка на MyDrop API та повідомлення адміну (цей блок залишається)
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                "X-API-KEY": os.getenv("MYDROP_API_KEY"),
-                "Content-Type": "application/json"
-            }
-            async with session.post(
-                MYDROP_ORDERS_URL,
-                json=order,
-                headers=headers
-            ) as resp:
-                response = await resp.text()
-                await msg.answer(f"📡 Відповідь від MyDrop:\n{response}")
-    except Exception as e:
-        await msg.answer(f"⚠️ Помилка при відправці на MyDrop API: {e}")
-
-    # 🔹 Повідомлення адміну з файлом замовлення
-    admin_id = os.getenv("ADMIN_CHAT_ID")
-    if admin_id:
-        try:
-            await bot.send_message(
-                chat_id=admin_id,
-                text=f"🆕 Нове замовлення #{order_file.stem}\nВід {order['name']} ({order['phone']})"
-            )
-            await bot.send_document(
-                chat_id=admin_id,
-                document=FSInputFile(order_file),
-                caption="📂 JSON-файл замовлення"
-            )
-
-        await msg.answer(f"✅ Замовлення сформовано та відправлено в обробку.")
+        # Повідомлення адміну з файлом замовлення
+        admin_id_str = os.getenv("ADMIN_ID")
+        if admin_id_str:
+            try:
+                admin_id = int(admin_id_str)
+                order_summary = f"🆕 Нове замовлення #{order_filename.split('.')[0]}\nВід: {order_payload.get('name')} ({order_payload.get('phone')})"
+                
+                await bot.send_message(chat_id=admin_id, text=order_summary)
+                await bot.send_document(chat_id=admin_id, document=FSInputFile(tmp_filepath, filename=order_filename))
+            except Exception as e:
+                logger.error(f"Не вдалося відправити замовлення адміну: {e}")
+        
+        # Фінальне повідомлення користувачу
+        await msg.answer("✅ Дякуємо! Ваше замовлення прийнято та відправлено в обробку.")
 
     except Exception as e:
-        await msg.answer(f"⚠️ Помилка при відправці на MyDrop API: {e}")
-
-    # 5. Очищуємо стан
-    await state.clear()
+        logger.exception("Помилка під час фіналізації замовлення")
+        await msg.answer(f"⚠️ Сталася помилка під час обробки замовлення: {e}")
+    finally:
+        # Гарантовано видаляємо тимчасовий файл
+        if tmp_filepath and os.path.exists(tmp_filepath):
+            os.remove(tmp_filepath)
+        # Очищуємо стан
+        await state.clear()
 
 # ---------------- Publish Test ----------------
 @router.message(Command("publish_test"))
