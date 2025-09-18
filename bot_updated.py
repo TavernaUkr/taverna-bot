@@ -449,7 +449,6 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
 
     @TELETHON_CLIENT.on(events.NewMessage(chats=[SUPPLIER_CHANNEL, TEST_CHANNEL]))
     async def supplier_msg_handler(event: events.NewMessage.Event):
-        # Цей обробник тепер тільки для НОВИХ повідомлень
         delay = random.uniform(1 * 60, 20 * 60)
         logger.info(f"Отримано новий пост {event.message.id}. Затримка перед постингом: {delay/60:.2f} хв.")
         await asyncio.sleep(delay)
@@ -465,13 +464,12 @@ async def random_post_scheduler():
             await asyncio.sleep(delay)
 
             if not TELETHON_CLIENT or not TELETHON_CLIENT.is_connected():
-                logger.warning("Планувальник: Telethon client не готовий.")
                 continue
 
             entity = await TELETHON_CLIENT.get_entity(SUPPLIER_CHANNEL)
             total_messages = (await TELETHON_CLIENT.get_messages(entity, limit=0)).total
 
-            for _ in range(20): # 20 спроб знайти унікальний пост
+            for _ in range(20):
                 random_offset_id = random.randint(1, total_messages)
                 messages = await TELETHON_CLIENT.get_messages(entity, limit=1, offset_id=random_offset_id)
                 
@@ -489,7 +487,6 @@ async def random_post_scheduler():
 async def process_and_post_message(msg):
     """
     Глобальна функція для повної обробки та постингу повідомлення.
-    Використовується і для нових, і для старих постів.
     """
     try:
         unique_post_id = f"{msg.chat_id}_{msg.id}"
@@ -518,19 +515,43 @@ async def process_and_post_message(msg):
         description = await rewrite_text_with_ai(original_description, name)
 
         if USE_GDRIVE and GDRIVE_SERVICE and GDRIVE_FOLDER_ID:
-            # ... (тут логіка GDrive, можна скопіювати з вашої старої supplier_msg_handler)
-            pass # залишаємо для прикладу
+            try:
+                photo_folder_id = gdrive_find_or_create_folder("FotoLandLiz", GDRIVE_FOLDER_ID)
+                post_folder_id = gdrive_find_or_create_folder("PostLandLiz", GDRIVE_FOLDER_ID)
+                
+                if getattr(msg, "media", None) and photo_folder_id:
+                    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                    photo_filename = f"foto_ark_{vendor_code}_{timestamp}.jpg"
+                    
+                    with tempfile.NamedTemporaryFile(prefix="tav_photo_", delete=False) as tmpf:
+                        await TELETHON_CLIENT.download_media(msg.media, file=tmpf.name)
+                        gdrive_upload_file(tmpf.name, "image/jpeg", photo_filename, photo_folder_id)
+                    os.remove(tmpf.name)
 
+                if post_folder_id:
+                    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                    post_filename = f"post_ark_{vendor_code}_{timestamp}.txt"
+                    
+                    with tempfile.NamedTemporaryFile(prefix="tav_post_", suffix=".txt", delete=False, mode="w", encoding="utf-8") as tmp_txt:
+                        tmp_txt.write(description)
+                        gdrive_upload_file(tmp_txt.name, "text/plain", post_filename, post_folder_id)
+                    os.remove(tmp_txt.name)
+            except Exception:
+                logger.exception("Telethon: помилка збереження в GDrive (нефатальна)")
+
+        
         drop_price = product.get("drop_price")
         final_price = aggressive_round(float(drop_price) * 1.33) if drop_price else None
         price_text = f"<b>{final_price} грн</b>" if final_price else "<b>Ціну уточнюйте</b>"
         
-        if is_test_mode: repost_text = f"📦 <b>{name}</b>\n\nАртикул: <code>{vendor_code}</code>\n\nДроп ціна: {drop_price} грн\nЦіна для клієнта: {price_text}\n\n"
-        else: repost_text = f"📦 <b>{name}</b>\n\nАртикул: <code>{vendor_code}</code>\nЦіна: {price_text}\n\n"
+        repost_text = f"📦 <b>{name}</b>\n\nАртикул: <code>{vendor_code}</code>\nЦіна: {price_text}\n\n"
+        if is_test_mode:
+            repost_text = f"📦 <b>{name}</b>\n\nАртикул: <code>{vendor_code}</code>\n\nДроп ціна: {drop_price} грн\nЦіна для клієнта: {price_text}\n\n"
+
         if description: repost_text += (description[:3500]) + "\n\n"
         repost_text += "🔹 Натисніть «🛒 Замовити», щоб оформити в боті."
         
-        channel_username = MAIN_CHANNEL.replace('@', '')
+        channel_username = MAIN_CHANNEL.replace('@', '') if MAIN_CHANNEL.startswith('@') else None
         
         target_channel = TEST_CHANNEL if is_test_mode else MAIN_CHANNEL
         sent_message = None
@@ -541,7 +562,13 @@ async def process_and_post_message(msg):
         
         if sent_message:
             from urllib.parse import quote
-            post_link = f"https://t.me/{channel_username}/{sent_message.message_id}" if channel_username else f"https://t.me/c/{str(target_channel).replace('-100','')}/{sent_message.message_id}"
+            
+            if channel_username:
+                post_link = f"https://t.me/{channel_username}/{sent_message.message_id}"
+            else:
+                channel_id_for_link = str(target_channel).replace("-100", "")
+                post_link = f"https://t.me/c/{channel_id_for_link}/{sent_message.message_id}"
+
             encoded_post_link = quote(post_link)
             new_deep_link_url = f"https://t.me/{BOT_USERNAME}?start=show_sku_{vendor_code}_from_{encoded_post_link}"
             new_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Замовити", url=new_deep_link_url)]])
@@ -1156,16 +1183,14 @@ async def cmd_start_deep_link(msg: Message, command: CommandObject, state: FSMCo
         await msg.answer("Помилка обробки запиту. Спробуйте ще раз.")
 
 @router.message(CommandStart(deep_link=True, magic=F.args.startswith("show_sku_")))
+@router.message(CommandStart(deep_link=True, magic=F.args.startswith("show_sku_")))
 async def cmd_start_show_sku(msg: Message, command: CommandObject, state: FSMContext):
     """
-    Обробник для deep-link'ів з каналу.
-    Миттєво показує повну картку товару та сортовані розміри.
+    Обробник для deep-link'ів з каналу. Показує ідеальну картку товару.
     """
     try:
         args_part = command.args.replace("show_sku_", "")
         raw_sku = args_part.split('_from_')[0]
-        
-        logger.info(f"Deep link 'show_sku' активовано. Артикул: {raw_sku}")
         
         products = find_product_by_sku(raw_sku)
         if not products:
@@ -2361,18 +2386,16 @@ def aggressive_round(price: float) -> int:
     return int(math.ceil(p / base) * base)
 
 def format_product_card(product: dict, user_id: int) -> str:
-    """Формує повний текст картки товару."""
+    """Формує повний текст картки товару з описом та цінами."""
     name = product.get('name', 'Назва не вказана')
     vendor_code = product.get('vendor_code', 'не вказано')
     description = product.get('description', 'Опис відсутній.')
     drop_price = product.get('drop_price')
 
-    # Формуємо блок з ціною
     price_block = []
     if drop_price:
         final_price = aggressive_round(float(drop_price) * 1.33)
         price_block.append(f"<b>💰 Ціна: {final_price} грн</b>")
-        # Якщо це адмін, показуємо дроп ціну
         if user_id == ADMIN_ID:
             price_block.append(f"<i>(Дроп: {drop_price} грн)</i>")
     
@@ -2380,23 +2403,20 @@ def format_product_card(product: dict, user_id: int) -> str:
         f"<b>{name}</b>\n",
         f"<b>Артикул:</b> <code>{vendor_code}</code>\n",
         "\n".join(price_block),
-        "\n" + "-"*20 + "\n",
+        "\n" + "—" * 20 + "\n",
         f"<b>Опис:</b>\n{description}"
     ]
     return "\n".join(text_parts)
 
 def build_sorted_size_keyboard(products: list, back_url: str = None) -> InlineKeyboardMarkup:
-    """Створює клавіатуру розмірів у 3 колонки, відсортовану."""
+    """Створює клавіатуру розмірів у 3 колонки, відсортовану, з новими кнопками."""
     offers_with_sizes = {}
     for p in products:
         size = p.get("sizes")[0] if p.get("sizes") else None
         if size:
-            # Використовуємо offer_id, щоб точно знати, який товар обрано
             offers_with_sizes[size] = p.get("offer_id")
 
-    # Розділяємо розміри на числові та текстові
-    numeric_sizes = []
-    text_sizes = []
+    numeric_sizes, text_sizes = [], []
     for size, offer_id in offers_with_sizes.items():
         numeric_part_match = re.match(r'^\d+', size)
         if numeric_part_match:
@@ -2408,24 +2428,23 @@ def build_sorted_size_keyboard(products: list, back_url: str = None) -> InlineKe
     text_sizes.sort()
 
     sorted_sizes = [item[1:] for item in numeric_sizes] + text_sizes
-
     buttons = [InlineKeyboardButton(text=size, callback_data=f"select_size:{offer_id}") for size, offer_id in sorted_sizes]
     
-    # Розкладаємо по 3 колонках
     kb_rows = []
-    num_buttons = len(buttons)
-    if num_buttons > 0:
-        num_rows = (num_buttons + 2) // 3
+    if buttons:
+        num_rows = (len(buttons) + 2) // 3
         for i in range(num_rows):
             row = []
-            if i < num_buttons: row.append(buttons[i])
-            if i + num_rows < num_buttons: row.append(buttons[i + num_rows])
-            if i + 2 * num_rows < num_buttons: row.append(buttons[i + 2 * num_rows])
+            if i < len(buttons): row.append(buttons[i])
+            if i + num_rows < len(buttons): row.append(buttons[i + num_rows])
+            if i + 2 * num_rows < len(buttons): row.append(buttons[i + 2 * num_rows])
             if row: kb_rows.append(row)
 
+    nav_buttons = []
     if back_url:
-        kb_rows.append([InlineKeyboardButton(text="⬅️ Повернутись на канал", url=back_url)])
-    kb_rows.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel")])
+        nav_buttons.append(InlineKeyboardButton(text="↩️ На канал", url=back_url))
+    nav_buttons.append(InlineKeyboardButton(text="❌ Скасувати", callback_data="order:cancel"))
+    kb_rows.append(nav_buttons)
     
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
