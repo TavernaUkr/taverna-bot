@@ -444,15 +444,7 @@ TELETHON_CLIENT: Optional[TelegramClient] = None
 TELETHON_STARTED = False
 
 async def start_telethon_client(loop: asyncio.AbstractEventLoop):
-    """
-    Запускає Telethon client у тому ж asyncio-лупі, реєструє handler для SUPPLIER_CHANNEL.
-    Запуск: asyncio.create_task(start_telethon_client(ASYNC_LOOP))
-    """
     global TELETHON_CLIENT, TELETHON_STARTED
-    if TELETHON_STARTED:
-        logger.debug("Telethon already started, skip")
-        return
-
     try:
         TELETHON_CLIENT = TelegramClient(SESSION_NAME, TG_API_ID, TG_API_HASH, loop=loop)
         await TELETHON_CLIENT.start()
@@ -464,10 +456,11 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
 
     @TELETHON_CLIENT.on(events.NewMessage(chats=[SUPPLIER_CHANNEL, TEST_CHANNEL]))
     async def supplier_msg_handler(event: events.NewMessage.Event):
+        # Ця функція тепер єдина і обробляє і нові, і старі пости
         try:
             msg = event.message
             unique_post_id = f"{msg.chat_id}_{msg.id}"
-            is_new_message = unique_post_id not in POSTED_IDS # Визначаємо, чи це справді новий пост
+            is_new_message = unique_post_id not in POSTED_IDS
 
             # Якщо це новий пост - робимо випадкову затримку
             if is_new_message:
@@ -475,17 +468,14 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
                 logger.info(f"Отримано новий пост {unique_post_id}. Затримка перед постингом: {delay/60:.2f} хв.")
                 await asyncio.sleep(delay)
 
-            # Перевіряємо ще раз, на випадок якщо планувальник опублікував його, поки ми "спали"
+            # Перевіряємо ще раз
             if unique_post_id in POSTED_IDS:
                 logger.info(f"Пост {unique_post_id} вже було опубліковано. Пропуск.")
                 return
 
-        # ... (весь код всередині цього обробника залишається БЕЗ ЗМІН) ...
-        try:
-            msg = event.message
+            # --- ОСНОВНА ЛОГІКА ОБРОБКИ ПОСТА ---
             text = (msg.message or "") if hasattr(msg, "message") else (msg.raw_text or "")
             is_test_mode = event.chat_id == TEST_CHANNEL
-
 
             if not text and not getattr(msg, "media", None): return
             sku_found = None
@@ -513,24 +503,19 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
                         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
                         photo_filename = f"foto_ark_{vendor_code}_{timestamp}.jpg"
                         
-                        tmpf = tempfile.NamedTemporaryFile(prefix="tav_photo_", delete=False)
-                        await TELETHON_CLIENT.download_media(msg.media, file=tmpf.name)
-                        
-                        gdrive_upload_file(tmpf.name, "image/jpeg", photo_filename, photo_folder_id)
-                        tmpf.close()
+                        with tempfile.NamedTemporaryFile(prefix="tav_photo_", delete=False) as tmpf:
+                            await TELETHON_CLIENT.download_media(msg.media, file=tmpf.name)
+                            gdrive_upload_file(tmpf.name, "image/jpeg", photo_filename, photo_folder_id)
                         os.remove(tmpf.name)
 
                     if post_folder_id:
                         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
                         post_filename = f"post_ark_{vendor_code}_{timestamp}.txt"
                         
-                        tmp_txt = tempfile.NamedTemporaryFile(prefix="tav_post_", suffix=".txt", delete=False, mode="w", encoding="utf-8")
-                        tmp_txt.write(description)
-                        tmp_txt.close()
-                        
-                        gdrive_upload_file(tmp_txt.name, "text/plain", post_filename, post_folder_id)
+                        with tempfile.NamedTemporaryFile(prefix="tav_post_", suffix=".txt", delete=False, mode="w", encoding="utf-8") as tmp_txt:
+                            tmp_txt.write(description)
+                            gdrive_upload_file(tmp_txt.name, "text/plain", post_filename, post_folder_id)
                         os.remove(tmp_txt.name)
-
                 except Exception:
                     logger.exception("Telethon: помилка збереження в GDrive (нефатальна)")
             
@@ -544,21 +529,23 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
             repost_text += "🔹 Натисніть «🛒 Замовити», щоб оформити в боті."
             
             channel_username = MAIN_CHANNEL.replace('@', '')
-            deep_link_url = f"https://t.me/{BOT_USERNAME}?start=show_sku_{vendor_code}"
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Замовити", url=deep_link_url)]])
             
             target_channel = TEST_CHANNEL if is_test_mode else MAIN_CHANNEL
             sent_message = None
-            if pictures: sent_message = await bot.send_photo(chat_id=target_channel, photo=pictures[0], caption=repost_text, reply_markup=kb, parse_mode="HTML")
-            else: sent_message = await bot.send_message(chat_id=target_channel, text=repost_text, reply_markup=kb, parse_mode="HTML")
+            if pictures:
+                sent_message = await bot.send_photo(chat_id=target_channel, photo=pictures[0], caption=repost_text, parse_mode="HTML")
+            else:
+                sent_message = await bot.send_message(chat_id=target_channel, text=repost_text, parse_mode="HTML")
             
             if sent_message:
                 from urllib.parse import quote
-                post_link = f"httpsa://t.me/{channel_username}/{sent_message.message_id}"
+                post_link = f"https://t.me/{channel_username}/{sent_message.message_id}"
                 encoded_post_link = quote(post_link)
                 new_deep_link_url = f"https://t.me/{BOT_USERNAME}?start=show_sku_{vendor_code}_from_{encoded_post_link}"
                 new_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Замовити", url=new_deep_link_url)]])
                 await bot.edit_message_reply_markup(chat_id=target_channel, message_id=sent_message.message_id, reply_markup=new_kb)
+
+            # Зберігаємо ID в базу даних ПІСЛЯ успішної публікації
             save_posted_id(unique_post_id)
             logger.info(f"Пост {unique_post_id} успішно оброблено та додано до бази даних.")
 
