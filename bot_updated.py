@@ -59,6 +59,7 @@ BOT_USERNAME = os.getenv("BOT_USERNAME")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 TEST_CHANNEL = int(os.getenv("TEST_CHANNEL", "0"))
 MAIN_CHANNEL = os.getenv("MAIN_CHANNEL")
+TEST_CHANNEL_URL = os.getenv("TEST_CHANNEL_URL")
 
 TG_API_ID = int(os.getenv("TG_API_ID", "0"))
 TG_API_HASH = os.getenv("TG_API_HASH")
@@ -95,7 +96,7 @@ def check_env_vars():
         sys.exit(1)
 
     env_vars = [
-        "BOT_TOKEN", "BOT_USERNAME", "ADMIN_ID", "TEST_CHANNEL", "MAIN_CHANNEL", 
+        "BOT_TOKEN", "BOT_USERNAME", "ADMIN_ID", "TEST_CHANNEL", "TEST_CHANNEL_URL", "MAIN_CHANNEL", 
         "TG_API_ID", "TG_API_HASH", "SESSION_NAME", "SUPPLIER_CHANNEL", "SUPPLIER_NAME",
         "MYDROP_API_KEY", "MYDROP_EXPORT_URL", "MYDROP_ORDERS_URL",
         "SERVICE_ACCOUNT_JSON", "USE_GDRIVE", "GDRIVE_FOLDER_ID", 
@@ -1695,29 +1696,14 @@ async def finalize_order(msg: Message, state: FSMContext):
 async def cmd_publish_test(msg: Message):
     """
     Адмінська команда — публікація тестового поста в тестовий канал.
-    Використовує:
-    - ADMIN_ID (перевірка прав)
-    - TEST_CHANNEL (ID каналу для поста)
-    - TEST_CHANNEL_URL (invite link для fallback кнопки)
+    Після публікації надсилає адміну повідомлення з кнопкою для переходу на пост.
     """
-    try:
-        admin_id = int(os.getenv("ADMIN_ID", "0") or 0)
-    except Exception:
-        admin_id = 0
-
-    if msg.from_user.id != admin_id:
+    if msg.from_user.id != ADMIN_ID:
         await msg.answer("⚠️ У вас немає прав на виконання цієї команди.")
         return
 
-    # Перевіримо TEST_CHANNEL
-    raw_channel = os.getenv("TEST_CHANNEL")
-    if not raw_channel:
+    if not TEST_CHANNEL:
         await msg.answer("⚠️ TEST_CHANNEL не встановлений у .env")
-        return
-    try:
-        channel_chat_id = int(raw_channel)
-    except Exception:
-        await msg.answer(f"⚠️ TEST_CHANNEL має бути числом (наприклад -100123456789). Зараз: {raw_channel}")
         return
 
     # Тестовий текст поста
@@ -1729,30 +1715,43 @@ async def cmd_publish_test(msg: Message):
         "📏 Доступні розміри: 46–64"
     )
 
-    # Кнопка "Замовити" (deep link у бота)
-    kb = get_order_keyboard(post_id=12345, sku="1056", test=True)
-
-    # Fallback кнопка "Відкрити канал" (якщо бот не може постити напряму)
-    invite_url = os.getenv("TEST_CHANNEL_URL")
-    fallback_kb = None
-    if invite_url:
-        fallback_kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📢 Відкрити канал", url=TEST_CHANNEL_URL)]
-            ]
-        )
+    # Кнопка "Замовити" з deep-link, що веде на товар у боті
+    deep_link_url = f"https://t.me/{BOT_USERNAME}?start=show_sku_1056"
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🛒 Замовити (Тест)", url=deep_link_url)]
+        ]
+    )
 
     try:
         # Публікуємо у канал
-        await bot.send_message(chat_id=channel_chat_id, text=text, reply_markup=kb, parse_mode="HTML")
-        await msg.answer("✅ Тестовий пост (Гольф чорний) опубліковано в тестовому каналі.")
+        sent_message = await bot.send_message(chat_id=TEST_CHANNEL, text=text, reply_markup=kb, parse_mode="HTML")
+        
+        # --- ПОКРАЩЕННЯ: Створюємо посилання на пост та відправляємо адміну ---
+        channel_username = str(TEST_CHANNEL) # Для приватних каналів використовуємо ID
+        if sent_message.chat.username:
+             channel_username = sent_message.chat.username
+
+        post_url = f"https://t.me/{channel_username}/{sent_message.message_id}"
+        
+        admin_kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🚀 Переглянути тестовий пост", url=post_url)]
+            ]
+        )
+        await msg.answer("✅ Тестовий пост опубліковано.", reply_markup=admin_kb)
+
     except Exception as e:
         logger.exception("Помилка публікації тестового поста в канал")
+        fallback_kb = None
+        if TEST_CHANNEL_URL:
+            fallback_kb = InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="📢 Відкрити канал вручну", url=TEST_CHANNEL_URL)]]
+            )
         await msg.answer(
-            f"⚠️ Помилка при публікації у канал: {e}\nПереконайтеся, що бот доданий у канал та має права публікації."
+            f"⚠️ Помилка при публікації: {e}",
+            reply_markup=fallback_kb
         )
-        if fallback_kb:
-            await msg.answer("🔗 Можна вручну відкрити канал:", reply_markup=fallback_kb)
 
 # ---------------- Refresh Cache ----------------
 @router.message(Command("refresh_cache"))
