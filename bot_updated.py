@@ -46,9 +46,65 @@ import google.generativeai as genai
 
 app = Flask(__name__)
 
-# ... після всіх import'ів ...
+# ---------------- Config & Env ----------------
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("taverna")
+logger.setLevel(logging.DEBUG)
 
-# ---------------- AI Text Rewriter (Google Gemini) ----------------
+# --- ЗАВАНТАЖЕННЯ ВСІХ ЗМІННИХ НА ПОЧАТКУ ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_USERNAME = os.getenv("BOT_USERNAME")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+TEST_CHANNEL = int(os.getenv("TEST_CHANNEL", "0"))
+MAIN_CHANNEL = os.getenv("MAIN_CHANNEL")
+
+TG_API_ID = int(os.getenv("TG_API_ID", "0"))
+TG_API_HASH = os.getenv("TG_API_HASH")
+SESSION_NAME = os.getenv("SESSION_NAME", "bot1")
+SUPPLIER_CHANNEL = os.getenv("SUPPLIER_CHANNEL")
+SUPPLIER_NAME = os.getenv("SUPPLIER_NAME", "Supplier")
+
+MYDROP_EXPORT_URL = os.getenv("MYDROP_EXPORT_URL")
+SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON") # <-- Важливо, визначено тут
+
+USE_GDRIVE = os.getenv("USE_GDRIVE", "false").lower() in ("true", "1", "yes")
+GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID")
+
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+REVIEW_CHAT = int(os.getenv("REVIEW_CHAT", str(ADMIN_ID)))
+
+def check_env_vars():
+    """Ця функція тепер лише для логування, а не для завантаження."""
+    print("=== Checking ENV variables ===")
+    if not BOT_TOKEN:
+        print("❌ ERROR: BOT_TOKEN is missing")
+        sys.exit(1)
+
+    env_vars = [
+        "BOT_TOKEN", "BOT_USERNAME", "ADMIN_ID", "TEST_CHANNEL", "MAIN_CHANNEL", 
+        "TG_API_ID", "TG_API_HASH", "SESSION_NAME", "SUPPLIER_CHANNEL", "SUPPLIER_NAME",
+        "MYDROP_API_KEY", "MYDROP_EXPORT_URL", "MYDROP_ORDERS_URL",
+        "SERVICE_ACCOUNT_JSON", "USE_GDRIVE", "GDRIVE_FOLDER_ID", 
+        "GDRIVE_ORDERS_FOLDER_NAME", "GEMINI_API_KEY", "WEBHOOK_URL"
+    ]
+    for var in env_vars:
+        value = os.getenv(var)
+        if value:
+            if var.upper().endswith(("KEY", "TOKEN", "HASH", "SECRET", "PASSWORD")) or "SERVICE_ACCOUNT_JSON" in var:
+                masked = str(value)[:4] + "...(masked)"
+            else:
+                masked = str(value) if len(str(value)) < 60 else str(value)[:57] + "..."
+            print(f"✅ {var} = {masked}")
+        else:
+            print(f"⚠️ {var} is not set")
+    print("=== End ENV check ===")
+
+# Викликаємо функцію логування
+check_env_vars()
+
+logger.debug("USE_GDRIVE = %s", USE_GDRIVE)
+
 # ---------------- AI Text Rewriter (Google GenAI SDK) ----------------
 async def rewrite_text_with_ai(text_to_rewrite: str, product_name: str) -> str:
     """
@@ -90,84 +146,6 @@ async def rewrite_text_with_ai(text_to_rewrite: str, product_name: str) -> str:
     except Exception as e:
         logger.exception(f"❌ Виняток під час запиту до Gemini API через SDK: {e}")
         return text_to_rewrite # Повертаємо оригінал у разі будь-якої помилки
-
-# ---------------- Config & Env ----------------
-load_dotenv()
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("taverna")
-logger.setLevel(logging.DEBUG)
-
-def check_env_vars():
-    print("=== Checking ENV variables ===")
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    if not BOT_TOKEN:
-        print("❌ ERROR: BOT_TOKEN is missing")
-        sys.exit(1)
-
-    env_vars = [
-        "BOT_TOKEN", "BOT_USERNAME", "ADMIN_ID",
-        "TEST_CHANNEL", "MAIN_CHANNEL", "TG_API_ID", "TG_API_HASH",
-        "SESSION_NAME", "SUPPLIER_CHANNEL", "SUPPLIER_NAME",
-        "NP_API_KEY", "NP_API_URL", "MYDROP_API_KEY", "MYDROP_EXPORT_URL", "MYDROP_ORDERS_URL", "ORDERS_DIR",
-        "USE_GCS", "GCS_BUCKET", "SERVICE_ACCOUNT_JSON",
-        "USE_GDRIVE", "GDRIVE_FOLDER_ID", "GDRIVE_ORDERS_FOLDER_NAME", # <-- ДОДАНО
-        "GEMINI_API_KEY", # <-- ДОДАНО
-        "TEST_MODE", "WEBHOOK_URL"
-    ]
-    for var in env_vars:
-        value = os.getenv(var)
-        if value:
-            # Маскуємо чутливі дані
-            if var.upper().endswith(("KEY", "TOKEN", "HASH", "SECRET", "PASSWORD")) or var in ("SERVICE_ACCOUNT_JSON",):
-                masked = (str(value)[:4] + "...(masked)")
-            else:
-                masked = str(value) if len(str(value)) < 60 else str(value)[:57] + "..."
-            print(f"✅ {var} = {masked}")
-        else:
-            # Виводимо попередження, якщо змінна не встановлена
-            print(f"⚠️ {var} is not set")
-            
-    print("=== End ENV check ===")
-    return BOT_TOKEN
-
-BOT_TOKEN = check_env_vars()
-BOT_USERNAME = os.getenv("BOT_USERNAME")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-TEST_CHANNEL = int(os.getenv("TEST_CHANNEL"))
-MAIN_CHANNEL = os.getenv("MAIN_CHANNEL")
-TEST_CHANNEL_URL = os.getenv("TEST_CHANNEL_URL")
-
-api_id = int(os.getenv("TG_API_ID", "0") or 0)
-api_hash = os.getenv("TG_API_HASH", "")
-SESSION_NAME = os.getenv("SESSION_NAME", "bot1")
-supplier_channel = os.getenv("SUPPLIER_CHANNEL")
-supplier_name = os.getenv("SUPPLIER_NAME", "Supplier")
-
-NP_API_KEY = os.getenv("NP_API_KEY")
-NP_API_URL = os.getenv("NP_API_URL")
-
-MYDROP_API_KEY = os.getenv("MYDROP_API_KEY")
-MYDROP_EXPORT_URL = os.getenv("MYDROP_EXPORT_URL")
-MYDROP_ORDERS_URL = os.getenv("MYDROP_ORDERS_URL")
-
-ORDERS_DIR = os.getenv("ORDERS_DIR", "/tmp/orders")
-Path(ORDERS_DIR).mkdir(parents=True, exist_ok=True)
-
-TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
-
-WEBHOOK_PATH = "/webhook"
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-
-REVIEW_CHAT = int(os.getenv("REVIEW_CHAT", str(ADMIN_ID)))
-BUCKET_NAME = os.getenv("GCS_BUCKET", "taverna-bot-storage")
-
-USE_GCS = os.getenv("USE_GCS", "false").lower() in ("1", "true", "yes")
-USE_GDRIVE = os.getenv("USE_GDRIVE", "false").lower() in ("1", "true", "yes")
-GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID", "")
-GEMINI_API_KEY= os.getenv("GEMINI_API_KEY")
-GDRIVE_ORDERS_FOLDER_NAME= os.getenv("GEMINI_API_KEY")
-
-logger.debug("USE_GDRIVE = %s", USE_GDRIVE)
 
 # ---------------- Cache for MyDrop products ----------------
 PRODUCTS_CACHE = {
