@@ -44,15 +44,15 @@ import tempfile
 import google.generativeai as genai
 
 
+# ---------------- КРОК 1: Ініціалізація базових додатків ----------------
 app = Flask(__name__)
-
-# ---------------- Config & Env ----------------
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("taverna")
 logger.setLevel(logging.DEBUG)
 
-# --- ЗАВАНТАЖЕННЯ ВСІХ ЗМІННИХ НА ПОЧАТКУ ---
+
+# ---------------- КРОК 2: Завантаження ВСІХ змінних з .env ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME = os.getenv("BOT_USERNAME")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
@@ -65,15 +65,26 @@ SESSION_NAME = os.getenv("SESSION_NAME", "bot1")
 SUPPLIER_CHANNEL = os.getenv("SUPPLIER_CHANNEL")
 SUPPLIER_NAME = os.getenv("SUPPLIER_NAME", "Supplier")
 
+MYDROP_API_KEY = os.getenv("MYDROP_API_KEY")
 MYDROP_EXPORT_URL = os.getenv("MYDROP_EXPORT_URL")
-SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON") # <-- Важливо, визначено тут
+MYDROP_ORDERS_URL = os.getenv("MYDROP_ORDERS_URL")
+ORDERS_DIR = os.getenv("ORDERS_DIR", "/tmp/orders")
+Path(ORDERS_DIR).mkdir(parents=True, exist_ok=True)
 
 USE_GDRIVE = os.getenv("USE_GDRIVE", "false").lower() in ("true", "1", "yes")
 GDRIVE_FOLDER_ID = os.getenv("GDRIVE_FOLDER_ID")
+GDRIVE_ORDERS_FOLDER_NAME = os.getenv("GDRIVE_ORDERS_FOLDER_NAME", "Zamovlenya")
+SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+
+WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 REVIEW_CHAT = int(os.getenv("REVIEW_CHAT", str(ADMIN_ID)))
 
+
+# ---------------- КРОК 3: Функція для логування змінних ----------------
 def check_env_vars():
     """Ця функція тепер лише для логування, а не для завантаження."""
     print("=== Checking ENV variables ===")
@@ -102,8 +113,38 @@ def check_env_vars():
 
 # Викликаємо функцію логування
 check_env_vars()
-
 logger.debug("USE_GDRIVE = %s", USE_GDRIVE)
+
+
+# ---------------- КРОК 4: Ініціалізація сервісів, що залежать від змінних ----------------
+PRODUCTS_CACHE = {
+    "last_update": None,
+    "data": None
+}
+CACHE_TTL = 900
+PRODUCTS_EXPORT_CACHE: Optional[str] = None
+ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
+TELETHON_CLIENT: Optional[TelegramClient] = None
+TELETHON_STARTED = False
+
+# Функція ініціалізації GDrive
+def init_gdrive():
+    if not USE_GDRIVE:
+        return None
+    try:
+        if SERVICE_ACCOUNT_JSON and SERVICE_ACCOUNT_JSON.strip().startswith("{"):
+            info = json.loads(SERVICE_ACCOUNT_JSON)
+            creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive.file"])
+            return build("drive", "v3", credentials=creds, cache_discovery=False)
+        else:
+            logger.error("❌ SERVICE_ACCOUNT_JSON is not a valid JSON. GDrive will not work.")
+            return None
+    except Exception:
+        logger.exception("❌ GDrive init failed")
+        return None
+
+# Ініціалізуємо сервіс GDrive ТУТ, ПІСЛЯ завантаження змінних
+GDRIVE_SERVICE = init_gdrive()
 
 # ---------------- AI Text Rewriter (Google GenAI SDK) ----------------
 async def rewrite_text_with_ai(text_to_rewrite: str, product_name: str) -> str:
@@ -147,15 +188,6 @@ async def rewrite_text_with_ai(text_to_rewrite: str, product_name: str) -> str:
         logger.exception(f"❌ Виняток під час запиту до Gemini API через SDK: {e}")
         return text_to_rewrite # Повертаємо оригінал у разі будь-якої помилки
 
-# ---------------- Cache for MyDrop products ----------------
-PRODUCTS_CACHE = {
-    "last_update": None,
-    "data": None
-}
-CACHE_TTL = 900  # 15 хвилин (900 секунд)
-
-PRODUCTS_EXPORT_CACHE: Optional[str] = None
-
 # ---------------- Build product index (robust) ----------------
 def normalize_sku(s: str) -> str:
     """Нормалізує артикул / sku: прибирає пробіли, невидимі символи та небажані знаки, нижній регістр."""
@@ -168,10 +200,6 @@ def normalize_sku(s: str) -> str:
     # залишаємо лише латинські букви і цифри
     s = re.sub(r'[^0-9A-Za-z]+', '', s)
     return s.lower()
-
-# bot_updated_46.py
-
-# ... (попередній код без змін) ...
 
 # ---------------- Build product index (ФІНАЛЬНА, РОБОЧА ВЕРСІЯ) ----------------
 def build_products_index_from_xml(text: str):
@@ -289,28 +317,6 @@ def find_product_by_sku(raw: str) -> Optional[list]:
     logger.debug(f"Lookup success for SKU='{raw}': Found {len(final_products)} valid products. Best match: {best_match['product'].get('name')}")
     
     return final_products
-
-# ---------------- global async loop holder ----------------
-# буде заповнений в main()
-ASYNC_LOOP: Optional[asyncio.AbstractEventLoop] = None
-
-# ініціалізація Google Drive service
-def init_gdrive():
-    if not USE_GDRIVE:
-        return None
-    try:
-        import json
-        if SERVICE_ACCOUNT_JSON.strip().startswith("{"):
-            info = json.loads(SERVICE_ACCOUNT_JSON)
-            creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/drive.file"])
-        else:
-            creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_JSON, scopes=["https://www.googleapis.com/auth/drive.file"])
-        return build("drive", "v3", credentials=creds, cache_discovery=False)
-    except Exception:
-        logger.exception("❌ GDrive init failed")
-        return None
-
-GDRIVE_SERVICE = init_gdrive()
 
 def gdrive_upload_file(local_path: str, mime_type: str, filename: str, parent_folder_id: str):
     if not GDRIVE_SERVICE:
