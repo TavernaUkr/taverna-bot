@@ -449,13 +449,19 @@ async def start_telethon_client(loop: asyncio.AbstractEventLoop):
 
     @TELETHON_CLIENT.on(events.NewMessage(chats=[SUPPLIER_CHANNEL, TEST_CHANNEL]))
     async def supplier_msg_handler(event: events.NewMessage.Event):
+        # Цей обробник тепер тільки для НОВИХ повідомлень
         delay = random.uniform(1 * 60, 20 * 60)
         logger.info(f"Отримано новий пост {event.message.id}. Затримка перед постингом: {delay/60:.2f} хв.")
         await asyncio.sleep(delay)
+        # Викликаємо глобальну функцію обробки
         await process_and_post_message(event.message)
 
 async def random_post_scheduler():
-    await asyncio.sleep(60)
+    """
+    Фонова задача, яка раз у випадковий проміжок часу постить старий,
+    унікальний пост з каналу постачальника.
+    """
+    await asyncio.sleep(60) # Початкова затримка
     logger.info("🚀 Запущено планувальник випадкових постів.")
     while True:
         try:
@@ -469,7 +475,8 @@ async def random_post_scheduler():
             entity = await TELETHON_CLIENT.get_entity(SUPPLIER_CHANNEL)
             total_messages = (await TELETHON_CLIENT.get_messages(entity, limit=0)).total
 
-            for _ in range(20):
+            for _ in range(20): # 20 спроб знайти унікальний пост
+                # Використовуємо offset_id для отримання повідомлень з випадкового місця
                 random_offset_id = random.randint(1, total_messages)
                 messages = await TELETHON_CLIENT.get_messages(entity, limit=1, offset_id=random_offset_id)
                 
@@ -478,15 +485,17 @@ async def random_post_scheduler():
                 
                 if f"{msg.chat_id}_{msg.id}" not in POSTED_IDS:
                     logger.info(f"Планувальник: знайдено унікальний старий пост ID: {msg.id}. Обробка...")
+                    # Викликаємо глобальну функцію обробки
                     await process_and_post_message(msg)
-                    break
+                    break # Виходимо, якщо знайшли
         except Exception as e:
             logger.exception(f"Помилка в планувальнику випадкових постів: {e}")
-            await asyncio.sleep(60)
+            await asyncio.sleep(60) # Пауза перед наступною спробою
 
 async def process_and_post_message(msg):
     """
     Глобальна функція для повної обробки та постингу повідомлення.
+    Використовується і для нових, і для старих постів.
     """
     try:
         unique_post_id = f"{msg.chat_id}_{msg.id}"
@@ -539,11 +548,12 @@ async def process_and_post_message(msg):
             except Exception:
                 logger.exception("Telethon: помилка збереження в GDrive (нефатальна)")
 
-        
+
         drop_price = product.get("drop_price")
         final_price = aggressive_round(float(drop_price) * 1.33) if drop_price else None
         price_text = f"<b>{final_price} грн</b>" if final_price else "<b>Ціну уточнюйте</b>"
         
+        # Визначаємо текст для поста в залежності від режиму
         repost_text = f"📦 <b>{name}</b>\n\nАртикул: <code>{vendor_code}</code>\nЦіна: {price_text}\n\n"
         if is_test_mode:
             repost_text = f"📦 <b>{name}</b>\n\nАртикул: <code>{vendor_code}</code>\n\nДроп ціна: {drop_price} грн\nЦіна для клієнта: {price_text}\n\n"
@@ -551,21 +561,23 @@ async def process_and_post_message(msg):
         if description: repost_text += (description[:3500]) + "\n\n"
         repost_text += "🔹 Натисніть «🛒 Замовити», щоб оформити в боті."
         
+        # Формуємо посилання
         channel_username = MAIN_CHANNEL.replace('@', '') if MAIN_CHANNEL.startswith('@') else None
-        
         target_channel = TEST_CHANNEL if is_test_mode else MAIN_CHANNEL
+
+        # Відправляємо пост
         sent_message = None
         if pictures:
             sent_message = await bot.send_photo(chat_id=target_channel, photo=pictures[0], caption=repost_text, parse_mode="HTML")
         else:
             sent_message = await bot.send_message(chat_id=target_channel, text=repost_text, parse_mode="HTML")
         
+        # Оновлюємо пост з фінальною кнопкою
         if sent_message:
             from urllib.parse import quote
-            
             if channel_username:
                 post_link = f"https://t.me/{channel_username}/{sent_message.message_id}"
-            else:
+            else: # Для приватних каналів
                 channel_id_for_link = str(target_channel).replace("-100", "")
                 post_link = f"https://t.me/c/{channel_id_for_link}/{sent_message.message_id}"
 
@@ -574,6 +586,7 @@ async def process_and_post_message(msg):
             new_kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🛒 Замовити", url=new_deep_link_url)]])
             await bot.edit_message_reply_markup(chat_id=target_channel, message_id=sent_message.message_id, reply_markup=new_kb)
 
+        # Зберігаємо ID в базу, щоб не повторюватись
         save_posted_id(unique_post_id)
         logger.info(f"Пост {unique_post_id} успішно оброблено та додано до бази даних.")
 
@@ -1181,41 +1194,6 @@ async def cmd_start_deep_link(msg: Message, command: CommandObject, state: FSMCo
     except Exception:
         logger.exception("Deep link processing error")
         await msg.answer("Помилка обробки запиту. Спробуйте ще раз.")
-
-@router.message(CommandStart(deep_link=True, magic=F.args.startswith("show_sku_")))
-@router.message(CommandStart(deep_link=True, magic=F.args.startswith("show_sku_")))
-async def cmd_start_show_sku(msg: Message, command: CommandObject, state: FSMContext):
-    """
-    Обробник для deep-link'ів з каналу. Показує ідеальну картку товару.
-    """
-    try:
-        args_part = command.args.replace("show_sku_", "")
-        raw_sku = args_part.split('_from_')[0]
-        
-        products = find_product_by_sku(raw_sku)
-        if not products:
-            await msg.answer(f"На жаль, товар з артикулом `{raw_sku}` не знайдено.")
-            return
-
-        text_card = format_product_card(products[0], msg.from_user.id)
-        
-        back_url = None
-        if "_from_" in args_part:
-            from urllib.parse import unquote
-            post_link_encoded = args_part.split('_from_')[1]
-            back_url = unquote(post_link_encoded)
-
-        keyboard = build_sorted_size_keyboard(products, back_url)
-        
-        pictures = products[0].get("pictures")
-        if pictures:
-            await msg.answer_photo(photo=pictures[0], caption=text_card, reply_markup=keyboard)
-        else:
-            await msg.answer(text_card, reply_markup=keyboard)
-            
-    except Exception:
-        logger.exception("Помилка обробки deep-link 'show_sku'")
-        await msg.answer("Сталася помилка. Спробуйте ще раз.")
 
 # ---------------- Command: /find ----------------
 RESULTS_PER_PAGE = 10
@@ -2447,6 +2425,40 @@ def build_sorted_size_keyboard(products: list, back_url: str = None) -> InlineKe
     kb_rows.append(nav_buttons)
     
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+@router.message(CommandStart(deep_link=True, magic=F.args.startswith("show_sku_")))
+async def cmd_start_show_sku(msg: Message, command: CommandObject, state: FSMContext):
+    """
+    Обробник для deep-link'ів з каналу. Показує ідеальну картку товару.
+    """
+    try:
+        args_part = command.args.replace("show_sku_", "")
+        raw_sku = args_part.split('_from_')[0]
+        
+        products = find_product_by_sku(raw_sku)
+        if not products:
+            await msg.answer(f"На жаль, товар з артикулом `{raw_sku}` не знайдено.")
+            return
+
+        text_card = format_product_card(products[0], msg.from_user.id)
+        
+        back_url = None
+        if "_from_" in args_part:
+            from urllib.parse import unquote
+            post_link_encoded = args_part.split('_from_')[1]
+            back_url = unquote(post_link_encoded)
+
+        keyboard = build_sorted_size_keyboard(products, back_url)
+        
+        pictures = products[0].get("pictures")
+        if pictures:
+            await msg.answer_photo(photo=pictures[0], caption=text_card, reply_markup=keyboard)
+        else:
+            await msg.answer(text_card, reply_markup=keyboard)
+            
+    except Exception:
+        logger.exception("Помилка обробки deep-link 'show_sku'")
+        await msg.answer("Сталася помилка. Спробуйте ще раз.")
 
 # --- FSM: отримання артикулу або назви (updated: support component size selection) ---
 @router.message(Command("debug_find"))
