@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     # --- Налаштування каналів ---
     main_channel: str  # Наприклад: '@taverna_army'
+    main_channel_url: str
     test_channel: int
     test_channel_url: str
     supplier_channel: str
