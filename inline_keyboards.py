@@ -2,6 +2,7 @@
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.filters.callback_data import CallbackData
 from typing import List
+from config_reader import config
 
 # --- Фабрики CallbackData ---
 # Створюємо "шаблони" для даних, що будуть зашиті в кнопки.
@@ -19,10 +20,11 @@ class RemoveFromCartCallback(CallbackData, prefix="rem_cart"):
 
 def get_main_menu_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="📜 Перейти до каталогу", url=config.main_channel_url) # Потрібно додати в config
+    # Тепер кнопка буде брати посилання з конфігурації
+    builder.button(text="📜 Перейти до каталогу", url=config.main_channel_url)
     builder.button(text="🔎 Пошук за назвою/артикулом", callback_data="start_search")
     builder.button(text="🛒 Мій кошик", callback_data="show_cart")
-    builder.adjust(1) # Кожна кнопка в новому рядку
+    builder.adjust(1)
     return builder.as_markup()
 
 def get_product_card_keyboard(product: dict):
