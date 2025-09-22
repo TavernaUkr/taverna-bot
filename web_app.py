@@ -1,84 +1,72 @@
+import sys
+import os
 import asyncio
 import logging
-import threading
-from flask import Flask, request, Response
+
+# ==================== ФІНАЛЬНЕ ВИПРАВЛЕННЯ ====================
+# Цей код додає кореневу папку проєкту до шляхів пошуку Python.
+# Це гарантує, що імпорти `from handlers...`, `from services...`
+# будуть працювати незалежно від того, як Gunicorn запускає додаток.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# ============================================================
+
+from flask import Flask, request, jsonify
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# --- Наші модулі ---
+# Тепер, після виправлення, ці імпорти спрацюють
 from config_reader import config
 from handlers import user_commands, product_handlers, order_handlers
-# TODO: Створити та імпортувати ці сервіси
-# from services import telethon_client, scheduler_service 
+# from services import telethon_service, scheduler_service # Поки що закоментовано
 
-# --- Налаштування логування ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Налаштування логування
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+logger = logging.getLogger("taverna")
 
-# --- Ініціалізація Flask ---
+# Ініціалізація
+storage = MemoryStorage()
+bot = Bot(token=config.bot_token, parse_mode="HTML")
+dp = Dispatcher(storage=storage)
 app = Flask(__name__)
 
-# --- Ініціалізація Aiogram ---
-bot = Bot(token=config.bot_token, parse_mode="HTML")
-storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+# --- Flask Routes ---
+@app.route("/")
+def index():
+    return "Bot is running!", 200
 
-# --- Основна асинхронна функція для запуску бота та фонових задач ---
-async def main_async():
-    # 1. Реєструємо роутери з наших хендлерів
+@app.route("/healthz")
+def health_check():
+    return "OK", 200
+
+@app.route(config.webhook_path, methods=["POST"])
+async def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        update = types.Update.model_validate_json(request.get_data().decode('utf-8'))
+        await dp.feed_update(bot=bot, update=update)
+        return '', 200
+    return "Bad request", 400
+
+# --- Головна функція запуску ---
+async def main():
+    # Реєстрація роутерів
     dp.include_router(user_commands.router)
     dp.include_router(product_handlers.router)
     dp.include_router(order_handlers.router)
-    # TODO: Додати роутер для адмін-команд
 
-    # 2. Встановлюємо вебхук
-    webhook_url = f"{config.webhook_url}{config.webhook_path}" # Змінено
-    await bot.set_webhook(webhook_url, allowed_updates=dp.resolve_used_update_types())
-    logger.info(f"Вебхук встановлено на: {webhook_url}")
+    # Встановлення вебхука
+    webhook_info = await bot.get_webhook_info()
+    if webhook_info.url != config.webhook_url:
+        await bot.set_webhook(url=config.webhook_url)
+        logger.info(f"Webhook set to {config.webhook_url}")
 
-    # 3. Запускаємо фонові задачі (поки що заглушки)
-    # asyncio.create_task(telethon_client.start_monitoring(on_new_post))
+    logger.info("Bot ready — waiting for webhook updates...")
+
+    # --- Запуск фонових сервісів ---
+    # TODO: Розкоментувати, коли будете готові
+    # asyncio.create_task(telethon_service.start_client())
     # asyncio.create_task(scheduler_service.start_scheduler())
-    logger.info("Фонові задачі (Telethon, Scheduler) готові до запуску.")
 
-    # Ця частина потрібна, щоб asyncio-цикл не завершувався
-    await asyncio.Event().wait()
-
-
-# --- Ендпоінти Flask ---
-@app.route(config.webhook_path, methods=['POST']) # Змінено
-async def webhook_handler():
-    """Приймає оновлення від Telegram."""
-    try:
-        update_data = request.json
-        update = types.Update.model_validate(update_data, context={"bot": bot})
-        await dp.feed_update(bot=bot, update=update)
-        return Response(status=200)
-    except Exception as e:
-        logger.error(f"Помилка в обробнику вебхука: {e}")
-        return Response(status=500)
-
-@app.route('/healthz')
-def health_check():
-    """Ендпоінт для перевірки 'здоров'я' сервісом Render."""
-    return "OK", 200
-
-# --- Функція, що запускає asyncio-цикл в окремому потоці ---
-def run_async_tasks():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(main_async())
-    finally:
-        loop.close()
-
-# --- Запуск ---
 if __name__ == '__main__':
-    # Запускаємо асинхронні задачі в фоновому потоці
-    async_thread = threading.Thread(target=run_async_tasks)
-    async_thread.daemon = True
-    async_thread.start()
-    
-    # Запускаємо Flask-сервер (для локального тестування)
-    # На Render це буде робити gunicorn
-    app.run(host='0.0.0.0', port=8000)
+    # Цей блок запускає асинхронну функцію main
+    # Це потрібно, щоб Gunicorn міг імпортувати `app` без запуску бота
+    asyncio.run(main())
