@@ -8,7 +8,8 @@ from aiogram.client.default import DefaultBotProperties
 # --- Наші модулі ---
 from config_reader import config
 from handlers import user_commands, product_handlers, order_handlers
-# from services import telethon_service, scheduler_service # Поки що закоментовано
+# ‼️ ІМПОРТУЄМО НАШІ ФОНОВІ СЕРВІСИ ‼️
+from services import telethon_service, scheduler_service
 
 # --- Налаштування логування ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
@@ -18,7 +19,6 @@ logger = logging.getLogger("taverna")
 app = Flask(__name__)
 
 # --- Ініціалізація Aiogram ---
-# ‼️ ВИПРАВЛЕНО ІНІЦІАЛІЗАЦІЮ БОТА ЗГІДНО З НОВОЮ ВЕРСІЄЮ AIOGRAM ‼️
 bot = Bot(token=config.bot_token, default=DefaultBotProperties(parse_mode="HTML"))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
@@ -41,14 +41,10 @@ async def main_async():
     
     logger.info("Bot ready — waiting for webhook updates...")
 
-    # 3. Запускаємо фонові задачі (поки що заглушки)
-    # asyncio.create_task(telethon_client.start_monitoring(on_new_post))
-    # asyncio.create_task(scheduler_service.start_scheduler())
-    logger.info("Фонові задачі (Telethon, Scheduler) готові до запуску.")
-
-    # Ця частина потрібна, щоб asyncio-цикл не завершувався
-    await asyncio.Event().wait()
-
+    # --- ‼️ ЗАПУСК ФОНОВИХ СЕРВІСІВ ‼️ ---
+    # Передаємо об'єкт bot в кожен сервіс, щоб вони могли постити повідомлення
+    asyncio.create_task(telethon_service.start_client(bot))
+    asyncio.create_task(scheduler_service.start_scheduler(bot))
 
 # --- Ендпоінти Flask ---
 @app.route(config.webhook_path, methods=['POST'])
@@ -67,28 +63,10 @@ def health_check():
     """Ендпоінт для перевірки 'здоров'я' сервісом Render."""
     return "OK", 200
 
-# --- Функція, що запускає asyncio-цикл в окремому потоці ---
-def run_async_tasks():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(main_async())
-    finally:
-        loop.close()
-
-# --- Запуск ---
+# --- Головний блок запуску ---
 if __name__ == '__main__':
     # Цей блок запускає асинхронну функцію main при старті Gunicorn воркера
     try:
         asyncio.run(main_async())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Bot stopped!")
-
-    # Запускаємо асинхронні задачі в фоновому потоці
-    async_thread = threading.Thread(target=run_async_tasks)
-    async_thread.daemon = True
-    async_thread.start()
-    
-    # Запускаємо Flask-сервер (для локального тестування)
-    # На Render це буде робити gunicorn
-    app.run(host='0.0.0.0', port=8000)
