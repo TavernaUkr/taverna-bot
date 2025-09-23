@@ -64,8 +64,10 @@ def health_check():
     return "OK", 200
 
 # --- Головний блок запуску ---
-if __name__ == '__main__':
-    # Цей блок запускає асинхронну функцію main при старті Gunicorn воркера
+# Gunicorn буде запускати цей файл як модуль, і Flask подбає про запуск.
+# Ми запускаємо main_async() один раз при старті, щоб встановити вебхук і фонові задачі.
+if __name__ != '__main__':
+    # Цей блок виконається лише при запуску через Gunicorn
     try:
         asyncio.run(main_async())
     except (KeyboardInterrupt, SystemExit):
