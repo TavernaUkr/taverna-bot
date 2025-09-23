@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import threading
 from flask import Flask, request, Response
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -8,8 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 # --- Наші модулі ---
 from config_reader import config
 from handlers import user_commands, product_handlers, order_handlers
-# ‼️ ІМПОРТУЄМО НАШІ ФОНОВІ СЕРВІСИ ‼️
-from services import telethon_service, scheduler_service
+from services import telethon_service, scheduler_service # Поки що закоментовано
 
 # --- Налаштування логування ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
@@ -41,8 +41,8 @@ async def main_async():
     
     logger.info("Bot ready — waiting for webhook updates...")
 
-    # --- ‼️ ЗАПУСК ФОНОВИХ СЕРВІСІВ ‼️ ---
-    # Передаємо об'єкт bot в кожен сервіс, щоб вони могли постити повідомлення
+    # --- Запуск фонових сервісів ---
+    # TODO: Розкоментувати, коли будете готові
     asyncio.create_task(telethon_service.start_client(bot))
     asyncio.create_task(scheduler_service.start_scheduler(bot))
 
@@ -63,12 +63,31 @@ def health_check():
     """Ендпоінт для перевірки 'здоров'я' сервісом Render."""
     return "OK", 200
 
-# --- Головний блок запуску ---
-# Gunicorn буде запускати цей файл як модуль, і Flask подбає про запуск.
-# Ми запускаємо main_async() один раз при старті, щоб встановити вебхук і фонові задачі.
-if __name__ != '__main__':
-    # Цей блок виконається лише при запуску через Gunicorn
+# --- Правильний запуск для Gunicorn ---
+@app.before_request
+def start_bot_loop():
+    """
+    Запускає asyncio-цикл в окремому потоці при першому запиті.
+    Це гарантує, що main_async() виконається один раз при старті воркера.
+    """
+    # Перевіряємо, чи цикл ще не запущений, щоб уникнути помилок
     try:
-        asyncio.run(main_async())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Bot stopped!")
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # 'RuntimeError: There is no current event loop...'
+        loop = None
+
+    if loop is None or not loop.is_running():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        def run_loop():
+            try:
+                # Запускаємо нашу основну асинхронну функцію
+                loop.run_until_complete(main_async())
+            finally:
+                loop.close()
+
+        # Запускаємо цикл в окремому потоці, щоб не блокувати Flask
+        thread = threading.Thread(target=run_loop)
+        thread.daemon = True
+        thread.start()
