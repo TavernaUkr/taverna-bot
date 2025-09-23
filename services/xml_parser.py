@@ -1,4 +1,3 @@
-# services/xml_parser.py
 import logging
 import xml.etree.ElementTree as ET
 from decimal import Decimal, ROUND_HALF_UP
@@ -11,11 +10,9 @@ from config_reader import config
 logger = logging.getLogger(__name__)
 
 # Створюємо "приватний" кеш на рівні модуля.
-# Жоден інший файл не повинен звертатися до нього напряму.
 _products_cache = {}
 
-# Налаштовуємо контекст для Decimal для фінансових розрахунків
-decimal_context = ET.Context(prec=10, rounding=ROUND_HALF_UP)
+# ‼️ ВИДАЛЕНО НЕПОТРІБНИЙ РЯДОК, ЩО ВИКЛИКАВ ПОМИЛКУ ‼️
 
 # --- Функції для роботи з цінами (перенесено з вашого коду) ---
 
@@ -67,15 +64,16 @@ async def load_and_parse_xml_data():
     logger.info(f"Знайдено {len(offers)} пропозицій (offers) у файлі.")
 
     for offer in offers:
-        vendor_code = offer.find('vendorCode').text.strip()
-        if not vendor_code:
+        vendor_code_element = offer.find('vendorCode')
+        if vendor_code_element is None or not vendor_code_element.text:
             continue
+        vendor_code = vendor_code_element.text.strip()
 
         # Якщо товару з таким артикулом ще немає, створюємо для нього запис
         if vendor_code not in temp_cache:
             temp_cache[vendor_code] = {
                 'name': offer.find('name').text.strip(),
-                'description': offer.find('description').text.strip() if offer.find('description') is not None else "",
+                'description': offer.find('description').text.strip() if offer.find('description') is not None and offer.find('description').text is not None else "",
                 'pictures': [pic.text for pic in offer.findall('picture')],
                 'sku': vendor_code,
                 'base_price': offer.find('price').text.strip(),
@@ -85,7 +83,7 @@ async def load_and_parse_xml_data():
         
         # Додаємо унікальну пропозицію (розмір/колір) до товару
         param_name_element = offer.find(".//param[@name='Размер']")
-        param_name = param_name_element.text.strip() if param_name_element is not None else "N/A"
+        param_name = param_name_element.text.strip() if param_name_element is not None and param_name_element.text is not None else "N/A"
         
         temp_cache[vendor_code]['offers'].append({
             'offer_id': offer.attrib['id'],
