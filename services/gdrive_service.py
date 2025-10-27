@@ -1,163 +1,89 @@
 # services/gdrive_service.py
-import json
 import logging
-
-from google.oauth2.service_account import Credentials
+import json
+from io import BytesIO
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-import gspread
+from googleapiclient.http import MediaIoBaseUpload
+from google.oauth2.service_account import Credentials
 
-# Імпортуємо наш централізований конфіг
 from config_reader import config
 
-# Налаштовуємо логер для цього файлу
 logger = logging.getLogger(__name__)
 
-# Визначаємо необхідні права доступу для API
-SCOPES = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/drive'
-]
+# --- Ініціалізація та отримання сервісу ---
+_drive_service = None
 
 def _get_credentials():
-    """
-    Внутрішня функція для отримання облікових даних з конфігурації.
-    Ніколи не викликається ззовні цього файлу.
-    """
-    if not config.service_account_json:
-        logger.error("SERVICE_ACCOUNT_JSON не знайдено в конфігурації.")
-        return None
+    """Внутрішня функція для отримання облікових даних."""
     try:
-        # Pydantic автоматично обробляє екранування, але ми можемо
-        # додатково перевірити та завантажити JSON.
         creds_json = json.loads(config.service_account_json)
-        credentials = Credentials.from_service_account_info(
-            creds_json, scopes=SCOPES
+        return Credentials.from_service_account_info(
+            creds_json, scopes=['https://www.googleapis.com/auth/drive']
         )
-        return credentials
     except (json.JSONDecodeError, TypeError) as e:
         logger.error(f"Помилка парсингу SERVICE_ACCOUNT_JSON: {e}")
         return None
 
 def get_drive_service():
-    """Створює та повертає об'єкт для роботи з Google Drive API."""
-    credentials = _get_credentials()
-    if not credentials:
-        return None
-    try:
-        service = build('drive', 'v3', credentials=credentials)
-        logger.info("✅ Сервіс Google Drive успішно ініціалізовано.")
-        return service
-    except Exception as e:
-        logger.error(f"Не вдалося створити сервіс Google Drive: {e}")
-        return None
+    """Створює та повертає об'єкт для роботи з Google Drive API (Singleton)."""
+    global _drive_service
+    if _drive_service is None and config.use_gdrive:
+        credentials = _get_credentials()
+        if credentials:
+            try:
+                _drive_service = build('drive', 'v3', credentials=credentials)
+                logger.info("✅ Сервіс Google Drive успішно ініціалізовано.")
+            except Exception as e:
+                logger.error(f"Не вдалося створити сервіс Google Drive: {e}")
+    return _drive_service
 
-def get_sheets_client():
-    """Створює та повертає клієнт для роботи з Google Sheets API."""
-    credentials = _get_credentials()
-    if not credentials:
-        return None
-    try:
-        client = gspread.authorize(credentials)
-        logger.info("✅ Клієнт Google Sheets успішно ініціалізовано.")
-        return client
-    except Exception as e:
-        logger.error(f"Не вдалося створити клієнт Google Sheets: {e}")
-        return None
+# --- Робота з папками та файлами ---
 
-def find_or_create_folder(drive_service, folder_name: str, parent_folder_id: str):
+def _find_or_create_folder(drive_service, folder_name: str, parent_folder_id: str):
     """Знаходить папку за назвою, якщо не знаходить - створює нову."""
     query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and '{parent_folder_id}' in parents and trashed=false"
-    try:
-        response = drive_service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
-        files = response.get('files', [])
-        if files:
-            logger.info(f"Знайдено папку '{folder_name}' з ID: {files[0].get('id')}")
-            return files[0].get('id')
-        else:
-            file_metadata = {
-                'name': folder_name,
-                'mimeType': 'application/vnd.google-apps.folder',
-                'parents': [parent_folder_id]
-            }
-            folder = drive_service.files().create(body=file_metadata, fields='id').execute()
-            logger.info(f"Створено нову папку '{folder_name}' з ID: {folder.get('id')}")
-            return folder.get('id')
-    except HttpError as error:
-        logger.error(f"Помилка при пошуку або створенні папки: {error}")
-        return None
+    response = drive_service.files().list(q=query, spaces='drive', fields='files(id)').execute()
+    files = response.get('files', [])
+    if files:
+        return files[0].get('id')
+    
+    logger.info(f"Папку '{folder_name}' не знайдено. Створюю нову...")
+    folder_metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_folder_id]}
+    folder = drive_service.files().create(body=folder_metadata, fields='id').execute()
+    return folder.get('id')
 
-def create_order_sheet_in_gdrive(order_data: dict):
+async def save_post_files(post_text: str, image_bytes: bytes, photo_filename: str, text_filename: str):
     """
-    Головна функція: створює папку для замовлень (якщо її немає)
-    та новий Google Sheet файл з даними замовлення.
+    Зберігає фото та текст поста в відповідні папки на Google Drive.
+    - Фото зберігається в папку `FotoLandLiz`.
+    - Текст зберігається в папку `PostLandLiz`.
     """
-    if not config.use_gdrive:
-        logger.info("Робота з Google Drive вимкнена в конфігурації.")
-        return None
-
     drive_service = get_drive_service()
-    sheets_client = get_sheets_client()
-
-    if not drive_service or not sheets_client:
-        logger.error("Не вдалося ініціалізувати сервіси Google. Операцію скасовано.")
-        return None
-
-    # Знаходимо або створюємо папку для замовлень
-    orders_folder_id = find_or_create_folder(
-        drive_service,
-        folder_name=config.gdrive_orders_folder_name,
-        parent_folder_id=config.gdrive_folder_id
-    )
-
-    if not orders_folder_id:
-        return None
+    if not drive_service:
+        logger.warning("Спроба зберегти на GDrive, але сервіс не ініціалізовано.")
+        return
 
     try:
-        # Створюємо новий Google Sheet
-        order_id = order_data.get("id", "N/A")
-        customer_name = order_data.get("name", "Unknown")
-        spreadsheet_title = f"Замовлення #{order_id} - {customer_name}"
-        
-        spreadsheet = sheets_client.create(spreadsheet_title, folder_id=orders_folder_id)
-        worksheet = spreadsheet.get_worksheet(0)
-        
-        # Додаємо заголовки та дані (приклад)
-        headers = list(order_data.keys())
-        values = list(order_data.values())
-        worksheet.append_row(headers)
-        worksheet.append_row(values)
+        # 1. Знаходимо або створюємо головні папки для фото і текстів
+        photo_parent_folder_id = _find_or_create_folder(drive_service, "FotoLandLiz", config.gdrive_folder_id)
+        text_parent_folder_id = _find_or_create_folder(drive_service, "PostLandLiz", config.gdrive_folder_id)
 
-        logger.info(f"Створено Google Sheet для замовлення: {spreadsheet.url}")
-        return spreadsheet.url
+        if not photo_parent_folder_id or not text_parent_folder_id:
+            logger.error("Не вдалося знайти/створити базові папки на Google Drive.")
+            return
+
+        # 2. Зберігаємо файл зображення
+        photo_metadata = {'name': photo_filename, 'parents': [photo_parent_folder_id]}
+        media_photo = MediaIoBaseUpload(BytesIO(image_bytes), mimetype='image/jpeg', resumable=True)
+        drive_service.files().create(body=photo_metadata, media_body=media_photo, fields='id').execute()
+        
+        # 3. Зберігаємо текстовий файл
+        text_metadata = {'name': text_filename, 'parents': [text_parent_folder_id]}
+        media_text = MediaIoBaseUpload(BytesIO(post_text.encode('utf-8')), mimetype='text/plain', resumable=True)
+        drive_service.files().create(body=text_metadata, media_body=media_text, fields='id').execute()
+
+        logger.info(f"✅ Файли {photo_filename} та {text_filename} успішно збережено на Google Drive.")
+
     except Exception as e:
-        logger.error(f"Помилка при створенні Google Sheet: {e}")
-        return None
-
-# --- Функції для роботи з постами (поки що заглушки) ---
-
-async def save_post_to_drive(post_text: str, image_bytes: bytes, sku: str):
-    """
-    Зберігає текст та фото поста в Google Drive.
-    TODO: Реалізувати логіку збереження файлів.
-    """
-    logger.info(f"Викликано збереження поста з артикулом {sku} в Google Drive.")
-    # Тут буде ваша логіка:
-    # 1. Отримати drive_service
-    # 2. Створити папку для постів, якщо її немає
-    # 3. Зберегти image_bytes як файл зображення
-    # 4. Зберегти post_text як текстовий файл або в Google Docs
-    pass
-
-async def get_random_post_from_drive():
-    """
-    Дістає випадковий раніше збережений пост з Google Drive.
-    TODO: Реалізувати логіку отримання файлів.
-    """
-    logger.info("Викликано отримання випадкового поста з Google Drive.")
-    # Тут буде ваша логіка:
-    # 1. Отримати drive_service
-    # 2. Отримати список файлів з папки постів
-    # 3. Вибрати випадковий
-    # 4. Повернути його вміст
-    return None
+        logger.error(f"Помилка під час збереження файлів на Google Drive: {e}")
+        # Не кидаємо виняток далі, щоб не зупинити процес постингу

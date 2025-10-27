@@ -1,98 +1,122 @@
 # handlers/product_handlers.py
-from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram import Router, F, types
 from aiogram.fsm.context import FSMContext
-from typing import List
+from aiogram.types import Message, CallbackQuery
+from aiogram.exceptions import TelegramBadRequest
 
 # Імпортуємо всі наші модулі
 from fsm.order_states import OrderFSM
-from services import xml_parser
-# from services import cart_service # Уявимо, що цей сервіс вже є
+from services import xml_parser, cart_service
 from keyboards import inline_keyboards
-from keyboards.inline_keyboards import AddToCartCallback
+from keyboards.inline_keyboards import ProductCallback
 
 # Створюємо роутер для цього файлу
 router = Router()
 
-# --- Допоміжна функція для красивого виводу картки товару ---
-def _render_product_card(product: dict) -> str:
+# Словник для зберігання ID повідомлень з "плаваючою" кнопкою
+# {user_id: message_id}
+# УВАГА: це сховище в пам'яті, при перезапуску бота дані зникнуть.
+# Для production можна буде замінити на Redis або інше постійне сховище.
+floating_buttons = {}
+
+
+# --- Допоміжні функції ---
+def render_product_card(product: dict) -> str:
     """Форматує дані товару в текстове повідомлення з HTML-розміткою."""
-    pictures_html = "\n".join(f"<a href='{url}'>&#8203;</a>" for url in product['pictures'])
-    
+    pictures_html = "".join(f"<a href='{url}'>&#8203;</a>" for url in product.get('pictures', []))
     return (
         f"{pictures_html}"
-        f"<b>{product['name']}</b>\n\n"
-        f"<b>Ціна:</b> {product['final_price']} грн\n"
-        f"<b>Артикул:</b> {product['sku']}\n\n"
-        f"<i>{product['description']}</i>"
+        f"<b>{product.get('name', 'Без назви')}</b>\n\n"
+        f"<b>Ціна:</b> {product.get('final_price', 'Не вказана')} грн\n"
+        f"<b>Артикул:</b> <code>{product.get('sku', 'Не вказано')}</code>\n\n"
+        f"<i>{product.get('description', 'Опис відсутній.')}</i>"
     )
 
-# --- Обробник, що ловить повідомлення в стані пошуку ---
-@router.message(OrderFSM.awaiting_sku_search, F.text)
-async def process_product_search(message: Message, state: FSMContext):
-    """
-    Цей хендлер спрацьовує, коли користувач надіслав текст
-    після натискання кнопки "Пошук".
-    """
-    query = message.text.strip()
-    # Важливо: одразу виходимо зі стану, щоб не ловити наступні повідомлення
-    await state.clear()
-
-    # Викликаємо наш сервіс для пошуку товарів
-    found_products = await xml_parser.search_products(query)
-
-    # Сценарій 1: Нічого не знайдено
-    if not found_products:
-        await message.answer("😔 На жаль, за вашим запитом нічого не знайдено. Спробуйте інший запит.")
+async def show_floating_cart_button(message: Message):
+    """Створює або оновлює "плаваючу" кнопку кошика."""
+    user_id = message.from_user.id
+    cart = await cart_service.get_cart(user_id)
+    items = cart.get("items", [])
+    
+    if not items:
         return
 
-    # Сценарій 2: Знайдено один товар - показуємо повну картку
-    if len(found_products) == 1:
-        product = found_products[0]
-        card_text = _render_product_card(product)
-        keyboard = inline_keyboards.get_product_card_keyboard(product)
-        
-        # Відправляємо повідомлення з фото, текстом та клавіатурою
-        if product['pictures']:
-            await message.answer_photo(
-                photo=product['pictures'][0],
-                caption=card_text,
+    total_sum = sum(item.get('final_price', 0) * item.get('quantity', 1) for item in items)
+    keyboard = inline_keyboards.get_floating_cart_keyboard(user_id, total_sum)
+    text = f"✅ Товар додано. У вашому кошику {len(items)} поз. на суму {total_sum} грн.\n" \
+           f"Кошик дійсний {cart_service.CART_TTL_MINUTES} хвилин."
+
+    # Якщо ми вже відправляли кнопку, редагуємо її
+    if user_id in floating_buttons:
+        try:
+            await message.bot.edit_message_text(
+                text=text,
+                chat_id=user_id,
+                message_id=floating_buttons[user_id],
                 reply_markup=keyboard
             )
-        else:
-            await message.answer(text=card_text, reply_markup=keyboard)
+            return
+        except TelegramBadRequest: # Якщо повідомлення видалено або застаріло
+            del floating_buttons[user_id]
+
+    # Якщо кнопки ще не було, відправляємо нове повідомлення
+    sent_message = await message.answer(text, reply_markup=keyboard)
+    floating_buttons[user_id] = sent_message.message_id
+
+
+# --- Обробники ---
+@router.message(OrderFSM.awaiting_sku_search, F.text)
+async def process_product_search(message: Message, state: FSMContext):
+    query = message.text.strip()
+    await state.clear()
+    found_products = await xml_parser.search_products(query)
+    if not found_products:
+        await message.answer("😔 На жаль, за вашим запитом нічого не знайдено.")
+        return
+    product = found_products[0]
+    card_text = render_product_card(product)
+    keyboard = inline_keyboards.get_product_card_keyboard(product)
+    await message.answer(text=card_text, reply_markup=keyboard)
+
+@router.callback_query(ProductCallback.filter(F.action == 'select_size'))
+async def cb_select_size(callback: CallbackQuery, callback_data: ProductCallback, state: FSMContext):
+    await state.update_data(
+        selected_sku=callback_data.sku,
+        selected_offer_id=callback_data.offer_id
+    )
+    await callback.message.edit_text(
+        f"Тепер введіть бажану кількість товару (наприклад: 1, 2, 5):",
+    )
+    await state.set_state(OrderFSM.awaiting_quantity)
+    await callback.answer("Введіть кількість")
+
+@router.message(OrderFSM.awaiting_quantity, F.text)
+async def process_quantity(message: Message, state: FSMContext):
+    quantity_str = message.text.strip()
+    if not quantity_str.isdigit() or int(quantity_str) <= 0:
+        await message.answer("❌ Будь ласка, введіть коректне число (більше нуля).")
+        return
+    
+    quantity = int(quantity_str)
+    user_data = await state.get_data()
+    sku = user_data.get('selected_sku')
+    offer_id = user_data.get('selected_offer_id')
+
+    if not sku or not offer_id:
+        await message.answer("Щось пішло не так. Спробуйте почати спочатку.", reply_markup=inline_keyboards.get_main_menu_keyboard())
+        await state.clear()
         return
 
-    # Сценарій 3: Знайдено декілька товарів - показуємо список
-    if len(found_products) > 1:
-        response_text = "🔎 Знайдено декілька товарів. Будь ласка, уточніть ваш запит або введіть точний артикул:\n\n"
-        for prod in found_products[:10]: # Обмежимо вивід до 10 товарів
-            response_text += f"▪️ {prod['name']} (Артикул: `{prod['sku']}`)\n"
-        await message.answer(response_text)
-
-
-# --- Обробник, що ловить натискання на кнопку вибору розміру (додавання в кошик) ---
-@router.callback_query(AddToCartCallback.filter())
-async def cb_add_to_cart(callback: CallbackQuery, callback_data: AddToCartCallback):
-    """
-    Спрацьовує, коли користувач натискає на кнопку з розміром.
-    Використовує фабрику AddToCartCallback для безпечного отримання даних.
-    """
-    user_id = callback.from_user.id
-    sku = callback_data.sku
-    offer_id = callback_data.offer_id
-    quantity = callback_data.quantity
-
-    # TODO: Викликати реальний сервіс кошика
-    # await cart_service.add_item(
-    #     user_id=user_id,
-    #     sku=sku,
-    #     offer_id=offer_id,
-    #     quantity=quantity
-    # )
-    
-    # Показуємо спливаюче повідомлення користувачу
-    await callback.answer(
-        "✅ Товар додано до кошика!",
-        show_alert=False
+    await cart_service.add_item(
+        user_id=message.from_user.id,
+        sku=sku,
+        offer_id=offer_id,
+        quantity=quantity
     )
+    
+    await state.clear()
+    
+    # Показуємо "плаваючу" кнопку
+    await show_floating_cart_button(message)
+    # Повертаємо головне меню, щоб користувач міг продовжити покупки
+    await message.answer("Оберіть наступну дію:", reply_markup=inline_keyboards.get_main_menu_keyboard())

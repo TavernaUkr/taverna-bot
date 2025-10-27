@@ -1,31 +1,139 @@
 # services/cart_service.py
-# Цей файл - заглушка, яка імітує роботу з кошиком.
-# В майбутньому тут буде логіка роботи з базою даних або GCS.
+import logging
+import json
+import os
+from datetime import datetime, timedelta
+from pathlib import Path
+import uuid
+from typing import Dict, Any, List
 
-_user_carts = {}
+from config_reader import config
+from services import xml_parser
 
-async def add_item(user_id: int, sku: str, offer_id: str, quantity: int):
-    if user_id not in _user_carts:
-        _user_carts[user_id] = []
-    
-    # TODO: Додати логіку оновлення кількості, якщо товар вже є
-    from services import xml_parser # локальний імпорт, щоб уникнути циклічності
+logger = logging.getLogger(__name__)
+
+CART_TTL_MINUTES = 20
+CARTS_DIR = Path(config.orders_dir) / "user_carts"
+CARTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# --- Приватні функції (без змін) ---
+def _get_cart_filepath(user_id: int) -> Path: return CARTS_DIR / f"cart_{user_id}.json"
+
+def _read_cart_file(user_id: int) -> dict | None:
+    filepath = _get_cart_filepath(user_id)
+    if not filepath.exists(): return None
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f: cart_data = json.load(f)
+        last_modified_str = cart_data.get("last_modified")
+        if not last_modified_str:
+             logger.warning(f"Кошик {user_id} без дати модифікації. Видаляю.")
+             clear_cart(user_id); return None
+        last_modified = datetime.fromisoformat(last_modified_str)
+        if datetime.now() - last_modified > timedelta(minutes=CART_TTL_MINUTES):
+            logger.info(f"Кошик {user_id} застарів. Видаляю.")
+            clear_cart(user_id); return None
+        if "items" not in cart_data or not isinstance(cart_data["items"], list):
+             cart_data["items"] = []
+        return cart_data
+    except (json.JSONDecodeError, ValueError, IOError) as e:
+         logger.error(f"Помилка читання/парсингу кошика {user_id}: {e}"); return None
+
+def _write_cart_file(user_id: int, cart_data: Dict[str, Any]):
+    filepath = _get_cart_filepath(user_id)
+    cart_data["last_modified"] = datetime.now().isoformat()
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(cart_data, f, ensure_ascii=False, indent=4)
+    except IOError as e: logger.error(f"Помилка запису кошика {user_id}: {e}")
+
+# --- Публічні функції (ОНОВЛЕНО add_item, update_item) ---
+
+async def add_item(user_id: int, sku: str, offer_id: str, quantity: int) -> dict | None:
+    """Додає товарну позицію до кошика, зберігаючи supplier_id."""
+    cart_data = _read_cart_file(user_id) or {"items": []}
+    # Використовуємо функцію пошуку, яка повертає продукт з правильним SKU (навіть конфліктним)
     product = await xml_parser.get_product_by_sku(sku)
-    size_info = next((o for o in product['offers'] if o['offer_id'] == offer_id), None)
+    if not product:
+        logger.warning(f"Кошик {user_id}: Не знайдено товар SKU {sku}")
+        return None
 
-    _user_carts[user_id].append({
-        'sku': sku,
+    offer_info = next((o for o in product.get('offers', []) if o.get('offer_id') == offer_id), None)
+    if not offer_info:
+        logger.warning(f"Кошик {user_id}: Не знайдено offer {offer_id} для SKU {sku}")
+        return None
+
+    item_id = str(uuid.uuid4())
+    cart_data["items"].append({
+        'item_id': item_id,
+        'sku': product.get('sku'), # Беремо SKU з продукту (може бути sku_supplierid)
+        'original_sku': sku, # Зберігаємо SKU, за яким шукали спочатку
         'offer_id': offer_id,
         'quantity': quantity,
-        'name': product['name'],
-        'size': size_info['size'],
-        'final_price': product['final_price']
+        'name': product.get('name', 'Без назви'),
+        'size': offer_info.get('size', 'N/A'),
+        'final_price': product.get('final_price', 0),
+        'supplier_id': product.get('supplier_id', 'unknown')
     })
-    print(f"Кошик для {user_id}: {_user_carts[user_id]}")
+    _write_cart_file(user_id, cart_data)
+    logger.info(f"Кошик {user_id}: Додано {product.get('sku')} (пост: {product.get('supplier_id')})")
+    return cart_data
 
-async def get_cart(user_id: int):
-    return _user_carts.get(user_id, [])
+async def get_cart(user_id: int) -> Dict[str, List[Dict[str, Any]]]:
+    data = _read_cart_file(user_id)
+    if data and "items" in data and isinstance(data["items"], list):
+        return data
+    return {"items": []}
 
-async def clear_cart(user_id: int):
-    if user_id in _user_carts:
-        _user_carts[user_id] = []
+def clear_cart(user_id: int):
+    filepath = _get_cart_filepath(user_id)
+    if filepath.exists():
+        try: os.remove(filepath); logger.info(f"Кошик {user_id} очищено.")
+        except OSError as e: logger.error(f"Помилка видалення кошика {user_id}: {e}")
+
+def remove_item(user_id: int, item_id: str):
+    cart_data = _read_cart_file(user_id)
+    if not cart_data or "items" not in cart_data: return
+    original_count = len(cart_data["items"])
+    cart_data["items"] = [item for item in cart_data["items"] if item.get('item_id') != item_id]
+    if len(cart_data["items"]) < original_count:
+        _write_cart_file(user_id, cart_data)
+        logger.info(f"Кошик {user_id}: Видалено item {item_id}.")
+    else: logger.warning(f"Кошик {user_id}: Не знайдено item {item_id} для видалення.")
+
+async def update_item(user_id: int, item_id: str, new_quantity: int | None = None, new_offer_id: str | None = None) -> dict | None:
+    cart_data = _read_cart_file(user_id)
+    if not cart_data or "items" not in cart_data: return None
+    item_found = False
+
+    for item in cart_data["items"]:
+        if item.get('item_id') == item_id:
+            if new_quantity is not None and new_quantity > 0:
+                item['quantity'] = new_quantity
+                logger.info(f"Кошик {user_id}: Оновлено к-сть {item_id} -> {new_quantity}.")
+                item_found = True
+            if new_offer_id is not None and new_offer_id != item.get('offer_id'):
+                # Шукаємо продукт за SKU, що зберігається в item (може бути sku_supplierid)
+                product_sku_to_find = item.get('sku')
+                product = await xml_parser.get_product_by_sku(product_sku_to_find)
+                if not product:
+                     logger.warning(f"Кошик {user_id}: Не знайдено продукт {product_sku_to_find} для оновлення offer_id.")
+                     continue
+                new_offer_info = next((o for o in product.get('offers', []) if o.get('offer_id') == new_offer_id), None)
+                if new_offer_info:
+                    item['offer_id'] = new_offer_id
+                    item['size'] = new_offer_info.get('size', 'N/A')
+                    # Перевіряємо, чи supplier_id та sku в продукті відповідають item (на випадок конфліктів)
+                    item['supplier_id'] = product.get('supplier_id', item.get('supplier_id'))
+                    item['sku'] = product.get('sku', item.get('sku'))
+                    logger.info(f"Кошик {user_id}: Оновлено розмір {item_id} -> {new_offer_info.get('size')}.")
+                    item_found = True
+                else: logger.warning(f"Кошик {user_id}: Не знайдено новий offer {new_offer_id} для {item_id}.")
+
+            if item_found: break # Якщо щось оновили, виходимо
+
+    if item_found:
+        _write_cart_file(user_id, cart_data)
+        return cart_data
+    else:
+        logger.warning(f"Кошик {user_id}: Не знайдено item {item_id} для оновлення.")
+        return None

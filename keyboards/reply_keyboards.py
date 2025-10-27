@@ -13,8 +13,9 @@ def get_delivery_choice_keyboard() -> ReplyKeyboardMarkup:
     """Створює клавіатуру для вибору способу доставки."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Нова Пошта")],
-            [KeyboardButton(text="Укрпошта")]
+            [KeyboardButton(text="🚚 Відправка на відділення")],
+            [KeyboardButton(text="🏠 Доставка кур'єром")],
+            [KeyboardButton(text="🏢 Самовивіз (по ТТН)")],
         ],
         resize_keyboard=True,
         one_time_keyboard=True
