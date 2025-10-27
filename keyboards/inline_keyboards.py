@@ -29,9 +29,9 @@ class OrderCallback(CallbackData, prefix="order"):
 class PaymentCallback(CallbackData, prefix="payment"):
     method: str
 
-# Фабрика для кнопки "Назад"
+# НОВА Фабрика для кнопки "Назад"
 class BackCallback(CallbackData, prefix="back"):
-    to: str # Назва стану FSM, куди повернутись (e.g., 'awaiting_phone')
+    to: str # Назва стану FSM або спец. маркер ('main_menu', 'previous_delivery_step')
 
 # --- Клавіатури ---
 
@@ -54,14 +54,13 @@ def get_product_card_keyboard(product: dict) -> InlineKeyboardMarkup:
             numeric_sizes.append((int(numeric_part_match.group(1)), size, offer.get('offer_id')))
         else:
             text_sizes.append((size, offer.get('offer_id')))
-    numeric_sizes.sort()
-    text_sizes.sort()
+    numeric_sizes.sort(); text_sizes.sort()
     sorted_offers = [(size, offer_id) for _, size, offer_id in numeric_sizes] + text_sizes
     for size, offer_id in sorted_offers:
         callback_data = ProductCallback(action='select_size', sku=product['sku'], offer_id=offer_id).pack()
         builder.button(text=size, callback_data=callback_data)
     builder.adjust(3)
-    # Кнопка Назад веде в головне меню
+    # ЗМІНЕНО: Кнопка Назад веде в головне меню
     builder.row(builder.button(text="⬅️ До головного меню", callback_data=BackCallback(to='main_menu').pack()))
     return builder.as_markup()
 
@@ -71,8 +70,7 @@ def get_cart_view_keyboard(cart_items: List[dict]) -> InlineKeyboardMarkup:
     total_sum = sum(item.get('final_price', 0) * item.get('quantity', 1) for item in cart_items)
     if cart_items:
         for item in cart_items:
-            item_id = item.get('item_id')
-            item_text = f"⚙️ {item.get('name')} ({item.get('size')})"
+            item_id = item.get('item_id'); item_text = f"⚙️ {item.get('name')} ({item.get('size')})"
             builder.button(text=item_text, callback_data="do_nothing") # Placeholder
             builder.row(
                 builder.button(text="💳 Оформити", callback_data=f"checkout_item:{item_id}"), # Placeholder
@@ -82,15 +80,13 @@ def get_cart_view_keyboard(cart_items: List[dict]) -> InlineKeyboardMarkup:
     if cart_items:
         builder.row(builder.button(text=f"✅ Оформити все ({total_sum} грн)", callback_data=CartCallback(action="checkout").pack()))
         builder.row(builder.button(text="🗑 Очистити кошик", callback_data=CartCallback(action="clear").pack()))
-    # Кнопка веде в головне меню
+    # ЗМІНЕНО: Кнопка веде в головне меню
     builder.row(builder.button(text="🛍️ До головного меню", callback_data=BackCallback(to='main_menu').pack()))
     return builder.as_markup()
 
 def get_floating_cart_keyboard(user_id: int, total_sum: int, is_checkout: bool = False, checkout_sum: int = 0) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    text = f"🛒 Ваш кошик - Загальна сума: {total_sum} грн"
-    if is_checkout and checkout_sum > 0:
-        text += f" | Оформлення: {checkout_sum} грн"
+    builder = InlineKeyboardBuilder(); text = f"🛒 Ваш кошик - Загальна сума: {total_sum} грн"
+    if is_checkout and checkout_sum > 0: text += f" | Оформлення: {checkout_sum} грн"
     builder.button(text=text, callback_data=CartCallback(action='show').pack())
     return builder.as_markup()
 

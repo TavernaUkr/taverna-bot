@@ -27,7 +27,7 @@ class OrderFSM(StatesGroup):
     awaiting_notes = State()           # Очікування введення приміток до замовлення
     awaiting_confirmation = State()    # Очікування фінального підтвердження замовлення
 
-    # Додаємо словник для зручного доступу до станів за іменем (для кнопки Назад)
+    # Словник для зручного доступу до станів за іменем (для кнопки Назад)
     states_map_inv = {state.state: state for state in [
         awaiting_sku_search, awaiting_quantity, awaiting_name, awaiting_phone,
         awaiting_delivery_choice, awaiting_delivery_service, awaiting_city,

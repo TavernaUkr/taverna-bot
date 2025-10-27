@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Dict, Any
 from collections import defaultdict
 import os
-from pathlib import Path # Додаємо Path
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -15,21 +15,19 @@ COUNTER_FILE = Path(config.orders_dir) / "order_counter.txt"
 # --- Лічильник замовлень (без змін) ---
 def _load_counter() -> int:
     try:
-        if COUNTER_FILE.exists():
-            with open(COUNTER_FILE, 'r') as f: return int(f.read().strip())
+        if COUNTER_FILE.exists(): return int(COUNTER_FILE.read_text().strip())
     except Exception as e: logger.warning(f"Не вдалося завантажити лічильник: {e}")
     return 1
 def _save_counter(value: int):
     try:
         COUNTER_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(COUNTER_FILE, 'w') as f: f.write(str(value))
+        COUNTER_FILE.write_text(str(value))
     except Exception as e: logger.error(f"Не вдалося зберегти лічильник: {e}")
 _order_counter = _load_counter()
 
 # --- Імена постачальників (без змін) ---
 SUPPLIER_NAMES: Dict[str, str] = {
     "landliz": "Landliz Drop", "unknown": "Невідомий",
-    # Додавати інших
 }
 
 # --- Форматування даних (без змін у логіці, лише покращення) ---
@@ -48,8 +46,7 @@ def get_pib_initials(full_name: str | None) -> str:
     return "CLIENT"
 
 def generate_order_id() -> str:
-    global _order_counter
-    order_id = f"tav{_order_counter}"; _order_counter += 1; _save_counter(_order_counter)
+    global _order_counter; order_id = f"tav{_order_counter}"; _order_counter += 1; _save_counter(_order_counter)
     return order_id
 
 def generate_order_filename(order_id: str, customer_name: str | None) -> str:
@@ -70,8 +67,7 @@ def format_order_to_txt(order_data: Dict[str, Any]) -> str:
         all_items_text += f"\n--- ПОСТАЧАЛЬНИК: {supplier_name} ---\n"
         for i, item in enumerate(items, 1):
             price = item.get('final_price', 0); qty = item.get('quantity', 0); item_sum = qty * price
-            # Використовуємо оригінальний SKU для відображення, якщо він є
-            display_sku = item.get('original_sku') or item.get('sku','?')
+            display_sku = item.get('original_sku') or item.get('sku','?') # Пріоритет оригінальному SKU
             all_items_text += (
                  f"  {i}. {item.get('name','?')} (Арт: {display_sku})\n"
                  f"     Розмір: {item.get('size','?')}\n"
@@ -82,8 +78,9 @@ def format_order_to_txt(order_data: Dict[str, Any]) -> str:
     ttn_data = order_data.get('ttn', {}); ttn_text = ""
     if isinstance(ttn_data, dict):
         for sup_id, ttn_val in ttn_data.items():
-            sup_name = SUPPLIER_NAMES.get(sup_id, sup_id)
-            ttn_text += f"  TTH ({sup_name}): {ttn_val}\n"
+            if ttn_val: # Показуємо тільки якщо ТТН є
+                sup_name = SUPPLIER_NAMES.get(sup_id, sup_id)
+                ttn_text += f"  TTH ({sup_name}): {ttn_val}\n"
     elif isinstance(ttn_data, str): ttn_text = f"TTH: {ttn_data}\n"
 
     main_supplier_display = ", ".join(supplier_names_in_order) if supplier_names_in_order else "Не вказано"
