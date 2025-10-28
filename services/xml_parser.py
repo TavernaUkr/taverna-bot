@@ -84,10 +84,10 @@ async def load_and_parse_xml_data(supplier_id: str = "landliz", xml_url: str | N
             quantity_el = offer.find('quantity_in_stock'); 
             quantity = 0
             if quantity_el is not None and quantity_el.text: 
-            try: 
-                quantity = int(quantity_el.text) 
-            except ValueError: 
-                quantity = 0
+                try: 
+                    quantity = int(quantity_el.text) 
+                except ValueError: 
+                    quantity = 0
             is_available_attr = offer.attrib.get('available') == 'true'
             temp_cache[normalized_sku_key]['offers'].append({
                 'offer_id': offer.attrib.get('id'), 'size': size,
