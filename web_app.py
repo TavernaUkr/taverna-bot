@@ -31,6 +31,12 @@ bot = Bot(token=config.bot_token, default=DefaultBotProperties(parse_mode="HTML"
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# !!! ПІДКЛЮЧАЄМО РОУТЕРИ ТУТ (ОДИН РАЗ ПРИ СТАРТІ) !!!
+dp.include_router(user_commands.router)
+dp.include_router(product_handlers.router)
+dp.include_router(order_handlers.router)
+logger.info("Роутери Aiogram підключено.")
+
 # --- Основна асинхронна функція для запуску бота та фонових задач ---
 async def main_async():
     """
@@ -40,10 +46,6 @@ async def main_async():
     - Запуск клієнта Telethon для моніторингу
     - Запуск планувальника (Cron-Job) для постингу старих постів
     """
-    # 1. Реєструємо роутери з наших хендлерів
-    dp.include_router(user_commands.router)
-    dp.include_router(product_handlers.router)
-    dp.include_router(order_handlers.router)
 
     # 2. Переконуємось, що кеш товарів завантажено при старті
     await xml_parser.get_products_cache()

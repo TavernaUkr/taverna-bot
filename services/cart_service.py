@@ -69,7 +69,12 @@ async def get_cart(user_id: int) -> Dict[str, List[Dict[str, Any]]]:
 
 def clear_cart(user_id: int):
     filepath = _get_cart_filepath(user_id)
-    if filepath.exists(): try: os.remove(filepath); logger.info(f"Кошик {user_id} очищено.") except OSError as e: logger.error(f"Помилка видалення кошика {user_id}: {e}")
+    if filepath.exists():
+        try: # <--- Додати відступ
+            os.remove(filepath)
+            logger.info(f"Кошик {user_id} очищено.")
+        except OSError as e: # <--- Додати відступ
+            logger.error(f"Помилка видалення кошика {user_id}: {e}")
 
 def remove_item(user_id: int, item_id: str):
     cart_data = _read_cart_file(user_id)
