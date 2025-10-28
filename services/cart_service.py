@@ -50,7 +50,11 @@ async def add_item(user_id: int, sku: str, offer_id: str, quantity: int) -> dict
     if not product: logger.warning(f"Кошик {user_id}: Не знайдено SKU {sku}"); return None
     offer_info = next((o for o in product.get('offers', []) if o.get('offer_id') == offer_id), None)
     if not offer_info: logger.warning(f"Кошик {user_id}: Не знайдено offer {offer_id} для SKU {sku}"); return None
-    if not offer_info.get('available'): logger.warning(f"Кошик {user_id}: Спроба додати недоступний offer {offer_id}"); return None # Перевірка наявності
+    # Перевіряємо наявність перед додаванням
+    if not offer_info.get('available'):
+         logger.warning(f"Кошик {user_id}: Спроба додати недоступний offer {offer_id} (SKU: {sku})")
+         # Можна повертати помилку або спеціальний статус
+         return {"error": "not_available", "message": "Цей розмір наразі недоступний."}
 
     item_id = str(uuid.uuid4())
     cart_data["items"].append({
@@ -69,12 +73,7 @@ async def get_cart(user_id: int) -> Dict[str, List[Dict[str, Any]]]:
 
 def clear_cart(user_id: int):
     filepath = _get_cart_filepath(user_id)
-    if filepath.exists():
-        try: # <--- Додати відступ
-            os.remove(filepath)
-            logger.info(f"Кошик {user_id} очищено.")
-        except OSError as e: # <--- Додати відступ
-            logger.error(f"Помилка видалення кошика {user_id}: {e}")
+    if filepath.exists(): try: os.remove(filepath); logger.info(f"Кошик {user_id} очищено.") except OSError as e: logger.error(f"Помилка видалення кошика {user_id}: {e}")
 
 def remove_item(user_id: int, item_id: str):
     cart_data = _read_cart_file(user_id)
@@ -95,11 +94,11 @@ async def update_item(user_id: int, item_id: str, new_quantity: int | None = Non
             if new_quantity is not None and new_quantity > 0:
                 item['quantity'] = new_quantity; logger.info(f"Кошик {user_id}: Оновлено к-сть {item_id} -> {new_quantity}."); updated_locally = True
             if new_offer_id is not None and new_offer_id != item.get('offer_id'):
-                product_sku = item.get('sku') # Використовуємо SKU з кошика (може бути модифікований)
+                product_sku = item.get('sku')
                 product = await xml_parser.get_product_by_sku(product_sku)
                 if product:
                     new_offer = next((o for o in product.get('offers', []) if o.get('offer_id') == new_offer_id), None)
-                    if new_offer and new_offer.get('available'): # Перевіряємо наявність нового offer
+                    if new_offer and new_offer.get('available'):
                         item['offer_id'] = new_offer_id; item['size'] = new_offer.get('size', 'N/A')
                         item['supplier_id'] = product.get('supplier_id', item.get('supplier_id'))
                         item['sku'] = product.get('sku', item.get('sku'))

@@ -6,14 +6,20 @@ from typing import Dict, Any
 import io # Потрібен для BufferedInputFile
 
 from config_reader import config
-from services.order_service import SUPPLIER_NAMES
+# Імпортуємо словники з order_service
+try:
+    from services.order_service import SUPPLIER_NAMES
+except ImportError:
+    SUPPLIER_NAMES = {"landliz": "Landliz Drop", "unknown": "Невідомий"}
 
 logger = logging.getLogger(__name__)
 
-# Словник ID менеджерів
-MANAGER_TELEGRAM_IDS: Dict[str, int] = {
+# Словник ID менеджерів {supplier_id: chat_id}
+# TODO: Завантажувати з конфігурації або БД
+MANAGER_TELEGRAM_IDS: Dict[str, int | None] = { # Дозволяємо None
     "landliz": config.test_channel, # Надсилаємо в тестовий канал, поки немає реального ID
-    "unknown": config.admin_id,
+    "unknown": config.admin_id, # Fallback на адміна
+    # "supplier2": 123456789,
 }
 
 async def send_new_order_notifications(bot: Bot, order_data: Dict[str, Any], txt_content: str, filename: str):
@@ -26,11 +32,11 @@ async def send_new_order_notifications(bot: Bot, order_data: Dict[str, Any], txt
 
     txt_file_bytes = txt_content.encode('utf-8')
 
-    # 1. Сповіщення адміну (в тестовий канал)
+    # 1. Сповіщення адміну (в особисті)
     admin_caption = f"🔥 Нове замовлення `{order_id}`\nПостачальники: `{supplier_list_str}`"
     try:
         admin_txt_file = BufferedInputFile(txt_file_bytes, filename=filename)
-        await bot.send_document(chat_id=config.admin_id, document=admin_txt_file, caption=admin_caption, parse_mode="Markdown") # Надсилаємо адміну в особисті
+        await bot.send_document(chat_id=config.admin_id, document=admin_txt_file, caption=admin_caption, parse_mode="Markdown")
         logger.info(f"Сповіщення адміну про {order_id} надіслано.")
     except Exception as e: logger.error(f"Помилка сповіщення адміну: {e}")
 
@@ -38,15 +44,16 @@ async def send_new_order_notifications(bot: Bot, order_data: Dict[str, Any], txt
     for supplier_id in supplier_ids:
         manager_id = MANAGER_TELEGRAM_IDS.get(supplier_id)
         if not manager_id:
-             logger.warning(f"Не знайдено ID менеджера для {supplier_id}."); continue
+             logger.warning(f"Не знайдено ID менеджера для {supplier_id}. Сповіщення не надіслано.")
+             continue
         supplier_name = SUPPLIER_NAMES.get(supplier_id, supplier_id)
         manager_caption = f"📦 Нове замовлення `{order_id}` для `{supplier_name}`"
         ttn = all_ttns.get(supplier_id) # ТТН для цього постачальника
         try:
-             # Використовуємо io.BytesIO для передачі байтів
              manager_txt_stream = io.BytesIO(txt_file_bytes)
-             manager_txt_file = BufferedInputFile(manager_txt_stream.read(), filename=filename) # Читаємо байти зі стріму
+             manager_txt_file = BufferedInputFile(manager_txt_stream.read(), filename=filename)
              await bot.send_document(chat_id=manager_id, document=manager_txt_file, caption=manager_caption, parse_mode="Markdown")
+             # Надсилаємо ТТН менеджеру тільки при повній передоплаті
              if ttn and order_data.get('payment_method') == 'full':
                  await bot.send_message(chat_id=manager_id, text=f"📄 Створено ТТН: `{ttn}`", parse_mode="Markdown")
              logger.info(f"Сповіщення менеджеру {supplier_name} ({manager_id}) про {order_id} надіслано.")
@@ -57,14 +64,17 @@ async def send_new_order_notifications(bot: Bot, order_data: Dict[str, Any], txt
         customer_id = order_data.get('customer_id')
         if not customer_id: raise ValueError("Customer ID is missing")
         final_message = "🎉 Дякуємо! Ваше замовлення прийнято. Деталі у файлі."
-        if all_ttns:
+        # Показуємо всі ТТН клієнту (якщо вони є)
+        has_any_ttn = any(ttn_val for ttn_val in all_ttns.values())
+        if has_any_ttn:
              final_message += "\n\nВаші ТТН:"
-             has_ttn = False
              for sup_id, ttn_val in all_ttns.items():
                  if ttn_val: # Показуємо тільки якщо ТТН є
                      sup_name = SUPPLIER_NAMES.get(sup_id, sup_id)
-                     final_message += f"\n▪️ ({sup_name}): `{ttn_val}`"; has_ttn = True
-             if not has_ttn: final_message += " очікуйте номер..." # Якщо словник є, але ТТН ще немає
+                     final_message += f"\n▪️ ({sup_name}): `{ttn_val}`"
+        elif order_data.get('payment_method') == 'full': # Якщо була повна оплата, але ТТН ще немає
+             final_message += "\n\nНомер ТТН буде надіслано додатково після обробки замовлення."
+
 
         client_txt_stream = io.BytesIO(txt_file_bytes)
         client_txt_file = BufferedInputFile(client_txt_stream.read(), filename=filename)

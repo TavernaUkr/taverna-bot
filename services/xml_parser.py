@@ -10,17 +10,26 @@ from config_reader import config
 
 logger = logging.getLogger(__name__)
 
+# Словник кешів: {supplier_id: {sku_key: product_data}}
 _suppliers_caches: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _scheduler = AsyncIOScheduler(timezone="Europe/Kiev")
 
+# --- Функції цін (з покращеним округленням та обробкою помилок) ---
 def _aggressive_rounding(price: Decimal) -> int:
-    price_int = int(price.to_integral_value(rounding=ROUND_UP))
-    if price_int < 100:
-        remainder = price_int % 5
-        return price_int + (5 - remainder) if remainder != 0 else price_int
-    remainder = price_int % 10
-    if remainder == 0: return price_int
-    return price_int + (10 - remainder)
+    try:
+        # Округлення до цілого перед застосуванням логіки (використовуємо ROUND_UP)
+        price_int = int(price.to_integral_value(rounding=ROUND_UP))
+        if price_int < 100:
+            remainder = price_int % 5
+            return price_int + (5 - remainder) if remainder != 0 else price_int
+        remainder = price_int % 10
+        if remainder == 0: return price_int
+        return price_int + (10 - remainder)
+    except Exception: # Обробка можливих помилок Decimal
+        logger.error(f"Помилка агресивного округлення для ціни {price}", exc_info=True)
+        # Повертаємо 0 або інше значення за замовчуванням у разі помилки
+        return 0
+
 
 def calculate_final_price(base_price_str: str | None) -> int:
     if base_price_str is None: return 0
@@ -34,27 +43,31 @@ def calculate_final_price(base_price_str: str | None) -> int:
     except (ValueError, TypeError, AttributeError) as e:
         logger.warning(f"Помилка розрахунку ціни для '{base_price_str}': {e}")
         return 0
+    except Exception as e: # Обробка інших можливих помилок Decimal
+        logger.error(f"Неочікувана помилка розрахунку ціни для '{base_price_str}': {e}", exc_info=True)
+        return 0
+
+
+# --- Логіка завантаження та парсингу (ОНОВЛЕНО) ---
 
 async def load_and_parse_xml_data(supplier_id: str = "landliz", xml_url: str | None = None):
     """Завантажує та парсить XML для КОНКРЕТНОГО постачальника."""
     global _suppliers_caches
     url_to_load = xml_url or config.mydrop_export_url
     if not url_to_load:
-        logger.error(f"URL для '{supplier_id}' не вказано.")
-        return
+        logger.error(f"URL для '{supplier_id}' не вказано."); return
     logger.info(f"Оновлення кешу '{supplier_id}' з {url_to_load[:50]}...")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url_to_load, timeout=60) as response:
-                response.raise_for_status()
-                xml_content = await response.read()
+                response.raise_for_status(); xml_content = await response.read()
     except asyncio.TimeoutError: logger.error(f"Таймаут завантаження XML {supplier_id}"); return
     except aiohttp.ClientError as e: logger.error(f"Помилка завантаження XML {supplier_id}: {e}"); return
     except Exception as e: logger.error(f"Неочікувана помилка завантаження XML {supplier_id}: {e}"); return
 
     temp_cache: Dict[str, Dict[str, Any]] = {}
     try:
-        root = ET.fromstring(xml_content.decode('utf-8'))
+        root = ET.fromstring(xml_content.decode('utf-8')) # Декодуємо байти в рядок
         offers = root.findall('.//offer')
         logger.info(f"'{supplier_id}': Знайдено {len(offers)} offers.")
         parsed_count = 0; skipped_offers = 0
@@ -68,9 +81,8 @@ async def load_and_parse_xml_data(supplier_id: str = "landliz", xml_url: str | N
             normalized_sku_key = vendor_code.lower()
             if normalized_sku_key not in temp_cache:
                 calculated_final_price = calculate_final_price(price_text)
-                if calculated_final_price <= 0: skipped_offers += 1; continue # Пропускаємо товари з нульовою ціною
-                description_el = offer.find('description')
-                description = description_el.text.strip() if description_el is not None and description_el.text else ""
+                if calculated_final_price <= 0: skipped_offers += 1; continue
+                description_el = offer.find('description'); description = description_el.text.strip() if description_el is not None and description_el.text else ""
                 pictures = [pic.text for pic in offer.findall('picture') if pic.text]
                 temp_cache[normalized_sku_key] = {
                     'supplier_id': supplier_id, 'name': name_text, 'description': description,
@@ -78,16 +90,12 @@ async def load_and_parse_xml_data(supplier_id: str = "landliz", xml_url: str | N
                     'final_price': calculated_final_price, 'offers': []
                 }
                 parsed_count += 1
-            if normalized_sku_key not in temp_cache: # Перевірка, чи товар не був пропущений через ціну
-                skipped_offers += 1; continue
+            if normalized_sku_key not in temp_cache: skipped_offers += 1; continue # Перевірка, чи не був пропущений через ціну
             param_el = offer.find(".//param[@name='Размер']"); size = param_el.text.strip() if param_el is not None and param_el.text else "N/A"
-            quantity_el = offer.find('quantity_in_stock'); 
-            quantity = 0
-            if quantity_el is not None and quantity_el.text: 
-                try: 
-                    quantity = int(quantity_el.text) 
-                except ValueError: 
-                    quantity = 0
+            quantity_el = offer.find('quantity_in_stock'); quantity = 0
+            if quantity_el is not None and quantity_el.text:
+                 try: quantity = int(quantity_el.text)
+                 except ValueError: quantity = 0
             is_available_attr = offer.attrib.get('available') == 'true'
             temp_cache[normalized_sku_key]['offers'].append({
                 'offer_id': offer.attrib.get('id'), 'size': size,
@@ -99,6 +107,7 @@ async def load_and_parse_xml_data(supplier_id: str = "landliz", xml_url: str | N
     except Exception as e: logger.error(f"Неочікувана помилка обробки XML {supplier_id}: {e}", exc_info=True)
 
 async def get_combined_cache() -> Dict[str, Dict[str, Any]]:
+    """Повертає ОБ'ЄДНАНИЙ кеш всіх постачальників."""
     if "landliz" not in _suppliers_caches or not _suppliers_caches["landliz"]:
          logger.info("Кеш 'landliz' порожній, завантажую..."); await load_and_parse_xml_data()
     # TODO: Додати завантаження інших постачальників
@@ -111,9 +120,9 @@ async def get_combined_cache() -> Dict[str, Dict[str, Any]]:
                 logger.warning(f"Конфлікт SKU '{sku_key}'. Ключ '{final_sku_key}' для '{supplier_id}'.")
                 product_data_copy = product_data.copy()
                 product_data_copy['original_sku_for_conflict'] = product_data_copy['sku']
-                product_data_copy['sku'] = final_sku_key
+                product_data_copy['sku'] = final_sku_key # Модифікуємо SKU для унікальності
                 combined[final_sku_key] = product_data_copy
-            elif sku_key not in combined: combined[sku_key] = product_data
+            elif sku_key not in combined: combined[sku_key] = product_data # Додаємо тільки якщо новий
     return combined
 
 async def force_reload_products():
@@ -122,6 +131,7 @@ async def force_reload_products():
     logger.info("Примусове оновлення завершено.")
 
 async def get_product_by_sku(sku: str) -> dict | None:
+    """Шукає товар за SKU серед ВСІХ постачальників."""
     if not sku: return None
     cache = await get_combined_cache(); normalized_sku_key = sku.strip().lower()
     product = cache.get(normalized_sku_key)
@@ -136,7 +146,7 @@ async def get_product_by_sku(sku: str) -> dict | None:
              original_sku = product_data.get('sku', '').strip().lower()
              conflict_sku = product_data.get('original_sku_for_conflict', '').strip().lower()
              if original_sku == normalized_sku_key or conflict_sku == normalized_sku_key: return product_data
-    return product # Може бути None
+    return product
 
 async def search_products(query: str) -> List[Dict[str, Any]]:
     cache = await get_combined_cache(); query_lower = query.lower().strip(); results: List[Dict[str, Any]] = []
@@ -148,7 +158,8 @@ async def search_products(query: str) -> List[Dict[str, Any]]:
         original_conflict_sku = product_data.get('original_sku_for_conflict', '').lower()
         if query_lower in name_lower or query_lower in sku_field_lower or (original_conflict_sku and query_lower in original_conflict_sku):
             results.append(product_data)
-    return results
+    # Повертаємо не більше 15 результатів пошуку для зручності
+    return results[:15]
 
 def start_xml_parsing_scheduler():
     try:
