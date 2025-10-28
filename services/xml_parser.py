@@ -81,13 +81,13 @@ async def load_and_parse_xml_data(supplier_id: str = "landliz", xml_url: str | N
             if normalized_sku_key not in temp_cache: # Перевірка, чи товар не був пропущений через ціну
                 skipped_offers += 1; continue
             param_el = offer.find(".//param[@name='Размер']"); size = param_el.text.strip() if param_el is not None and param_el.text else "N/A"
-            quantity_el = offer.find('quantity_in_stock'); 
-            quantity = 0
-            if quantity_el is not None and quantity_el.text: 
-                try: 
-                    quantity = int(quantity_el.text) 
-                except ValueError: 
-                    quantity = 0
+        quantity_el = offer.find('quantity_in_stock'); 
+        quantity = 0
+        if quantity_el is not None and quantity_el.text: 
+            try: 
+                quantity = int(quantity_el.text) 
+            except ValueError: 
+                quantity = 0
             is_available_attr = offer.attrib.get('available') == 'true'
             temp_cache[normalized_sku_key]['offers'].append({
                 'offer_id': offer.attrib.get('id'), 'size': size,
