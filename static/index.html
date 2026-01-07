@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Taverna</title>
+    <script src="js/app.js"></script>
+    <style>
+        :root {
+            /* Використовуємо кольори з Telegram */
+            --tg-bg: var(--tg-theme-bg-color, #ffffff);
+            --tg-text: var(--tg-theme-text-color, #000000);
+            --tg-hint: var(--tg-theme-hint-color, #777777);
+            --tg-link: var(--tg-theme-link-color, #007bff);
+            --tg-button: var(--tg-theme-button-color, #007bff);
+            --tg-button-text: var(--tg-theme-button-text-color, #ffffff);
+            --tg-secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 15px;
+            background-color: var(--tg-bg);
+            color: var(--tg-text);
+            overscroll-behavior: none; /* Заборона "відтягування" сторінки */
+        }
+        #app-container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        /* --- Пошук --- */
+        #search-bar {
+            position: sticky;
+            top: 0;
+            padding: 10px 0;
+            background-color: var(--tg-bg);
+            z-index: 10;
+        }
+        #search-input {
+            width: 100%;
+            box-sizing: border-box; /* Враховує padding у ширину */
+            padding: 12px 15px;
+            font-size: 16px;
+            border: none;
+            background-color: var(--tg-secondary-bg);
+            color: var(--tg-text);
+            border-radius: 10px;
+            outline: none;
+        }
+        #search-input::placeholder {
+            color: var(--tg-hint);
+        }
+        /* --- Сітка товарів --- */
+        #product-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr; /* Дві колонки */
+            gap: 15px; /* Відстань між картками */
+            margin-top: 15px;
+        }
+        .product-card {
+            background-color: var(--tg-secondary-bg);
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            /* Додамо "клік" на картку */
+            cursor: pointer; 
+            transition: transform 0.2s ease;
+        }
+        .product-card:active {
+            transform: scale(0.98); /* Ефект натискання */
+        }
+        .product-card img {
+            width: 100%;
+            height: 150px; /* Фіксована висота */
+            object-fit: cover; /* Зберігає пропорції */
+            display: block;
+            background-color: #e0e0e0;
+        }
+        .product-card-info {
+            padding: 10px;
+        }
+        .product-card-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--tg-text);
+            /* Обрізка тексту (2 рядки) */
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            min-height: 2.5em; /* Резервуємо місце під 2 рядки */
+        }
+        .product-card-price {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--tg-link); /* Яскравий акцент на ціні */
+            margin-top: 5px;
+        }
+        /* --- Стан завантаження --- */
+        .loader {
+            text-align: center;
+            padding: 20px;
+            font-size: 18px;
+            color: var(--tg-hint);
+        }
+        /* --- НОВИЙ СТИЛЬ ДЛЯ КНОПКИ КОШИКА --- */
+        #cart-fab-button {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            width: 60px;
+            height: 60px;
+            background-color: var(--tg-button);
+            color: var(--tg-button-text);
+            border: none;
+            border-radius: 50%;
+            font-size: 28px;
+            line-height: 60px; /* Для вертикального центрування іконки */
+            text-align: center;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            cursor: pointer;
+            z-index: 100;
+        }
+        /* --- НОВИЙ СТИЛЬ ДЛЯ КНОПКИ РЕЄСТРАЦІЇ --- */
+        #supplier-register-link {
+            display: block;
+            text-align: center;
+            padding: 10px;
+            font-size: 14px;
+            color: var(--tg-hint);
+            margin-top: 20px;
+            text-decoration: none;
+        }
+        #supplier-register-link u {
+            color: var(--tg-link);
+            cursor: pointer;
+        }
+        /* --- НОВИЙ СТИЛЬ ДЛЯ КНОПКИ АДМІНА --- */
+        #admin-panel-link {
+            display: none; /* Ховаємо за замовчуванням */
+            text-align: center;
+            padding: 15px;
+            margin: 20px 0;
+            background-color: var(--tg-button);
+            color: var(--tg-button-text);
+            border-radius: 12px;
+            text-decoration: none;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div id="app-container">
+
+        <a href="supplier-register.html" id="supplier-register-link">
+            Ви постачальник? <u>Стати партнером TavernaGroup</u>
+        </a>
+    
+        <a href="admin.html" id="admin-panel-link">
+            👑 Увійти в Адмін-Панель
+        </a>
+
+        <header id="search-bar">
+            <input type="search" id="search-input" placeholder="🔍 Пошук за назвою або артикулом...">
+        </header>
+    
+        <div id="status-message" class="loader">Завантаження...</div>
+    
+        <main id="product-grid"></main>
+
+    </div>
+
+    <button id="cart-fab-button">🛒</button> 
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        
+        // ВАЖЛИВО: Вкажи тут URL твого Render API
+        const API_BASE_URL = "https://taverna-bot-r028.onrender.com"; // ЗАМІНИ ЦЕ
+
+        // Елементи DOM
+        const searchInput = document.getElementById('search-input');
+        const productGrid = document.getElementById('product-grid');
+        const statusMessage = document.getElementById('status-message');
+        
+        let tgUser = null; // Глобальна змінна
+
+        // (Функції apiCall та authenticateUser тепер в app.js)
+
+        // 6. Функція "малювання" карток
+        function renderProducts(products) {
+            productGrid.innerHTML = '';
+            if (!products || products.length === 0) {
+                statusMessage.innerText = 'Товарів не знайдено.';
+                statusMessage.style.display = 'block';
+                return;
+            }
+            statusMessage.style.display = 'none';
+            products.forEach(product => {
+                const card = document.createElement('div');
+                card.className = 'product-card';
+                card.dataset.id = product.id; 
+                
+                const availableVariants = product.variants.filter(v => v.is_available);
+                let minPrice = 0;
+                if (availableVariants.length > 0) {
+                    minPrice = Math.min(...availableVariants.map(v => v.final_price));
+                }
+                const imageUrl = product.pictures && product.pictures.length > 0 
+                    ? product.pictures[0] 
+                    : 'https://via.placeholder.com/150';
+
+                card.innerHTML = `
+                    <img src="${imageUrl}" alt="${product.name}" loading="lazy">
+                    <div class="product-card-info">
+                        <div class="product-card-name">${product.name}</div>
+                        <div class="product-card-price">${minPrice > 0 ? minPrice + ' грн' : 'Немає в наявності'}</div>
+                    </div>
+                `;
+                card.onclick = () => { onProductClick(product.id); };
+                productGrid.appendChild(card);
+            });
+        }
+        
+        // 7. Функція пошуку
+        async function performSearch(query) {
+            productGrid.innerHTML = '';
+            statusMessage.innerText = 'Шукаємо...';
+            statusMessage.style.display = 'block';
+            
+            const products = await apiCall(`/api/v1/search?query=${encodeURIComponent(query)}`);
+            if (products && !products.error) {
+                renderProducts(products);
+            }
+        }
+        
+        // 8. Обробник кліку на товар
+        function onProductClick(id) {
+            tg.HapticFeedback.impactOccurred('light');
+            window.location.href = `product-details.html?id=${id}`;
+        }
+
+        // 9. Головна функція (ОНОВЛЕНО)
+        async function main() {
+            tg.ready();
+            tg.expand();
+            
+            // 1. Спочатку авторизуємось
+            tgUser = await authenticateUser();
+            if (!tgUser) {
+                statusMessage.innerText = "Помилка авторизації. Будь ласка, перезапустіть MiniApp.";
+                return; // Зупиняємо
+            }
+            
+            tg.BackButton.hide();
+
+            // --- [ПЛАН 22] "GOD MODE" ---
+            // Перевіряємо роль юзера, якого ми отримали з /auth/login-telegram
+            if (tgUser.role === 'admin') {
+                document.getElementById('admin-panel-link').style.display = 'block';
+            }
+            
+            // 2. Налаштовуємо пошук
+            let searchTimeout;
+            searchInput.oninput = () => {
+                clearTimeout(searchTimeout);
+                searchTimeout = setTimeout(() => {
+                    const query = searchInput.value;
+                    if (query.length > 2) {
+                        performSearch(query);
+                    } else if (query.length === 0) {
+                        statusMessage.innerText = 'Введіть запит для пошуку (мін. 3 символи).';
+                        productGrid.innerHTML = '';
+                    }
+                }, 500); 
+            };
+
+            // 3. Прив'язка кнопки кошика
+            document.getElementById('cart-fab-button').onclick = () => {
+                tg.HapticFeedback.impactOccurred('light');
+                window.location.href = 'cart.html';
+            };
+            
+            // 4. Обробка Deep Link (з каналу)
+            if (tg.initDataUnsafe?.start_param) {
+                const startParam = tg.initDataUnsafe.start_param;
+                if (startParam.startsWith('sku-')) {
+                    const sku = startParam.split('-')[1];
+                    searchInput.value = sku;
+                    performSearch(sku);
+                }
+            } else {
+                 statusMessage.innerText = 'Введіть запит для пошуку.';
+                 // TODO: Тут можна завантажувати "Топ товари"
+            }
+        }
+        
+        main();
+    </script>
+</body>
+</html>
