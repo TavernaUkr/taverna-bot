@@ -13,6 +13,10 @@ from database.models import Supplier, SupplierType, SupplierStatus # <-- НОВ�
 
 logger = logging.getLogger(__name__)
 
+async def start_client(bot=None):
+    logger.info("Telethon: start_client is disabled (stub).")
+    return
+
 client = TelegramClient(
     config.session_name,
     config.tg_api_id,

@@ -18,9 +18,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from aiogram import Bot
-from aiogram.types import DefaultBotProperties
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.types import Update, BotCommand
 
 from api_models import (
     ProductAPI, SecureCreateOrderRequest, SecureAddItemRequest, 
@@ -44,6 +45,13 @@ from handlers import auth_handlers, supplier_handlers, admin_handlers, supplier_
 from services.auth_service import get_current_user
 
 logger = logging.getLogger(__name__)
+
+bot = Bot(
+    token=config.bot_token.get_secret_value(),
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+)
+
+dp = Dispatcher()
     
 # --- Ініціалізація FastAPI ---
 app = FastAPI(title="TavernaBot API", version="1.0.0")
@@ -57,8 +65,20 @@ app.add_middleware(
 )
 @app.on_event("startup")
 async def startup_event():
-    app.state.bot = Bot(token=config.bot_token.get_secret_value(), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    logger.info("FastAPI startup: Bot instance created.")
+    # зберігаємо існуючого глобального bot
+    app.state.bot = bot
+    logger.info("FastAPI startup: Bot instance ready (webhook mode).")
+
+    # Ставимо webhook (Telegram має бачити публічний URL)
+    webhook_url = f"{config.webhook_base_url}/webhook/webhook"
+    try:
+        current = await bot.get_webhook_info()
+        if current.url != webhook_url:
+            await bot.set_webhook(webhook_url)
+        logger.info(f"Webhook set to {webhook_url}")
+    except Exception as e:
+        logger.error(f"Failed to set webhook: {e}", exc_info=True)
+
 @app.on_event("shutdown")
 async def shutdown_event():
     await app.state.bot.session.close()
@@ -69,6 +89,19 @@ async def get_bot_instance() -> Bot:
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
+
+@app.post("/webhook/webhook")
+async def telegram_webhook(update: Dict[str, Any], request: Request):
+    """
+    Telegram webhook endpoint.
+    """
+    try:
+        tg_update = Update.model_validate(update)
+        await dp.feed_webhook_update(bot, tg_update)
+        return {"ok": True}
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Webhook processing failed")
 
 # --- Отримуємо юзера з JWT (який ми створили у Фазі 3.8) ---
 from services.auth_service import get_current_user
