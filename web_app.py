@@ -1,18 +1,26 @@
 
 # web_app.py
 import logging
-import uvicorn
 import base64
 import json
-from fastapi import FastAPI, HTTPException, Depends, Query, Body, Request, Form
+import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional, Dict, Any
+
+from fastapi import FastAPI, HTTPException, Depends, Query, Request, Form
+from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.routing import APIRouter
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
 from aiogram import Bot
 from aiogram.types import DefaultBotProperties
 from aiogram.enums import ParseMode
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Optional, Dict, Any
-from pathlib import Path
-from fastapi.staticfiles import StaticFiles
 
 from api_models import (
     ProductAPI, SecureCreateOrderRequest, SecureAddItemRequest, 
@@ -57,6 +65,10 @@ async def shutdown_event():
     logger.info("FastAPI shutdown: Bot session closed.")
 async def get_bot_instance() -> Bot:
     return app.state.bot
+
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
 
 # --- Отримуємо юзера з JWT (який ми створили у Фазі 3.8) ---
 from services.auth_service import get_current_user
