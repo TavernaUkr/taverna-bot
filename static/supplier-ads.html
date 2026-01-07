@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Запустити Рекламу</title>
+    <script src="js/app.js"></script>
+    <style>
+        :root {
+            --tg-bg: var(--tg-theme-bg-color, #ffffff);
+            --tg-text: var(--tg-theme-text-color, #000000);
+            --tg-hint: var(--tg-theme-hint-color, #777777);
+            --tg-link: var(--tg-theme-link-color, #007bff);
+            --tg-button: var(--tg-theme-button-color, #007bff);
+            --tg-button-text: var(--tg-theme-button-text-color, #ffffff);
+            --tg-secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
+        }
+        body { font-family: -apple-system, sans-serif; margin: 0; padding: 15px; background-color: var(--tg-secondary-bg); color: var(--tg-text); }
+        #loader { text-align: center; padding: 50px; font-size: 20px; color: var(--tg-hint); }
+        #ad-form { display: none; padding-bottom: 120px; }
+        h1 { font-size: 24px; }
+        h2 { border-bottom: 1px solid var(--tg-secondary-bg); padding-bottom: 5px; }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; font-weight: 600; margin-bottom: 8px; }
+        .form-group select, .form-group input {
+            width: 100%; box-sizing: border-box; padding: 12px 15px; font-size: 16px;
+            border: 2px solid var(--tg-bg); background-color: var(--tg-bg);
+            color: var(--tg-text); border-radius: 10px; outline: none;
+        }
+        
+        /* Платформи */
+        .platform-group label {
+            display: flex;
+            align-items: center;
+            padding: 15px;
+            background-color: var(--tg-bg);
+            border-radius: 10px;
+            margin-bottom: 10px;
+            cursor: pointer;
+        }
+        .platform-group input { width: auto; margin-right: 15px; }
+        .platform-info { flex-grow: 1; }
+        .platform-name { font-weight: 600; }
+        .platform-price { color: var(--tg-link); font-weight: 700; }
+        .platform-price span { font-weight: 500; color: var(--tg-hint); }
+
+        #footer { position: fixed; bottom: 0; left: 0; right: 0; background-color: var(--tg-bg); padding: 15px 20px 30px 20px; box-shadow: 0 -5px 15px rgba(0,0,0,0.08); z-index: 100; }
+        #submit-ad-btn {
+            width: 100%; padding: 15px; font-size: 18px; font-weight: 600; border: none;
+            border-radius: 12px; background-color: var(--tg-button);
+            color: var(--tg-button-text); cursor: pointer;
+        }
+        #submit-ad-btn:disabled { background-color: var(--tg-hint); }
+    </style>
+</head>
+<body>
+
+    <div id="loader">Авторизація...</div>
+
+    <form id="ad-form" onsubmit="return false;">
+        <h1>🚀 Запустити Рекламу (План 20/27)</h1>
+        
+        <div class="form-group">
+            <label for="product-select">1. Оберіть товар для реклами</label>
+            <select id="product-select">
+                <option value="">Завантаження товарів...</option>
+            </select>
+        </div>
+        
+        <h2>2. Оберіть платформи (1 день)</h2>
+        <div class="form-group platform-group" id="platform-list">
+            </div>
+
+        <div class="form-group">
+            <label for="days-input">3. Кількість днів</label>
+            <input type="number" id="days-input" value="1" min="1" max="30">
+        </div>
+    </form>
+    
+    <form id="liqpay-form" method="POST" action="https://www.liqpay.ua/api/3/checkout" accept-charset="utf-8" style="display: none;">
+        <input type="hidden" name="data" id="liqpay-data" />
+        <input type="hidden" name="signature" id="liqpay-signature" />
+    </form>
+    
+    <div id="footer" style="display: none;">
+        <button id="submit-ad-btn" disabled>Оберіть товар</button>
+    </div>
+
+    <script src="js/app.js"></script>
+    <script>
+        // Елементи DOM
+        const loader = document.getElementById('loader');
+        const adForm = document.getElementById('ad-form');
+        const footer = document.getElementById('footer');
+        const productSelect = document.getElementById('product-select');
+        const platformList = document.getElementById('platform-list');
+        const daysInput = document.getElementById('days-input');
+        const submitBtn = document.getElementById('submit-ad-btn');
+        
+        let tgUser = null; 
+        let jwtToken = null; 
+        let products = []; // Кеш товарів
+        let platforms = []; // Кеш платформ
+        let currentTotal = 0; // Загальна сума
+
+        // 1. Завантаження сторінки
+        async function main() {
+            tg.ready();
+            
+            // 1. Авторизація
+            jwtToken = localStorage.getItem('jwt_token');
+            const userStr = localStorage.getItem('current_user');
+            if (!jwtToken || !userStr) {
+                window.location.href = 'login.html';
+                return;
+            }
+            tgUser = JSON.parse(userStr);
+            
+            // 2. Кнопка "Назад"
+            tg.BackButton.show();
+            tg.BackButton.onClick(() => {
+                window.location.href = 'supplier-dashboard.html';
+            });
+            
+            loader.style.display = 'none';
+            adForm.style.display = 'block';
+            footer.style.display = 'block';
+            
+            // 3. Завантажуємо Товари та Платформи
+            const [productsData, platformsData] = await Promise.all([
+                apiCall(`/api/v1/supplier/my-products`),
+                apiCall(`/api/v1/supplier/ad-platforms`) // (Новий API)
+            ]);
+            
+            // 4. "Малюємо" Товари
+            if (productsData && !productsData.error) {
+                products = productsData;
+                productSelect.innerHTML = '<option value="">-- Оберіть товар --</option>';
+                products.forEach(p => {
+                    const option = document.createElement('option');
+                    option.value = p.id;
+                    option.innerText = p.name;
+                    productSelect.appendChild(option);
+                });
+            }
+            
+            // 5. "Малюємо" Платформи
+            if (platformsData && !platformsData.error) {
+                platforms = platformsData;
+                platformList.innerHTML = '';
+                platforms.forEach(p => {
+                    // (План 27) Ціна *вже* приходить з націнкою +33% з API
+                    const ourPrice = p.price_per_day; 
+                    p.ourPrice = ourPrice; 
+                    
+                    platformList.innerHTML += `
+                        <label>
+                            <input type="checkbox" class="platform-check" value="${p.id}" data-price="${ourPrice}">
+                            <div class="platform-info">
+                                <div class="platform-name">${p.name}</div>
+                                <div class="platform-price">${ourPrice} грн <span>/ день</span></div>
+                            </div>
+                        </label>
+                    `;
+                });
+            }
+            
+            // 6. Додаємо обробники
+            productSelect.onchange = updateTotalPrice;
+            platformList.onchange = updateTotalPrice;
+            daysInput.oninput = updateTotalPrice;
+            submitBtn.onclick = requestPaidAd;
+        }
+        
+        // 7. Оновлення ціни
+        function updateTotalPrice() {
+            let total = 0;
+            const days = parseInt(daysInput.value, 10) || 1;
+            
+            document.querySelectorAll('.platform-check:checked').forEach(chk => {
+                total += parseInt(chk.dataset.price, 10);
+            });
+            
+            currentTotal = total * days;
+            
+            if (currentTotal > 0 && productSelect.value) {
+                submitBtn.disabled = false;
+                submitBtn.innerText = `Оплатити ${currentTotal} грн`;
+            } else {
+                submitBtn.disabled = true;
+                submitBtn.innerText = 'Оберіть товар та платформи';
+            }
+        }
+        
+        // 8. Відправка
+        async function requestPaidAd() {
+            submitBtn.disabled = true;
+            submitBtn.innerText = 'Створення рахунку...';
+            
+            const selectedPlatforms = Array.from(document.querySelectorAll('.platform-check:checked')).map(chk => chk.value);
+            
+            const requestData = {
+                product_id: parseInt(productSelect.value, 10),
+                service_type: 'paid_ad',
+                amount: currentTotal, // (Це вже з націнкою)
+                days: parseInt(daysInput.value, 10),
+                platforms: selectedPlatforms
+            };
+            
+            const data = await apiCall('/api/v1/supplier/request-paid-ad', 'POST', requestData);
+            
+            if (data && data.data && data.signature) {
+                // УСПІХ! Перехід на LiqPay
+                document.getElementById('liqpay-data').value = data.data;
+                document.getElementById('liqpay-signature').value = data.signature;
+                document.getElementById('liqpay-form').submit();
+            } else {
+                tg.showAlert(data.detail || data.error || "Не вдалося створити рахунок.");
+                submitBtn.disabled = false;
+                updateTotalPrice();
+            }
+        }
+        
+        main();
+    </script>
+</body>
+</html>

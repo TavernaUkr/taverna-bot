@@ -14,6 +14,19 @@ from handlers.product_handlers import render_product_card # Імпортуємо
 # Створюємо роутер
 router = Router()
 
+@router.message(CommandStart(deep_link=False))
+async def cmd_start_simple(msg: Message, state: FSMContext):
+    """Обробник /start без deep-link."""
+    await state.clear()
+    
+    greeting_text = (
+        f"Вітаю, {msg.from_user.full_name}! 👋\n\n"
+        "Я — ваш бот-помічник 'Taverna'.\n\n"
+        "👉 Ви можете відкрити наш повний <b>Каталог (MiniApp)</b>, "
+        "знайти товар в боті за артикулом, або перейти на наш канал."
+    )
+    
+    await msg.answer(greeting_text, reply_markup=build_start_kb())
 
 # --- Допоміжна функція для показу кошика ---
 async def show_cart(target: Message | CallbackQuery, state: FSMContext):

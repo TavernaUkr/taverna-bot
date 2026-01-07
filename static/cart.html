@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Мій Кошик</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        :root {
+            --tg-bg: var(--tg-theme-bg-color, #ffffff);
+            --tg-text: var(--tg-theme-text-color, #000000);
+            --tg-hint: var(--tg-theme-hint-color, #777777);
+            --tg-link: var(--tg-theme-link-color, #007bff);
+            --tg-button: var(--tg-theme-button-color, #007bff);
+            --tg-button-text: var(--tg-theme-button-text-color, #ffffff);
+            --tg-secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 15px;
+            background-color: var(--tg-secondary-bg);
+            color: var(--tg-text);
+        }
+        #loader { text-align: center; padding: 50px; font-size: 20px; color: var(--tg-hint); }
+        #cart-container { display: none; padding-bottom: 120px; } /* Запас для кнопки */
+        
+        .cart-item {
+            display: flex;
+            background-color: var(--tg-bg);
+            border-radius: 12px;
+            margin-bottom: 15px;
+            padding: 10px;
+            gap: 10px;
+        }
+        .cart-item-img {
+            width: 80px;
+            height: 80px;
+            object-fit: cover;
+            border-radius: 8px;
+            background-color: #e0e0e0;
+        }
+        .cart-item-info {
+            flex-grow: 1;
+        }
+        .cart-item-name {
+            font-weight: 600;
+            color: var(--tg-text);
+            margin-bottom: 5px;
+        }
+        .cart-item-options {
+            font-size: 13px;
+            color: var(--tg-hint);
+            margin-bottom: 8px;
+        }
+        .cart-item-price {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--tg-link);
+        }
+        /* Керування кількістю */
+        .cart-item-controls {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 10px;
+        }
+        .quantity-selector {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .qty-btn {
+            width: 30px;
+            height: 30px;
+            font-size: 20px;
+            border: none;
+            border-radius: 50%;
+            background-color: var(--tg-secondary-bg);
+            color: var(--tg-text);
+            cursor: pointer;
+        }
+        .quantity-value { /* Змінено ID на Class */
+            font-size: 18px;
+            font-weight: 600;
+            min-width: 20px;
+            text-align: center;
+        }
+        .remove-btn {
+            font-size: 24px;
+            color: var(--tg-hint);
+            cursor: pointer;
+            padding: 5px;
+        }
+        
+        #empty-cart { text-align: center; padding: 40px; color: var(--tg-hint); display: none; }
+        #empty-cart button {
+            background-color: var(--tg-button);
+            color: var(--tg-button-text);
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            margin-top: 15px;
+            cursor: pointer;
+        }
+        
+        /* Футер з сумою */
+        #footer { 
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background-color: var(--tg-bg); 
+            padding: 15px 20px 30px 20px;
+            box-shadow: 0 -5px 15px rgba(0,0,0,0.08); 
+            z-index: 100;
+            display: none; /* Ховаємо, поки кошик не завантажиться */
+        }
+        #total-price {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+        #checkout-btn {
+            width: 100%;
+            padding: 15px;
+            font-size: 18px;
+            font-weight: 600;
+            border: none;
+            border-radius: 12px;
+            background-color: var(--tg-button);
+            color: var(--tg-button-text);
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loader">Завантаження кошика...</div>
+    <div id="cart-container">
+        </div>
+    <div id="empty-cart">
+        <h2>🛒 Ваш кошик порожній</h2>
+        <button id="go-to-catalog-btn">Перейти до каталогу</button>
+    </div>
+
+    <div id="footer">
+        <div id="total-price">Загальна сума: 0 грн</div>
+        <button id="checkout-btn">Оформити замовлення</button>
+    </div>
+
+    <script src="js/app.js"></script>
+    <script>
+        // Елементи DOM
+        const loader = document.getElementById('loader');
+        const cartContainer = document.getElementById('cart-container');
+        const emptyCartDiv = document.getElementById('empty-cart');
+        const footer = document.getElementById('footer');
+        const totalPriceEl = document.getElementById('total-price');
+        const checkoutBtn = document.getElementById('checkout-btn');
+        const goToCatalogBtn = document.getElementById('go-to-catalog-btn');
+
+        let tgUser = null; // Глобальна змінна
+        
+        // (Функції apiCall та authenticateUser тепер в app.js)
+
+        // 2. Функція "малювання" кошика
+        function renderCart(cartData) {
+            const { items, total_price } = cartData;
+            
+            cartContainer.innerHTML = ''; // Очищуємо
+            
+            if (!items || items.length === 0) {
+                loader.style.display = 'none';
+                cartContainer.style.display = 'none';
+                footer.style.display = 'none';
+                emptyCartDiv.style.display = 'block';
+                return;
+            }
+            
+            items.forEach(item => {
+                const itemEl = document.createElement('div');
+                itemEl.className = 'cart-item';
+                itemEl.dataset.offerId = item.variant_offer_id;
+                
+                const imageUrl = item.image_url || 'https://via.placeholder.com/80';
+
+                itemEl.innerHTML = `
+                    <img src="${imageUrl}" alt="${item.name}" class="cart-item-img">
+                    <div class="cart-item-info">
+                        <div class="cart-item-name">${item.name}</div>
+                        <div class="cart-item-options">${item.options_text || ''}</div>
+                        <div class="cart-item-price">${item.price} грн</div>
+                        <div class="cart-item-controls">
+                            <div class="quantity-selector">
+                                <button class="qty-btn qty-minus" data-offer-id="${item.variant_offer_id}" data-qty="${item.quantity}">-</button>
+                                <span class="quantity-value">${item.quantity}</span>
+                                <button class="qty-btn qty-plus" data-offer-id="${item.variant_offer_id}" data-qty="${item.quantity}" data-max-qty="${item.max_quantity}">+</button>
+                            </div>
+                            <div class="remove-btn" data-offer-id="${item.variant_offer_id}">&#x2716;</div>
+                        </div>
+                    </div>
+                `;
+                cartContainer.appendChild(itemEl);
+            });
+            
+            // Оновлюємо футер
+            totalPriceEl.innerText = `Загальна сума: ${total_price} грн`;
+            
+            // Показуємо контент
+            loader.style.display = 'none';
+            emptyCartDiv.style.display = 'none';
+            cartContainer.style.display = 'block';
+            footer.style.display = 'block';
+            
+            // 3. Додаємо обробники кнопок
+            addEventListeners();
+        }
+
+        // 4. Додавання обробників
+        function addEventListeners() {
+            // Кнопки "+"
+            document.querySelectorAll('.qty-plus').forEach(btn => {
+                btn.onclick = (e) => {
+                    tg.HapticFeedback.impactOccurred('light');
+                    const offerId = e.currentTarget.dataset.offerId;
+                    const newQty = parseInt(e.currentTarget.dataset.qty, 10) + 1;
+                    const maxQty = parseInt(e.currentTarget.dataset.maxQty, 10);
+                    if (newQty > maxQty) {
+                        tg.showAlert(`Вибачте, в наявності лише ${maxQty} шт.`);
+                        return;
+                    }
+                    updateQuantity(offerId, newQty);
+                };
+            });
+            
+            // Кнопки "-"
+            document.querySelectorAll('.qty-minus').forEach(btn => {
+                btn.onclick = (e) => {
+                    tg.HapticFeedback.impactOccurred('light');
+                    const offerId = e.currentTarget.dataset.offerId;
+                    const newQty = parseInt(e.currentTarget.dataset.qty, 10) - 1;
+                    // newQty=0 буде оброблено сервісом як видалення
+                    updateQuantity(offerId, newQty);
+                };
+            });
+            
+            // Кнопки "Видалити" (X)
+            document.querySelectorAll('.remove-btn').forEach(btn => {
+                btn.onclick = (e) => {
+                    tg.HapticFeedback.impactOccurred('medium');
+                    const offerId = e.currentTarget.dataset.offerId;
+                    removeItem(offerId);
+                };
+            });
+        }
+        
+        // 5. Функції-дії
+        async function updateQuantity(offerId, newQty) {
+            const data = await apiCall('/api/v1/cart/update', 'POST', {
+                user_id: tgUser.id,
+                variant_offer_id: offerId,
+                new_quantity: newQty
+            });
+            
+            if (data && data.success) {
+                renderCart(data.cart); // Перемальовуємо кошик з відповіді API
+            } else {
+                tg.showAlert(data.detail || data.message || "Помилка оновлення");
+            }
+        }
+        
+        async function removeItem(offerId) {
+            const data = await apiCall('/api/v1/cart/remove', 'POST', {
+                user_id: tgUser.id,
+                variant_offer_id: offerId
+            });
+            
+            if (data && data.success) {
+                renderCart(data.cart); // Перемальовуємо кошик
+            } else {
+                tg.showAlert(data.detail || data.message || "Помилка видалення");
+            }
+        }
+
+        // 6. Завантаження сторінки
+        async function main() {
+            tg.ready();
+            
+            // 1. Спочатку авторизуємось
+            tgUser = await authenticateUser();
+            if (!tgUser) {
+                loader.innerText = "Помилка авторизації.";
+                return;
+            }
+            
+            // 2. Налаштовуємо кнопки
+            tg.BackButton.show();
+            tg.BackButton.onClick(() => {
+                // Повертаємось на головну сторінку каталогу
+                window.location.href = 'index.html';
+            });
+            goToCatalogBtn.onclick = () => {
+                window.location.href = 'index.html';
+            };
+            checkoutBtn.onclick = () => {
+                // ЦЕ НАШ НАСТУПНИЙ КРОК (Фаза 2.8.4)
+                window.location.href = 'checkout.html';
+            };
+
+            // 3. Завантажуємо кошик
+            const data = await apiCall(`/api/v1/cart/${tgUser.id}`);
+            if (data && !data.error) {
+                renderCart(data);
+            } else {
+                loader.innerText = "Помилка завантаження кошика.";
+            }
+        }
+        
+        main();
+    </script>
+</body>
+</html>

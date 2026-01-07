@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Оформлення Замовлення</title>
+    <script src="js/app.js"></script>
+    <style>
+        :root {
+            --tg-bg: var(--tg-theme-bg-color, #ffffff);
+            --tg-text: var(--tg-theme-text-color, #000000);
+            --tg-hint: var(--tg-theme-hint-color, #777777);
+            --tg-link: var(--tg-theme-link-color, #007bff);
+            --tg-button: var(--tg-theme-button-color, #007bff);
+            --tg-button-text: var(--tg-theme-button-text-color, #ffffff);
+            --tg-secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            --tg-error: #FF3B30;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 15px;
+            background-color: var(--tg-secondary-bg);
+            color: var(--tg-text);
+        }
+        #loader { text-align: center; padding: 50px; font-size: 20px; color: var(--tg-hint); }
+        #checkout-form { display: none; padding-bottom: 120px; }
+        h2 { border-bottom: 1px solid var(--tg-secondary-bg); padding-bottom: 5px; }
+        /* --- Форма --- */
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; font-weight: 600; margin-bottom: 8px; }
+        .form-group input, .form-group select, .form-group textarea {
+            width: 100%; box-sizing: border-box; padding: 12px 15px; font-size: 16px;
+            border: 2px solid var(--tg-bg); background-color: var(--tg-bg);
+            color: var(--tg-text); border-radius: 10px; outline: none;
+        }
+        .form-group input:focus, .form-group select:focus { border-color: var(--tg-link); }
+        .form-group textarea { resize: vertical; min-height: 80px; }
+        .error-message { color: var(--tg-error); font-size: 13px; margin-top: 5px; display: none; }
+
+        /* --- НОВІ СТИЛІ (План 4.2) "Живий" Пошук НП --- */
+        .np-search-container {
+            position: relative;
+        }
+        .np-results-list {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background-color: var(--tg-bg);
+            border: 1px solid var(--tg-secondary-bg);
+            border-radius: 0 0 10px 10px;
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 200;
+        }
+        .np-result-item {
+            padding: 12px 15px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .np-result-item:hover {
+            background-color: var(--tg-secondary-bg);
+        }
+        /* --- */
+
+        #cart-summary {
+            background-color: var(--tg-bg);
+            padding: 15px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+        #cart-summary h2 { margin-top: 0; }
+        #summary-items { font-size: 14px; color: var(--tg-hint); }
+        #summary-total { font-size: 18px; font-weight: 700; margin-top: 10px; text-align: right; }
+        
+        #footer { 
+            position: fixed; bottom: 0; left: 0; right: 0;
+            background-color: var(--tg-bg); 
+            padding: 15px 20px 30px 20px;
+            box-shadow: 0 -5px 15px rgba(0,0,0,0.08); 
+            z-index: 100;
+        }
+        #confirm-order-btn {
+            width: 100%; padding: 15px; font-size: 18px; font-weight: 600; border: none;
+            border-radius: 12px; background-color: var(--tg-button);
+            color: var(--tg-button-text); cursor: pointer;
+        }
+        #confirm-order-btn:disabled { background-color: var(--tg-hint); cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+    <div id="loader">Завантаження...</div>
+
+    <form id="checkout-form" onsubmit="return false;">
+        <div id="cart-summary">
+            <h2>Ваше замовлення</h2>
+            <div id="summary-items">Завантаження товарів...</div>
+            <div id="summary-total">Загальна сума: 0 грн</div>
+        </div>
+
+        <h2>Ваші дані</h2>
+        <div class="form-group">
+            <label for="form-pib">Прізвище, Ім'я, По-батькові</label>
+            <input type="text" id="form-pib" placeholder="Шевченко Тарас Григорович">
+            <div class="error-message" id="error-pib"></div>
+        </div>
+        <div class="form-group">
+            <label for="form-phone">Номер телефону</label>
+            <input type="tel" id="form-phone" placeholder="+380991234567">
+            <div class="error-message" id="error-phone"></div>
+        </div>
+
+        <h2>Доставка</h2>
+        <div class="form-group">
+            <label for="form-delivery">Служба доставки</label>
+            <select id="form-delivery">
+                <option value="nova_poshta">Нова Пошта (Фулфілмент)</option>
+                </select>
+        </div>
+        
+        <div class="form-group np-search-container">
+            <label for="form-city-search">Місто</label>
+            <input type="text" id="form-city-search" placeholder="Почніть вводити назву міста...">
+            <div class="np-results-list" id="city-results"></div>
+            <div class="error-message" id="error-city"></div>
+        </div>
+        
+        <div class="form-group" id="warehouse-group" style="display: none;">
+            <label for="form-warehouse">Відділення</label>
+            <select id="form-warehouse">
+                <option value="">-- Спочатку оберіть місто --</option>
+            </select>
+            <div class="error-message" id="error-warehouse"></div>
+        </div>
+        <h2>Оплата</h2>
+        <div class="form-group">
+            <label for="form-payment">Спосіб оплати</label>
+            <select id="form-payment">
+                <option value="prepaid">Оплатити зараз (LiqPay / GPay / ApplePay)</option>
+                <option value="cod">Накладений платіж (при отриманні)</option>
+            </select>
+        </div>
+        
+        <div class="form-group">
+            <label for="form-note">Примітка (необов'язково)</label>
+            <textarea id="form-note" placeholder="Зателефонуйте мені перед доставкою..."></textarea>
+        </div>
+    </form>
+    
+    <form id="liqpay-form" method="POST" action="https://www.liqpay.ua/api/3/checkout" accept-charset="utf-8" style="display: none;">
+        <input type="hidden" name="data" id="liqpay-data" />
+        <input type="hidden" name="signature" id="liqpay-signature" />
+    </form>
+
+    <div id="footer" style="display: none;">
+        <button id="confirm-order-btn">Перейти до оплати</button>
+    </div>
+
+    <script src="js/app.js"></script>
+    <script>
+        // --- Елементи DOM ---
+        const loader = document.getElementById('loader');
+        const checkoutForm = document.getElementById('checkout-form');
+        const footer = document.getElementById('footer');
+        const summaryItems = document.getElementById('summary-items');
+        const summaryTotal = document.getElementById('summary-total');
+        const confirmBtn = document.getElementById('confirm-order-btn');
+        // Поля
+        const inputPib = document.getElementById('form-pib');
+        const inputPhone = document.getElementById('form-phone');
+        const selectDelivery = document.getElementById('form-delivery');
+        const selectPayment = document.getElementById('form-payment');
+        const inputNote = document.getElementById('form-note');
+        // (Нові) Поля НП (План 4.2)
+        const inputCity = document.getElementById('form-city-search');
+        const cityResults = document.getElementById('city-results');
+        const warehouseGroup = document.getElementById('warehouse-group');
+        const selectWarehouse = document.getElementById('form-warehouse');
+
+        // --- Стан ---
+        let tgUser = null; 
+        let currentCart = null;
+        let selectedCityRef = null; // Ref міста НП
+        let selectedWarehouseRef = null; // Ref відділення НП
+        let selectedWarehouseDesc = ""; // Опис відділення
+
+        // (Функції apiCall та authenticateUser - в app.js)
+        
+        // --- [НОВА] Логіка API Нової Пошти (План 4.2) ---
+        let citySearchTimeout;
+        inputCity.oninput = () => {
+            clearTimeout(citySearchTimeout);
+            cityResults.innerHTML = '';
+            cityResults.style.display = 'none';
+            warehouseGroup.style.display = 'none';
+            selectedCityRef = null;
+            selectedWarehouseRef = null;
+            validateForm(); // Перевалідувати
+            
+            const query = inputCity.value.trim();
+            if (query.length < 2) return;
+            
+            citySearchTimeout = setTimeout(async () => {
+                const data = await apiCall(`/api/v1/delivery/search-cities?query=${query}`);
+                if (data && data.length > 0 && !data.error) {
+                    data.forEach(city => {
+                        const item = document.createElement('div');
+                        item.className = 'np-result-item';
+                        item.innerText = city.Present; // "Київ (Київська обл.)"
+                        item.dataset.ref = city.Ref;
+                        item.onclick = () => selectCity(city);
+                        cityResults.appendChild(item);
+                    });
+                    cityResults.style.display = 'block';
+                }
+            }, 300); // Debounce 300ms
+        };
+        
+        async function selectCity(city) {
+            selectedCityRef = city.Ref;
+            inputCity.value = city.Present; // Вставляємо повну назву
+            cityResults.style.display = 'none';
+            
+            // Завантажуємо відділення
+            selectWarehouse.innerHTML = '<option value="">Завантаження відділень...</option>';
+            warehouseGroup.style.display = 'block';
+            
+            const data = await apiCall(`/api/v1/delivery/get-warehouses?city_ref=${selectedCityRef}`);
+            if (data && data.length > 0 && !data.error) {
+                selectWarehouse.innerHTML = '<option value="">-- Оберіть відділення --</option>';
+                data.forEach(wh => {
+                    const option = document.createElement('option');
+                    option.value = wh.Ref;
+                    option.innerText = wh.Description; // "Відділення №100..."
+                    selectWarehouse.appendChild(option);
+                });
+            } else {
+                selectWarehouse.innerHTML = '<option value="">Відділення не знайдено</option>';
+            }
+        }
+        
+        selectWarehouse.onchange = () => {
+            selectedWarehouseRef = selectWarehouse.value;
+            selectedWarehouseDesc = selectWarehouse.options[selectWarehouse.selectedIndex].text;
+            validateForm(); // Пере-валідуємо
+        };
+        // --- Кінець логіки НП ---
+
+        // 2. Валідація (ОНОВЛЕНО)
+        function validate(id, condition, message) {
+            // (Ця функція є у твоєму supplier-register.html, але не тут - додаємо)
+            const el = document.getElementById(id);
+            // Виправляємо, щоб знаходити правильний error-id
+            const errorId = `error-${id.split('-').pop()}`; 
+            const errorEl = document.getElementById(errorId); 
+            if(!errorEl) return condition; 
+            if (condition) {
+                errorEl.style.display = 'none';
+                return true;
+            } else {
+                errorEl.innerText = message;
+                errorEl.style.display = 'block';
+                return false;
+            }
+        }
+        
+        function validateForm() {
+            let isValid = true;
+            document.querySelectorAll('.error-message').forEach(el => el.style.display = 'none');
+            
+            // ПІБ
+            isValid = validate('form-pib', /^[А-ЯҐЄІЇа-яґєії']+(\s[А-ЯҐЄІЇа-яґєії']+){1,2}$/.test(inputPib.value.trim()), 'Введіть 2 або 3 слова (Прізвище, Ім\'я...).') && isValid;
+            // Телефон
+            isValid = validate('form-phone', /^(\+380\d{9}|0\d{9})$/.test(inputPhone.value.replace(/[^\d+]/g, '')), 'Введіть 10 або 12 цифр (напр. 0991234567).') && isValid;
+            
+            // НП (План 4.2)
+            isValid = validate('form-city-search', selectedCityRef, 'Оберіть місто зі списку.') && isValid;
+            isValid = validate('form-warehouse', selectedWarehouseRef, 'Оберіть відділення зі списку.') && isValid;
+            
+            return isValid;
+        }
+
+        // 3. Відправка замовлення (ОНОВЛЕНО)
+        async function submitOrder() {
+            if (!validateForm()) {
+                tg.HapticFeedback.notificationOccurred('error');
+                tg.showAlert('Будь ласка, виправте помилки у формі.');
+                return;
+            }
+            if (!currentCart || currentCart.items.length === 0 || !tgUser) {
+                tg.showAlert('Кошик порожній або сталася помилка авторизації.');
+                return;
+            }
+
+            confirmBtn.disabled = true;
+            confirmBtn.innerText = 'Обробка...';
+            tg.HapticFeedback.impactOccurred('medium');
+
+            // Збираємо дані форми
+            const customerData = {
+                pib: inputPib.value.trim(),
+                phone: inputPhone.value.trim(),
+                delivery_service: selectDelivery.value,
+                // (Оновлено) Зберігаємо і опис, і Ref
+                address: selectedWarehouseDesc, // "Київ, Відділення №100..."
+                address_ref: selectedWarehouseRef,
+                city_ref: selectedCityRef,
+                //
+                payment_type: selectPayment.value,
+                note: inputNote.value.trim() || null
+            };
+            
+            // (Оновлено для Фази 4.1) - Використовуємо БЕЗПЕЧНУ Модель
+            const orderRequest = {
+                customer_data: customerData
+            };
+            
+            // --- НОВА ЛОГІКА (Фаза 4.1) ---
+            if (selectPayment.value === 'prepaid') {
+                // --- 1. ОПЛАТА LIQPAY + CHECKBOX ---
+                confirmBtn.innerText = 'Створення платежу...';
+                
+                // Викликаємо *новий* endpoint, який створить замовлення
+                // І поверне `data` та `signature`
+                const data = await apiCall('/api/v1/payment/create-checkout', 'POST', orderRequest);
+                
+                if (data && data.data && data.signature) {
+                    // Заповнюємо приховану форму
+                    document.getElementById('liqpay-data').value = data.data;
+                    document.getElementById('liqpay-signature').value = data.signature;
+                    // "Натискаємо" на приховану форму, щоб перейти на LiqPay
+                    document.getElementById('liqpay-form').submit();
+                } else {
+                    tg.showAlert(data.detail || data.error || "Не вдалося створити платіж.");
+                    confirmBtn.disabled = false;
+                    updateFooterButton(); 
+                }
+                
+            } else {
+                // --- 2. НАКЛАДЕНИЙ ПЛАТІЖ (COD) ---
+                // Викликаємо *старий* endpoint
+                const data = await apiCall('/api/v1/order/create', 'POST', orderRequest);
+                
+                if (data && data.success) {
+                    tg.showPopup({
+                        title: 'Замовлення Створено!',
+                        message: `Дякуємо! Ваше замовлення ${data.order_uid} (накладений платіж) прийнято в обробку.`,
+                        buttons: [{ text: 'OK', type: 'ok' }]
+                    }, () => { tg.close(); });
+                } else {
+                    tg.showAlert(data.detail || data.error || "Не вдалося створити замовлення.");
+                    confirmBtn.disabled = false;
+                    updateFooterButton(); 
+                }
+            }
+        }
+        
+        // 4. Оновлення тексту кнопки
+        function updateFooterButton() {
+            if (!currentCart) return; // (Запобіжник)
+            if (selectPayment.value === 'prepaid') {
+                confirmBtn.innerText = `Оплатити ${currentCart.total_price} грн`;
+            } else {
+                confirmBtn.innerText = 'Підтвердити (Накладений платіж)';
+            }
+        }
+
+        // 5. Завантаження сторінки
+        async function main() {
+            tg.ready();
+            
+            // 1. Спочатку авторизуємось
+            tgUser = await authenticateUser();
+            if (!tgUser) {
+                loader.innerText = "Помилка авторизації.";
+                return;
+            }
+            
+            // 2. Налаштовуємо кнопки
+            tg.BackButton.show();
+            tg.BackButton.onClick(() => { window.location.href = 'cart.html'; });
+            confirmBtn.onclick = submitOrder;
+            selectPayment.onchange = updateFooterButton; // <-- НОВЕ
+            
+            // 3. Авто-заповнення
+            let pib = `${tgUser.first_name || ''} ${tgUser.last_name || ''}`.trim();
+            if (pib) {
+                inputPib.value = pib;
+            }
+            
+            // 4. Завантажуємо кошик
+            const data = await apiCall(`/api/v1/cart`); // (БЕЗПЕЧНО, ID з токена)
+            if (data && !data.error && data.items.length > 0) {
+                currentCart = data;
+                summaryItems.innerText = `${data.items.length} товар(ів) у кошику.`;
+                summaryTotal.innerText = `Загальна сума: ${data.total_price} грн`;
+                
+                loader.style.display = 'none';
+                checkoutForm.style.display = 'block';
+                footer.style.display = 'block';
+                updateFooterButton(); // Встановлюємо правильний текст кнопки
+            } else {
+                loader.innerText = "Ваш кошик порожній. Неможливо оформити замовлення.";
+            }
+        }
+        
+        main();
+    </script>
+</body>
+</html>

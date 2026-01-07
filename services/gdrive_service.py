@@ -1,89 +1,123 @@
 # services/gdrive_service.py
 import logging
 import json
-from io import BytesIO
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+import tempfile
+import os
 from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from googleapiclient.errors import HttpError
 
 from config_reader import config
 
 logger = logging.getLogger(__name__)
 
-# --- Ініціалізація та отримання сервісу ---
-_drive_service = None
+_gdrive_service = None
 
-def _get_credentials():
-    """Внутрішня функція для отримання облікових даних."""
+def _get_gdrive_service():
+    """Ініціалізує та кешує GDrive service."""
+    global _gdrive_service
+    if _gdrive_service:
+        return _gdrive_service
+
+    if not config.service_account_json:
+        logger.error("SERVICE_ACCOUNT_JSON не налаштовано. Google Drive не працюватиме.")
+        return None
+        
     try:
-        creds_json = json.loads(config.service_account_json)
-        return Credentials.from_service_account_info(
-            creds_json, scopes=['https://www.googleapis.com/auth/drive']
+        info = json.loads(config.service_account_json)
+        creds = Credentials.from_service_account_info(
+            info, 
+            scopes=["https://www.googleapis.com/auth/drive.file"]
         )
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.error(f"Помилка парсингу SERVICE_ACCOUNT_JSON: {e}")
+        _gdrive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        logger.info("Сервіс Google Drive успішно ініціалізовано.")
+        return _gdrive_service
+    except json.JSONDecodeError:
+        logger.error("SERVICE_ACCOUNT_JSON має невірний JSON формат.")
+        return None
+    except Exception as e:
+        logger.error(f"Помилка ініціалізації GDrive: {e}", exc_info=True)
         return None
 
-def get_drive_service():
-    """Створює та повертає об'єкт для роботи з Google Drive API (Singleton)."""
-    global _drive_service
-    if _drive_service is None and config.use_gdrive:
-        credentials = _get_credentials()
-        if credentials:
-            try:
-                _drive_service = build('drive', 'v3', credentials=credentials)
-                logger.info("✅ Сервіс Google Drive успішно ініціалізовано.")
-            except Exception as e:
-                logger.error(f"Не вдалося створити сервіс Google Drive: {e}")
-    return _drive_service
+def _find_or_create_folder(service, folder_name: str, parent_folder_id: str) -> Optional[str]:
+    """Знаходить або створює папку та повертає її ID."""
+    try:
+        query = (
+            f"'{parent_folder_id}' in parents and "
+            f"name = '{folder_name}' and "
+            f"mimeType = 'application/vnd.google-apps.folder' and "
+            f"trashed = false"
+        )
+        response = service.files().list(q=query, spaces='drive', fields='files(id)').execute()
+        files = response.get('files', [])
+        
+        if files:
+            return files[0].get('id')
 
-# --- Робота з папками та файлами ---
+        logger.info(f"GDrive: Папку '{folder_name}' не знайдено. Створюю нову...")
+        folder_metadata = {
+            'name': folder_name,
+            'mimeType': 'application/vnd.google-apps.folder',
+            'parents': [parent_folder_id]
+        }
+        folder = service.files().create(body=folder_metadata, fields='id').execute()
+        return folder.get('id')
+    except HttpError as e:
+        logger.error(f"Помилка GDrive API під час пошуку/створення папки '{folder_name}': {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Неочікувана помилка GDrive (folder): {e}", exc_info=True)
+        return None
 
-def _find_or_create_folder(drive_service, folder_name: str, parent_folder_id: str):
-    """Знаходить папку за назвою, якщо не знаходить - створює нову."""
-    query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and '{parent_folder_id}' in parents and trashed=false"
-    response = drive_service.files().list(q=query, spaces='drive', fields='files(id)').execute()
-    files = response.get('files', [])
-    if files:
-        return files[0].get('id')
-    
-    logger.info(f"Папку '{folder_name}' не знайдено. Створюю нову...")
-    folder_metadata = {'name': folder_name, 'mimeType': 'application/vnd.google-apps.folder', 'parents': [parent_folder_id]}
-    folder = drive_service.files().create(body=folder_metadata, fields='id').execute()
-    return folder.get('id')
-
-async def save_post_files(post_text: str, image_bytes: bytes, photo_filename: str, text_filename: str):
+async def upload_order_to_gdrive(order_uid: str, order_data: dict) -> bool:
     """
-    Зберігає фото та текст поста в відповідні папки на Google Drive.
-    - Фото зберігається в папку `FotoLandLiz`.
-    - Текст зберігається в папку `PostLandLiz`.
+    Головна функція. Завантажує словник `order_data` як JSON файл на GDrive.
     """
-    drive_service = get_drive_service()
-    if not drive_service:
-        logger.warning("Спроба зберегти на GDrive, але сервіс не ініціалізовано.")
-        return
+    service = _get_gdrive_service()
+    if not service or not config.gdrive_folder_id:
+        logger.warning("GDrive service не налаштований. Завантаження замовлення пропущено.")
+        return False
 
     try:
-        # 1. Знаходимо або створюємо головні папки для фото і текстів
-        photo_parent_folder_id = _find_or_create_folder(drive_service, "FotoLandLiz", config.gdrive_folder_id)
-        text_parent_folder_id = _find_or_create_folder(drive_service, "PostLandLiz", config.gdrive_folder_id)
-
-        if not photo_parent_folder_id or not text_parent_folder_id:
-            logger.error("Не вдалося знайти/створити базові папки на Google Drive.")
-            return
-
-        # 2. Зберігаємо файл зображення
-        photo_metadata = {'name': photo_filename, 'parents': [photo_parent_folder_id]}
-        media_photo = MediaIoBaseUpload(BytesIO(image_bytes), mimetype='image/jpeg', resumable=True)
-        drive_service.files().create(body=photo_metadata, media_body=media_photo, fields='id').execute()
+        # 1. Знаходимо/створюємо папку для замовлень (напр. "ZamovLandLiz")
+        orders_parent_folder_id = _find_or_create_folder(
+            service, 
+            config.gdrive_orders_folder_name, 
+            config.gdrive_folder_id
+        )
         
-        # 3. Зберігаємо текстовий файл
-        text_metadata = {'name': text_filename, 'parents': [text_parent_folder_id]}
-        media_text = MediaIoBaseUpload(BytesIO(post_text.encode('utf-8')), mimetype='text/plain', resumable=True)
-        drive_service.files().create(body=text_metadata, media_body=media_text, fields='id').execute()
+        if not orders_parent_folder_id:
+            logger.error("Не вдалося знайти або створити головну папку для замовлень GDrive.")
+            return False
 
-        logger.info(f"✅ Файли {photo_filename} та {text_filename} успішно збережено на Google Drive.")
+        # 2. Конвертуємо dict в JSON-рядок
+        order_json_str = json.dumps(order_data, ensure_ascii=False, indent=4)
+        
+        # 3. Створюємо тимчасовий файл для завантаження
+        # (GDrive API v3 вимагає завантаження з файлу)
+        with tempfile.NamedTemporaryFile(delete=False, mode='w', encoding='utf-8', suffix=".json") as tmp_file:
+            tmp_file.write(order_json_str)
+            tmp_filepath = tmp_file.name
 
+        file_name = f"{order_uid}.json"
+        
+        # 4. Завантажуємо файл
+        file_metadata = {'name': file_name, 'parents': [orders_parent_folder_id]}
+        media = MediaFileUpload(tmp_filepath, mimetype='application/json')
+        
+        service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+        
+        logger.info(f"Замовлення {order_uid} успішно завантажено на Google Drive.")
+        return True
+        
+    except HttpError as e:
+        logger.error(f"Помилка GDrive API під час завантаження файлу '{file_name}': {e}")
+        return False
     except Exception as e:
-        logger.error(f"Помилка під час збереження файлів на Google Drive: {e}")
-        # Не кидаємо виняток далі, щоб не зупинити процес постингу
+        logger.error(f"Неочікувана помилка GDrive (upload): {e}", exc_info=True)
+        return False
+    finally:
+        # 5. Гарантовано видаляємо тимчасовий файл
+        if 'tmp_filepath' in locals() and os.path.exists(tmp_filepath):
+            os.remove(tmp_filepath)

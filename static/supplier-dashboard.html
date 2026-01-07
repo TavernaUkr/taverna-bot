@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Кабінет Постачальника</title>
+    <script src="js/app.js"></script>
+    <style>
+        :root {
+            --tg-bg: var(--tg-theme-bg-color, #ffffff);
+            --tg-text: var(--tg-theme-text-color, #000000);
+            --tg-hint: var(--tg-theme-hint-color, #777777);
+            --tg-link: var(--tg-theme-link-color, #007bff);
+            --tg-button: var(--tg-theme-button-color, #007bff);
+            --tg-button-text: var(--tg-theme-button-text-color, #ffffff);
+            --tg-secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            --tg-error: #FF3B30;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 15px;
+            background-color: var(--tg-secondary-bg);
+            color: var(--tg-text);
+        }
+        #loader { text-align: center; padding: 50px; font-size: 20px; color: var(--tg-hint); }
+        #dashboard { display: none; }
+        h1 { font-size: 24px; }
+        h2 { border-bottom: 1px solid var(--tg-secondary-bg); padding-bottom: 5px; }
+        
+        /* Статистика */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background-color: var(--tg-bg);
+            border-radius: 12px;
+            padding: 15px;
+            text-align: center;
+        }
+        .stat-card-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--tg-link);
+        }
+        .stat-card-label {
+            font-size: 14px;
+            color: var(--tg-hint);
+            margin-top: 5px;
+        }
+        
+        /* Меню */
+        .dashboard-menu { display: flex; flex-direction: column; gap: 10px; }
+        .menu-button {
+            width: 100%;
+            padding: 15px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            border-radius: 12px;
+            background-color: var(--tg-bg);
+            color: var(--tg-text);
+            cursor: pointer;
+            text-align: left;
+        }
+        .menu-button.primary {
+            background-color: var(--tg-button);
+            color: var(--tg-button-text);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loader">Авторизація...</div>
+
+    <div id="dashboard">
+        <h1 id="welcome-title">Вітаємо, ...</h1>
+        
+        <h2>Ваша Статистика</h2>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-card-value" id="stat-pending-orders">0</div>
+                <div class="stat-card-label">Активні Замовлення</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-value" id="stat-total-products">0</div>
+                <div class="stat-card-label">Всього Товарів</div>
+            </div>
+        </div>
+        
+        <h2>Управління</h2>
+        <div class="dashboard-menu">
+            <a href="supplier-orders.html" class="menu-button">📋 Мої Замовлення</a>
+            <a href="supplier-products.html" class="menu-button">📦 Мої Товари</a> <a href="supplier-ads.html" class="menu-button primary">🚀 Запустити Рекламу (План 20)</a>
+        </div>
+        
+    </div>
+
+    <script src="js/app.js"></script>
+    <script>
+        // Елементи DOM
+        const loader = document.getElementById('loader');
+        const dashboard = document.getElementById('dashboard');
+        
+        let tgUser = null; 
+        let jwtToken = null; 
+
+        // --- Головна Функція ---
+        async function main() {
+            tg.ready();
+            
+            // 1. АВТОРИЗАЦІЯ (Критично!)
+            jwtToken = localStorage.getItem('jwt_token');
+            const userStr = localStorage.getItem('current_user');
+            
+            if (!jwtToken || !userStr) {
+                loader.innerText = "Помилка авторизації. Перенаправлення...";
+                window.location.href = 'login.html';
+                return;
+            }
+            
+            tgUser = JSON.parse(userStr);
+            
+            // 2. ПЕРЕВІРКА РОЛІ (Адмін або Постачальник)
+            if (tgUser.role === 'admin') {
+                document.getElementById('welcome-title').innerText = `👑 ${tgUser.first_name} (Адмін)`;
+            } else if (tgUser.role === 'supplier') {
+                document.getElementById('welcome-title').innerText = `👋 ${tgUser.first_name}`;
+            } else {
+                // Звичайний юзер не має тут бути
+                window.location.href = 'index.html';
+                return;
+            }
+            
+            logger.info("Доступ Постачальника/Адміна підтверджено.");
+            
+            // 3. Налаштовуємо кнопки
+            tg.BackButton.hide(); // На головній сторінці Кабінету - ховаємо
+            
+            // TODO: Прив'язати кнопки до нових сторінок
+            // document.getElementById('btn-my-orders').onclick = () => { window.location.href = 'supplier-orders.html'; };
+            // document.getElementById('btn-my-products').onclick = () => { window.location.href = 'supplier-products.html'; };
+            
+            // 4. Завантажуємо дані
+            loader.style.display = 'none';
+            dashboard.style.display = 'block';
+            
+            // Завантажуємо статистику
+            const data = await apiCall('/api/v1/supplier/stats');
+            if (data && !data.error) {
+                document.getElementById('stat-pending-orders').innerText = data.pending_orders;
+                document.getElementById('stat-total-products').innerText = data.total_products;
+            }
+        }
+        
+        main();
+    </script>
+</body>
+</html>

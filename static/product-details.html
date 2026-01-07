@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Деталі Товару</title>tgUser.id
+    <script src="js/app.js"></script>
+    <style>
+        :root {
+            --tg-bg: var(--tg-theme-bg-color, #ffffff);
+            --tg-text: var(--tg-theme-text-color, #000000);
+            --tg-hint: var(--tg-theme-hint-color, #777777);
+            --tg-link: var(--tg-theme-link-color, #007bff);
+            --tg-button: var(--tg-theme-button-color, #007bff);
+            --tg-button-text: var(--tg-theme-button-text-color, #ffffff);
+            --tg-secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: var(--tg-secondary-bg);
+            color: var(--tg-text);
+        }
+        #loader { text-align: center; padding: 50px; font-size: 20px; color: var(--tg-hint); }
+        #product-content { display: none; }
+        #product-image { width: 100%; height: 350px; object-fit: cover; background-color: #e0e0e0; }
+        #product-info {
+            background-color: var(--tg-bg);
+            padding: 20px;
+            border-radius: 20px 20px 0 0;
+            margin-top: -20px;
+            position: relative;
+            padding-bottom: 120px; /* Запас для кнопки "В кошик" */
+        }
+        #product-name { font-size: 24px; font-weight: 700; }
+        #product-sku { font-size: 14px; color: var(--tg-hint); margin-top: 5px; }
+        #product-price { font-size: 28px; font-weight: 800; color: var(--tg-link); margin-top: 15px; }
+        h2 { font-size: 18px; margin-top: 20px; margin-bottom: 10px; }
+        
+        /* --- Гнучкі Опції --- */
+        .option-group { margin-bottom: 15px; }
+        .option-group label {
+            font-weight: 600;
+            display: block;
+            margin-bottom: 8px;
+        }
+        .option-group select {
+            width: 100%;
+            padding: 12px;
+            font-size: 16px;
+            border: 2px solid var(--tg-secondary-bg);
+            border-radius: 8px;
+            background-color: var(--tg-bg);
+            color: var(--tg-text);
+            cursor: pointer;
+        }
+
+        /* --- Кількість --- */
+        #quantity-selector { display: flex; align-items: center; gap: 15px; margin-top: 15px; }
+        .qty-btn { width: 40px; height: 40px; font-size: 24px; border: none; border-radius: 50%; background-color: var(--tg-secondary-bg); color: var(--tg-text); cursor: pointer; }
+        #quantity-value { font-size: 20px; font-weight: 600; min-width: 30px; text-align: center; }
+        
+        #product-description { margin-top: 20px; line-height: 1.6; color: var(--tg-hint); white-space: pre-wrap; }
+        
+        /* --- Кнопка "В кошик" (прилипає донизу) --- */
+        #footer { 
+            position: fixed; /* Прилипання */
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background-color: var(--tg-bg); 
+            padding: 15px 20px 30px 20px; /* 30px знизу для SafeArea */
+            box-shadow: 0 -5px 15px rgba(0,0,0,0.08); 
+            z-index: 100;
+        }
+        #add-to-cart-btn {
+            width: 100%;
+            padding: 15px;
+            font-size: 18px;
+            font-weight: 600;
+            border: none;
+            border-radius: 12px;
+            background-color: var(--tg-button);
+            color: var(--tg-button-text);
+            cursor: pointer;
+        }
+        #add-to-cart-btn:disabled {
+            background-color: var(--tg-hint);
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loader">Завантаження товару...</div>
+
+    <div id="product-content">
+        <img id="product-image" src="https://via.placeholder.com/350" alt="Зображення товару">
+        
+        <div id="product-info">
+            <div id="product-name">Назва товару</div>
+            <div id="product-sku">Артикул: -</div>
+            <div id="product-price">Оберіть опції</div>
+
+            <div id="product-options-container">
+                </div>
+
+            <h2>Кількість</h2>
+            <div id="quantity-selector">
+                <button class="qty-btn" id="qty-minus" disabled>-</button>
+                <span id="quantity-value">1</span>
+                <button class="qty-btn" id="qty-plus">+</button>
+            </div>
+            
+            <h2>Опис</h2>
+            <pre id="product-description">Опис...</pre>
+        </div>
+
+        <div id="footer">
+            <button id="add-to-cart-btn" disabled>Оберіть опції</button>
+        </div>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        
+        // ВАЖЛИВО: Вкажи тут URL твого Render API
+        const API_BASE_URL = "https://taverna-bot-r028.onrender.com"; // ЗАМІНИ ЦЕ
+
+        // Елементи DOM
+        const loader = document.getElementById('loader');
+        const productContent = document.getElementById('product-content');
+        const productName = document.getElementById('product-name');
+        const productSku = document.getElementById('product-sku');
+        const productPrice = document.getElementById('product-price');
+        const productDesc = document.getElementById('product-description');
+        const productImage = document.getElementById('product-image');
+        const optionsContainer = document.getElementById('product-options-container');
+        const addToCartBtn = document.getElementById('add-to-cart-btn');
+        const qtyValue = document.getElementById('quantity-value');
+        const qtyMinus = document.getElementById('qty-minus');
+        const qtyPlus = document.getElementById('qty-plus');
+
+        // Стан сторінки
+        let tgUser = null;
+        let currentProduct = null;
+        let selectedVariant = null;
+        let currentQuantity = 1;
+
+        // (Функції apiCall та authenticateUser тепер в app.js)
+
+        // 2. Рендер сторінки
+        function renderProductDetails(product) {
+            currentProduct = product;
+            productName.innerText = product.name;
+            productSku.innerText = `Артикул: ${product.sku}`;
+            productDesc.innerText = product.description || "Опис відсутній.";
+            
+            if (product.pictures && product.pictures.length > 0) {
+                productImage.src = product.pictures[0];
+            }
+
+            optionsContainer.innerHTML = '';
+            product.options.forEach(option => {
+                const optionGroup = document.createElement('div');
+                optionGroup.className = 'option-group';
+                
+                const label = document.createElement('label');
+                label.innerText = option.name;
+                optionGroup.appendChild(label);
+                
+                const select = document.createElement('select');
+                select.dataset.optionId = option.id; 
+                
+                const defaultOption = document.createElement('option');
+                defaultOption.value = "";
+                defaultOption.innerText = `-- Оберіть ${option.name.toLowerCase()} --`;
+                select.appendChild(defaultOption);
+                
+                option.values.forEach(value => {
+                    const valueOption = document.createElement('option');
+                    valueOption.value = value.id;
+                    valueOption.innerText = value.value;
+                    select.appendChild(valueOption);
+                });
+                
+                select.onchange = findMatchingVariant;
+                optionGroup.appendChild(select);
+                optionsContainer.appendChild(optionGroup);
+            });
+            
+            loader.style.display = 'none';
+            productContent.style.display = 'block';
+            
+            tg.BackButton.show();
+            tg.BackButton.onClick(() => {
+                window.location.href = 'index.html';
+            });
+        }
+        
+        // 3. ОНОВЛЕННЯ ЦІНИ (КЛЮЧОВА ГНУЧКА ЛОГІКА)
+        function findMatchingVariant() {
+            const selectedValueIds = new Set();
+            let allOptionsSelected = true;
+            
+            document.querySelectorAll('#product-options-container select').forEach(select => {
+                if (select.value) {
+                    selectedValueIds.add(parseInt(select.value, 10));
+                } else {
+                    allOptionsSelected = false;
+                }
+            });
+            
+            if (!allOptionsSelected) {
+                productPrice.innerText = "Оберіть всі опції";
+                addToCartBtn.disabled = true;
+                addToCartBtn.innerText = 'Оберіть опції';
+                selectedVariant = null;
+                return;
+            }
+            
+            selectedVariant = currentProduct.variants.find(variant => {
+                const variantValueIds = new Set(variant.option_value_ids);
+                if (variantValueIds.size !== selectedValueIds.size) return false;
+                for (const id of selectedValueIds) {
+                    if (!variantValueIds.has(id)) return false;
+                }
+                return true;
+            });
+            
+            updatePriceAndAvailability();
+        }
+
+        // 4. Оновлення UI
+        function updatePriceAndAvailability() {
+            if (!selectedVariant) {
+                 productPrice.innerText = "Недоступно";
+                 addToCartBtn.disabled = true;
+                 addToCartBtn.innerText = 'Така комбінація недоступна';
+            } else if (!selectedVariant.is_available) {
+                productPrice.innerText = `${selectedVariant.final_price} грн`;
+                addToCartBtn.disabled = true;
+                addToCartBtn.innerText = 'Немає в наявності';
+            } else if (currentQuantity > selectedVariant.quantity) {
+                productPrice.innerText = `${selectedVariant.final_price} грн`;
+                addToCartBtn.disabled = true;
+                addToCartBtn.innerText = `Недостатньо (макс: ${selectedVariant.quantity})`;
+            } else {
+                const totalPrice = selectedVariant.final_price * currentQuantity;
+                productPrice.innerText = `${selectedVariant.final_price} грн`;
+                addToCartBtn.disabled = false;
+                addToCartBtn.innerText = `Додати в кошик - ${totalPrice} грн`;
+            }
+            updateQuantityButtons();
+        }
+
+        // 5. Керування кількістю
+        qtyMinus.onclick = () => {
+            if (currentQuantity > 1) {
+                currentQuantity--;
+                qtyValue.innerText = currentQuantity;
+                updatePriceAndAvailability();
+            }
+        };
+        qtyPlus.onclick = () => {
+            currentQuantity++;
+            qtyValue.innerText = currentQuantity;
+            updatePriceAndAvailability();
+        };
+        function updateQuantityButtons() {
+            qtyMinus.disabled = (currentQuantity <= 1);
+            if (selectedVariant && currentQuantity >= selectedVariant.quantity) {
+                qtyPlus.disabled = true;
+            } else {
+                qtyPlus.disabled = false;
+            }
+        }
+
+        // 6. Обробник кнопки "В кошик" (ОНОВЛЕНО)
+        addToCartBtn.onclick = async () => {
+            if (!selectedVariant || !tgUser) return; // Перевіряємо tgUser
+            
+            tg.HapticFeedback.impactOccurred('medium');
+            addToCartBtn.disabled = true;
+            addToCartBtn.innerText = 'Додаємо...';
+            
+            const requestData = {
+                user_id: tgUser.id, // <-- ВИКОРИСТОВУЄМО БЕЗПЕЧНИЙ ID
+                variant_offer_id: selectedVariant.supplier_offer_id,
+                quantity: currentQuantity
+            };
+            
+            const data = await apiCall('/api/v1/cart/add', 'POST', requestData);
+            
+            if (data && data.success) {
+                // Успіх! Не показуємо popup, а ОДРАЗУ
+                // переходимо на сторінку кошика
+                window.location.href = 'cart.html';
+            } else {
+                tg.showAlert(data.detail || data.message || "Помилка додавання в кошик.");
+                updatePriceAndAvailability(); // Повертаємо кнопку
+            }
+        };
+
+        // 7. Головна функція (ОНОВЛЕНО)
+        async function main() {
+            tg.ready();
+            
+            // 1. Спочатку авторизуємось
+            tgUser = await authenticateUser();
+            if (!tgUser) {
+                loader.innerText = "Помилка авторизації.";
+                return;
+            }
+            
+            // 2. Отримуємо SKU з URL
+            const urlParams = new URLSearchParams(window.location.search);
+            const sku = urlParams.get('sku');
+            
+            if (!sku) {
+                loader.innerText = 'Помилка: не вказано SKU товару.';
+                return;
+            }
+            
+            // 3. Завантажуємо дані
+            const product = await apiCall(`/api/v1/product/${sku}`);
+            if (product && !product.error) {
+                renderProductDetails(product);
+            }
+        }
+        
+        main();
+    </script>
+</body>
+</html>

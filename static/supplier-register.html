@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Реєстрація Постачальника</title>
+    <script src="js/app.js"></script> <style>
+        /* ... (всі твої стилі залишаються, я їх не міняю) ... */
+        :root {
+            --tg-bg: var(--tg-theme-bg-color, #ffffff);
+            --tg-text: var(--tg-theme-text-color, #000000);
+            --tg-hint: var(--tg-theme-hint-color, #777777);
+            --tg-link: var(--tg-theme-link-color, #007bff);
+            --tg-button: var(--tg-theme-button-color, #007bff);
+            --tg-button-text: var(--tg-theme-button-text-color, #ffffff);
+            --tg-secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            --tg-error: #FF3B30;
+        }
+        body { font-family: -apple-system, sans-serif; margin: 0; padding: 15px; background-color: var(--tg-secondary-bg); color: var(--tg-text); }
+        #loader { text-align: center; padding: 50px; font-size: 20px; color: var(--tg-hint); }
+        #register-form { display: none; padding-bottom: 120px; }
+        h1 { font-size: 24px; }
+        h2 { border-bottom: 1px solid var(--tg-secondary-bg); padding-bottom: 5px; }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; font-weight: 600; margin-bottom: 8px; }
+        .form-group input, .form-group select {
+            width: 100%; box-sizing: border-box; padding: 12px 15px; font-size: 16px;
+            border: 2px solid var(--tg-bg); background-color: var(--tg-bg);
+            color: var(--tg-text); border-radius: 10px; outline: none;
+        }
+        .form-group input:focus, .form-group select:focus { border-color: var(--tg-link); }
+        .error-message { color: var(--tg-error); font-size: 13px; margin-top: 5px; display: none; }
+        .dynamic-fields { display: none; padding-top: 10px; }
+        #mydrop-fields, #independent-fields, #payout-iban-fields {
+            padding: 15px;
+            background-color: var(--tg-bg);
+            border-radius: 10px;
+        }
+        /* (Поле для карти поки ховаємо, бо потрібен токенізатор (План 24G)) */
+        #payout-card-fields { display: none; } 
+        
+        .tos-group { display: flex; align-items: flex-start; gap: 10px; margin-top: 25px; }
+        .tos-group input { width: auto; margin-top: 5px; }
+        .tos-group label { font-weight: normal; font-size: 14px; color: var(--tg-hint); }
+        .tos-group label a { color: var(--tg-link); cursor: pointer; }
+        #footer { position: fixed; bottom: 0; left: 0; right: 0; background-color: var(--tg-bg); padding: 15px 20px 30px 20px; box-shadow: 0 -5px 15px rgba(0,0,0,0.08); z-index: 100; }
+        #submit-btn {
+            width: 100%; padding: 15px; font-size: 18px; font-weight: 600; border: none;
+            border-radius: 12px; background-color: var(--tg-button);
+            color: var(--tg-button-text); cursor: pointer;
+        }
+        #submit-btn:disabled { background-color: var(--tg-hint); cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+    <div id="loader">Авторизація...</div>
+
+    <form id="register-form" onsubmit="return false;">
+        <h1>Стати Постачальником</h1>
+        <p style="color: var(--tg-hint);">Заповніть анкету. Наш AI-агент проаналізує ваші товари та надішле заявку.</p>
+
+        <h2>1. Джерело Товарів</h2>
+        <div class="form-group">
+            <label for="supplier-type">Тип вашого бізнесу</label>
+            <select id="supplier-type">
+                <option value="">-- Оберіть тип --</option>
+                <option value="mydrop">Я постачальник MyDrop (XML/API)</option>
+                <option value="independent">Я "Незалежний" постачальник (URL/Канал)</option>
+            </select>
+        </div>
+        <div id="mydrop-fields" class="dynamic-fields">
+            <div class="form-group">
+                <label for="mydrop-xml-url">URL вашого YML/XML фіду</label>
+                <input type="url" id="mydrop-xml-url" placeholder="https://backend.mydrop.com.ua/...">
+                <div class="error-message" id="error-mydrop-xml-url"></div>
+            </div>
+        </div>
+        <div id="independent-fields" class="dynamic-fields">
+            <div class="form-group">
+                <label for="shop-url">URL вашого Каналу/Магазину (для парсингу)</label>
+                <input type="url" id="shop-url" placeholder="https://t.me/my_shop або https://shop.com">
+                <div class="error-message" id="error-shop-url"></div>
+            </div>
+            <div class="form-group">
+                <label for="supplier-address">Ваше відділення НП (необов'язково)</label>
+                <input type="text" id="supplier-address" placeholder="Київ, відділення №1 (для Фулфілмент-Хабу)">
+            </div>
+        </div>
+        
+        <h2>2. Легальні Дані (для Договору та Фулфілменту)</h2>
+        <div class="form-group">
+            <label for="legal-name">Назва ФОП / ТОВ</label>
+            <input type="text" id="legal-name" placeholder="ФОП Шевченко Тарас Григорович">
+            <div class="error-message" id="error-legal-name"></div>
+        </div>
+        <div class="form-group">
+            <label for="ipn">ІПН (10 цифр)</label>
+            <input type="text" id="ipn" placeholder="1234567890">
+            <div class="error-message" id="error-ipn"></div>
+        </div>
+        <div class="form-group">
+            <label for="edrpou">ЄДРПОУ (8 цифр, необов'язково для ФОП)</label>
+            <input type="text" id="edrpou" placeholder="12345678">
+        </div>
+
+        <h2>3. Контактні дані</h2>
+        <div class="form-group">
+            <label for="supplier-name">Назва вашого магазину (Бренд)</label>
+            <input type="text" id="supplier-name" placeholder="Taverna Shop">
+            <div class="error-message" id="error-name"></div>
+        </div>
+        <div class="form-group">
+            <label for="contact-phone">Робочий телефон</label>
+            <input type="tel" id="contact-phone" placeholder="+380991234567">
+            <div class="error-message" id="error-phone"></div>
+        </div>
+         <div class="form-group">
+            <label for="contact-email">Робоча Email-пошта</label>
+            <input type="email" id="contact-email" placeholder="shop@example.com">
+            <div class="error-message" id="error-email"></div>
+        </div>
+        
+        <h2>4. Дані для Авто-Виплат</h2>
+        <p style="color: var(--tg-hint); font-size: 14px; margin-top: -10px;">Куди ми будемо *автоматично* переказувати вам дроп-ціну після оплати клієнтом.</p>
+        <div class="form-group">
+            <label for="payout-method">Спосіб отримання коштів</label>
+            <select id="payout-method">
+                <option value="iban">Реквізити (IBAN) - Рекомендовано для ФОП</option>
+                <option value="card_token" disabled>Номер Карти (Тимчасово недоступно)</option>
+            </select>
+        </div>
+        
+        <div id="payout-iban-fields">
+            <div class="form-group">
+                <label for="payout-iban">IBAN</label>
+                <input type="text" id="payout-iban" placeholder="UA213220010000026001234567890">
+                <div class="error-message" id="error-iban"></div>
+            </div>
+        </div>
+        
+        <div id="payout-card-fields" class="dynamic-fields">
+            <p>Безпечне введення карти (через LiqPay) буде доступне у Кабінеті Постачальника (Фаза 5).</p>
+        </div>
+        <div class="form-group tos-group">
+            <input type="checkbox" id="tos-agree">
+            <label for="tos-agree">Я прочитав та погоджуюсь з <a onclick="showTOS()">Умовами (ToS)</a> та <a onclick="showNDA()">Угодою (NDA)</a>. Я дозволяю TavernaGroup автоматично парсити мої товари, застосовувати націнку (+33%) та публікувати їх.</label>
+        </div>
+    </form>
+    
+    <div id="footer" style="display: none;">
+        <button id="submit-btn" disabled>Заповніть анкету</button>
+    </div>
+
+    <script src="js/app.js"></script>
+    <script>
+        // ... (всі DOM-елементи) ...
+        const loader = document.getElementById('loader');
+        const registerForm = document.getElementById('register-form');
+        const footer = document.getElementById('footer');
+        const submitBtn = document.getElementById('submit-btn');
+        const supplierTypeSelect = document.getElementById('supplier-type');
+        const payoutMethodSelect = document.getElementById('payout-method'); // <-- НОВЕ
+        
+        let tgUser = null; 
+        let jwtToken = null; 
+
+        function showTOS() { tg.showAlert('Тут буде повний текст Умов Використання (ToS)...'); }
+        function showNDA() { tg.showAlert('Тут буде повний текст Угоди про Нерозголошення (NDA)...'); }
+        
+        // Валідація
+        function validate(id, condition, message) {
+            // ... (код функції validate з твого архіву) ...
+            const el = document.getElementById(id);
+            const errorId = `error-${id.split('-').pop()}`;
+            const errorEl = document.getElementById(errorId); 
+            if(!errorEl) return condition; 
+            if (condition) {
+                errorEl.style.display = 'none';
+                return true;
+            } else {
+                errorEl.innerText = message;
+                errorEl.style.display = 'block';
+                return false;
+            }
+        }
+        
+        function validateSupplierForm() {
+            let isValid = true;
+            
+            // ... (валідація supplierType, mydrop-xml-url, shop-url, supplier-name, contact-phone, contact-email) ...
+            const supplierType = supplierTypeSelect.value;
+            isValid = validate('supplier-type', supplierType !== "", "Оберіть тип бізнесу.") && isValid;
+            if (supplierType === 'mydrop') {
+                isValid = validate('mydrop-xml-url', document.getElementById('mydrop-xml-url').value.startsWith('http'), "Введіть коректний URL.") && isValid;
+            }
+            if (supplierType === 'independent') {
+                isValid = validate('shop-url', document.getElementById('shop-url').value.startsWith('http'), "Введіть коректний URL.") && isValid;
+            }
+            isValid = validate('supplier-name', document.getElementById('supplier-name').value.trim().length >= 3, "Назва має бути мін. 3 символи.") && isValid;
+            const phoneRegex = /^(\+380\d{9}|0\d{9})$/;
+            isValid = validate('contact-phone', phoneRegex.test(document.getElementById('contact-phone').value.replace(/[^\d+]/g, '')), "Введіть 10 або 12 цифр.") && isValid;
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            isValid = validate('contact-email', emailRegex.test(document.getElementById('contact-email').value), "Введіть коректний email.") && isValid;
+
+            // ... (валідація legal-name, ipn) ...
+            isValid = validate('legal-name', document.getElementById('legal-name').value.trim().length >= 5, "Введіть повну назву ФОП / ТОВ.") && isValid;
+            const ipnRegex = /^\d{10}$/;
+            isValid = validate('ipn', ipnRegex.test(document.getElementById('ipn').value.trim()), "Введіть 10 цифр ІПН.") && isValid;
+
+            // --- НОВА ВАЛІДАЦІЯ (План 24) ---
+            const payoutMethod = payoutMethodSelect.value;
+            if (payoutMethod === 'iban') {
+                const ibanRegex = /^UA\d{27}$/; // Простий regex для UA IBAN
+                isValid = validate('payout-iban', ibanRegex.test(document.getElementById('payout-iban').value.trim().replace(/\s/g, '')), "Введіть коректний IBAN (UA...).") && isValid;
+            }
+            // (payout-card-token поки не валідуємо)
+            
+            const tosAgree = document.getElementById('tos-agree').checked;
+            if (!tosAgree) isValid = false;
+            
+            submitBtn.disabled = !isValid;
+            submitBtn.innerText = isValid ? 'Надіслати заявку' : 'Заповніть анкету';
+            return isValid;
+        }
+
+        // Динамічна форма (ОНОВЛЕНО)
+        function toggleDynamicFields() {
+            const type = supplierTypeSelect.value;
+            document.getElementById('mydrop-fields').style.display = (type === 'mydrop') ? 'block' : 'none';
+            document.getElementById('independent-fields').style.display = (type === 'independent') ? 'block' : 'none';
+
+            const payoutMethod = payoutMethodSelect.value;
+            document.getElementById('payout-iban-fields').style.display = (payoutMethod === 'iban') ? 'block' : 'none';
+            document.getElementById('payout-card-fields').style.display = (payoutMethod === 'card_token') ? 'block' : 'none';
+            
+            validateSupplierForm();
+        }
+        supplierTypeSelect.onchange = toggleDynamicFields;
+        payoutMethodSelect.onchange = toggleDynamicFields; // <-- НОВЕ
+
+        // Відправка (ОНОВЛЕНО)
+        submitBtn.onclick = async () => {
+            if (!validateSupplierForm() || !tgUser || !jwtToken) return;
+            
+            submitBtn.disabled = true;
+            submitBtn.innerText = 'Відправляємо...';
+            tg.HapticFeedback.impactOccurred('medium');
+            
+            // Збираємо дані з форми
+            const requestData = {
+                supplier_name: document.getElementById('supplier-name').value.trim(),
+                supplier_type: document.getElementById('supplier-type').value,
+                contact_phone: document.getElementById('contact-phone').value.trim(),
+                contact_email: document.getElementById('contact-email').value.trim(),
+                agreed_to_tos: document.getElementById('tos-agree').checked,
+                
+                legal_name: document.getElementById('legal-name').value.trim(),
+                ipn: document.getElementById('ipn').value.trim(),
+                edrpou: document.getElementById('edrpou').value.trim() || null,
+                
+                mydrop_xml_url: document.getElementById('mydrop-xml-url').value.trim() || null,
+                shop_url: document.getElementById('shop-url').value.trim() || null,
+                supplier_address: document.getElementById('supplier-address').value.trim() || null,
+                
+                // --- НОВІ ПОЛЯ (План 24) ---
+                payout_method: payoutMethodSelect.value,
+                payout_iban: document.getElementById('payout-iban').value.trim().replace(/\s/g, '') || null,
+                payout_card_token: null // (поки що)
+            };
+            
+            const data = await apiCall('/api/v1/suppliers/register', 'POST', requestData, jwtToken);
+            
+            if (data && data.id) {
+                tg.showPopup({
+                    title: 'Заявку Прийнято!',
+                    message: `Дякуємо, ${requestData.supplier_name}! Наш AI-агент почав аналіз ваших товарів. Ми повідомимо про активацію.`,
+                    buttons: [{ text: 'OK', type: 'ok' }]
+                }, () => {
+                    window.location.href = 'index.html';
+                });
+            } else {
+                tg.showAlert(data.detail || data.error || "Не вдалося надіслати заявку.");
+                submitBtn.disabled = false;
+                validateSupplierForm();
+            }
+        };
+
+        // Головна функція
+        async function main() {
+            tg.ready();
+            
+            jwtToken = localStorage.getItem('jwt_token');
+            const userStr = localStorage.getItem('current_user');
+            
+            if (!jwtToken || !userStr) {
+                loader.innerText = "Помилка авторизації. Перенаправлення...";
+                window.location.href = 'login.html';
+                return;
+            }
+            
+            tgUser = JSON.parse(userStr);
+            logger.info("Успішно завантажено JWT-токен та дані юзера.");
+            
+            tg.BackButton.show();
+            tg.BackButton.onClick(() => {
+                window.location.href = 'index.html';
+            });
+            
+            registerForm.querySelectorAll('input, select, checkbox').forEach(el => {
+                el.oninput = validateSupplierForm;
+                el.onchange = validateSupplierForm;
+            });
+            
+            if (tgUser.role === 'admin') {
+                document.querySelector('h1').innerText = "Адмін-Панель: Реєстрація";
+            }
+            
+            // Запускаємо, щоб показати правильні поля
+            toggleDynamicFields(); 
+
+            loader.style.display = 'none';
+            registerForm.style.display = 'block';
+            footer.style.display = 'block';
+        }
+        
+        main();
+    </script>
+</body>
+</html>

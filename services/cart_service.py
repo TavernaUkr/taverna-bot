@@ -1,117 +1,187 @@
 # services/cart_service.py
 import logging
 import json
-import os
-from datetime import datetime, timedelta
-from pathlib import Path
-import uuid
-from typing import Dict, Any, List
+import redis.asyncio as aioredis
+from typing import List, Dict, Any, Tuple, Optional
+from datetime import timedelta
+from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
 
 from config_reader import config
-from services import xml_parser
+from services import xml_parser 
+from database.models import ProductVariant, ProductOptionValue, ProductOption
+from database.db import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
-CART_TTL_MINUTES = 20
-CARTS_DIR = Path(config.orders_dir) / "user_carts"
-CARTS_DIR.mkdir(parents=True, exist_ok=True)
+CART_TTL_SECONDS = int(timedelta(minutes=20).total_seconds())
 
-# --- Приватні функції (без змін) ---
-def _get_cart_filepath(user_id: int) -> Path: return CARTS_DIR / f"cart_{user_id}.json"
+try:
+    redis_client = aioredis.from_url(
+        str(config.redis_url), 
+        encoding="utf-8", 
+        decode_responses=True
+    )
+    logger.info("Підключено до Redis для сервісу кошика.")
+except Exception as e:
+    logger.error(f"Не вдалося підключитися до Redis: {e}")
+    redis_client = None
 
-def _read_cart_file(user_id: int) -> dict | None:
-    filepath = _get_cart_filepath(user_id)
-    if not filepath.exists(): return None
+def _get_cart_key(user_id: int) -> str:
+    return f"cart:{user_id}"
+
+async def add_item_to_cart(user_id: int, variant_offer_id: str, quantity: int) -> Tuple[bool, dict]:
+    """
+    (Оновлено для Фази 4.3)
+    Додає товар, supplier_id та drop_price у кошик.
+    """
+    if not redis_client:
+        return False, {"message": "Redis connection error"}
+        
+    key = _get_cart_key(user_id)
+    
+    # 1. Отримуємо актуальні дані про товар з БД (включаючи продукт та постачальника)
+    variant: Optional[ProductVariant] = await xml_parser.get_variant_by_offer_id(variant_offer_id)
+    
+    if not variant or not variant.product or not variant.product.supplier:
+        logger.warning(f"Не вдалося додати в кошик: варіант {variant_offer_id} не знайдено в БД.")
+        return False, {"message": "Variant not found"}
+        
+    if not variant.is_available:
+        return False, {"message": "Товар не в наявності"}
+    
+    # 2. Отримуємо існуючий кошик
+    current_quantity_in_cart = 0
+    if await redis_client.hexists(key, variant_offer_id):
+        try:
+            item_data_raw = await redis_client.hget(key, variant_offer_id)
+            current_quantity_in_cart = json.loads(item_data_raw).get("quantity", 0)
+        except Exception:
+            pass 
+
+    new_quantity = current_quantity_in_cart + quantity
+    
+    if new_quantity > variant.quantity:
+        return False, {"message": f"Недостатньо товару (макс: {variant.quantity})"}
+
+    # 3. Формуємо гнучкий опис опцій
+    full_variant: Optional[ProductVariant] = await xml_parser.get_variant_with_options(variant.id)
+    options_text = "N/A"
+    if full_variant and full_variant.option_values:
+        options_text = ", ".join(
+            f"{ov.option.name}: {ov.value}" for ov in full_variant.option_values
+        )
+    
+    # 4. Готуємо дані для збереження в Redis (з ДОДАНИМИ полями)
+    item_data = {
+        "quantity": new_quantity,
+        "variant_offer_id": variant_offer_id,
+        "variant_db_id": variant.id, # <-- НОВЕ (Для зв'язку в БД)
+        "product_id": variant.product_id,
+        "supplier_id": variant.product.supplier_id, # <-- НОВЕ (Для "Spooler-а")
+        "name": variant.product.name,
+        "sku": variant.product.sku,
+        "options_text": options_text,
+        "price": variant.final_price, # Ціна клієнта (+33%)
+        "drop_price": int(variant.base_price), # <-- НОВЕ (Дроп-ціна для "Spooler-а")
+        "image_url": variant.product.pictures[0] if variant.product.pictures else None,
+        "max_quantity": variant.quantity # Зберігаємо макс. кількість
+    }
+    
     try:
-        with open(filepath, 'r', encoding='utf-8') as f: cart_data = json.load(f)
-        last_modified_str = cart_data.get("last_modified")
-        if not last_modified_str:
-             logger.warning(f"Кошик {user_id} без дати. Видаляю."); clear_cart(user_id); return None
-        last_modified = datetime.fromisoformat(last_modified_str)
-        if datetime.now() - last_modified > timedelta(minutes=CART_TTL_MINUTES):
-            logger.info(f"Кошик {user_id} застарів. Видаляю."); clear_cart(user_id); return None
-        if "items" not in cart_data or not isinstance(cart_data["items"], list): cart_data["items"] = []
-        return cart_data
-    except (json.JSONDecodeError, ValueError, IOError) as e:
-         logger.error(f"Помилка читання/парсингу кошика {user_id}: {e}"); return None
+        await redis_client.hset(key, variant_offer_id, json.dumps(item_data))
+        await redis_client.expire(key, CART_TTL_SECONDS)
+        
+        logger.info(f"Користувач {user_id}: додано/оновлено товар {variant_offer_id}")
+        
+        cart_items, total_price = await get_cart_contents(user_id)
+        return True, {
+            "success": True, 
+            "message": "Item added", 
+            "cart": {"items": cart_items, "total_price": total_price}
+        }
+        
+    except Exception as e:
+        logger.error(f"Помилка Redis (hset/expire) для user {user_id}: {e}", exc_info=True)
+        return False, {"message": f"Redis error: {e}"}
 
-def _write_cart_file(user_id: int, cart_data: Dict[str, Any]):
-    filepath = _get_cart_filepath(user_id); cart_data["last_modified"] = datetime.now().isoformat()
+# ... (решта файлу: get_cart_contents, update_item_quantity, remove_item_from_cart, clear_cart) ...
+# ... (вони вже готові і будуть працювати з новими даними в JSON) ...
+async def get_cart_contents(user_id: int) -> Tuple[List[Dict[str, Any]], int]:
+    if not redis_client: return [], 0
+    key = _get_cart_key(user_id)
+    cart_items = []
+    total_price = 0
     try:
-        with open(filepath, 'w', encoding='utf-8') as f: json.dump(cart_data, f, ensure_ascii=False, indent=4)
-    except IOError as e: logger.error(f"Помилка запису кошика {user_id}: {e}")
+        cart_data_raw = await redis_client.hgetall(key)
+        for item_json in cart_data_raw.values():
+            try:
+                item = json.loads(item_json)
+                item_quantity = int(item.get("quantity", 0))
+                item_price = int(item.get("price", 0))
+                item["total_item_price"] = item_price * item_quantity
+                cart_items.append(item)
+                total_price += item["total_item_price"]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                logger.warning(f"Не вдалося розпарсити дані кошика для user {user_id}: {item_json}")
+        return cart_items, total_price
+    except Exception as e:
+        logger.error(f"Помилка Redis (hgetall) для user {user_id}: {e}", exc_info=True)
+        return [], 0
 
-# --- Публічні функції (ОНОВЛЕНО add_item, update_item) ---
+async def update_item_quantity(user_id: int, variant_offer_id: str, new_quantity: int) -> Tuple[bool, dict]:
+    if not redis_client: return False, {"message": "Redis error"}
+    key = _get_cart_key(user_id)
+    if new_quantity <= 0:
+        return await remove_item_from_cart(user_id, variant_offer_id)
+    try:
+        item_data_raw = await redis_client.hget(key, variant_offer_id)
+        if not item_data_raw:
+            return False, {"message": "Item not in cart"}
+        item_data = json.loads(item_data_raw)
+        
+        max_quantity = item_data.get("max_quantity", 0) 
+        if new_quantity > max_quantity:
+            return False, {"message": f"Not enough stock (max: {max_quantity})"}
+            
+        item_data["quantity"] = new_quantity
+        
+        await redis_client.hset(key, variant_offer_id, json.dumps(item_data))
+        await redis_client.expire(key, CART_TTL_SECONDS)
+        
+        cart_items, total_price = await get_cart_contents(user_id)
+        return True, {
+            "success": True, 
+            "message": "Quantity updated", 
+            "cart": {"items": cart_items, "total_price": total_price}
+        }
+    except Exception as e:
+        logger.error(f"Помилка Redis (update_item_quantity) для user {user_id}: {e}", exc_info=True)
+        return False, {"message": f"Redis error: {e}"}
 
-async def add_item(user_id: int, sku: str, offer_id: str, quantity: int) -> dict | None:
-    """Додає товарну позицію до кошика, зберігаючи supplier_id."""
-    cart_data = _read_cart_file(user_id) or {"items": []}
-    product = await xml_parser.get_product_by_sku(sku)
-    if not product: logger.warning(f"Кошик {user_id}: Не знайдено SKU {sku}"); return None
-    offer_info = next((o for o in product.get('offers', []) if o.get('offer_id') == offer_id), None)
-    if not offer_info: logger.warning(f"Кошик {user_id}: Не знайдено offer {offer_id} для SKU {sku}"); return None
-    # Перевіряємо наявність перед додаванням
-    if not offer_info.get('available'):
-         logger.warning(f"Кошик {user_id}: Спроба додати недоступний offer {offer_id} (SKU: {sku})")
-         # Можна повертати помилку або спеціальний статус
-         return {"error": "not_available", "message": "Цей розмір наразі недоступний."}
+async def remove_item_from_cart(user_id: int, variant_offer_id: str) -> Tuple[bool, dict]:
+    if not redis_client: return False, {"message": "Redis error"}
+    key = _get_cart_key(user_id)
+    try:
+        await redis_client.hdel(key, variant_offer_id)
+        logger.info(f"Користувач {user_id}: видалено товар {variant_offer_id} з кошика.")
+        cart_items, total_price = await get_cart_contents(user_id)
+        return True, {
+            "success": True, 
+            "message": "Item removed", 
+            "cart": {"items": cart_items, "total_price": total_price}
+        }
+    except Exception as e:
+        logger.error(f"Помилка Redis (hdel) для user {user_id}: {e}", exc_info=True)
+        return False, {"message": f"Redis error: {e}"}
 
-    item_id = str(uuid.uuid4())
-    cart_data["items"].append({
-        'item_id': item_id, 'sku': product.get('sku'), 'original_sku': sku,
-        'offer_id': offer_id, 'quantity': quantity, 'name': product.get('name', '?'),
-        'size': offer_info.get('size', 'N/A'), 'final_price': product.get('final_price', 0),
-        'supplier_id': product.get('supplier_id', 'unknown')
-    })
-    _write_cart_file(user_id, cart_data)
-    logger.info(f"Кошик {user_id}: Додано {product.get('sku')} ({product.get('supplier_id')})")
-    return cart_data
-
-async def get_cart(user_id: int) -> Dict[str, List[Dict[str, Any]]]:
-    data = _read_cart_file(user_id)
-    return data if data and "items" in data and isinstance(data["items"], list) else {"items": []}
-
-def clear_cart(user_id: int):
-    filepath = _get_cart_filepath(user_id)
-    if filepath.exists(): 
-        try: 
-            os.remove(filepath); 
-            logger.info(f"Кошик {user_id} очищено.") 
-        except OSError as e: 
-            logger.error(f"Помилка видалення кошика {user_id}: {e}")
-
-def remove_item(user_id: int, item_id: str):
-    cart_data = _read_cart_file(user_id)
-    if not cart_data or "items" not in cart_data: return
-    original_len = len(cart_data["items"])
-    cart_data["items"] = [item for item in cart_data["items"] if item.get('item_id') != item_id]
-    if len(cart_data["items"]) < original_len:
-        _write_cart_file(user_id, cart_data); logger.info(f"Кошик {user_id}: Видалено {item_id}.")
-    else: logger.warning(f"Кошик {user_id}: Не знайдено {item_id} для видалення.")
-
-async def update_item(user_id: int, item_id: str, new_quantity: int | None = None, new_offer_id: str | None = None) -> dict | None:
-    cart_data = _read_cart_file(user_id)
-    if not cart_data or "items" not in cart_data: return None
-    item_found_and_updated = False
-    for item in cart_data["items"]:
-        if item.get('item_id') == item_id:
-            updated_locally = False
-            if new_quantity is not None and new_quantity > 0:
-                item['quantity'] = new_quantity; logger.info(f"Кошик {user_id}: Оновлено к-сть {item_id} -> {new_quantity}."); updated_locally = True
-            if new_offer_id is not None and new_offer_id != item.get('offer_id'):
-                product_sku = item.get('sku')
-                product = await xml_parser.get_product_by_sku(product_sku)
-                if product:
-                    new_offer = next((o for o in product.get('offers', []) if o.get('offer_id') == new_offer_id), None)
-                    if new_offer and new_offer.get('available'):
-                        item['offer_id'] = new_offer_id; item['size'] = new_offer.get('size', 'N/A')
-                        item['supplier_id'] = product.get('supplier_id', item.get('supplier_id'))
-                        item['sku'] = product.get('sku', item.get('sku'))
-                        logger.info(f"Кошик {user_id}: Оновлено розмір {item_id} -> {new_offer.get('size')}.")
-                        updated_locally = True
-                    elif new_offer: logger.warning(f"Кошик {user_id}: Новий offer {new_offer_id} для {item_id} НЕ доступний.")
-                    else: logger.warning(f"Кошик {user_id}: Не знайдено новий offer {new_offer_id} для {item_id}.")
-                else: logger.warning(f"Кошик {user_id}: Не знайдено продукт {product_sku} для оновлення offer.")
-            if updated_locally: item_found_and_updated = True; break
-    if item_found_and_updated: _write_cart_file(user_id, cart_data); return cart_data
-    else: logger.warning(f"Кошик {user_id}: Не знайдено/оновлено {item_id}."); return None
+async def clear_cart(user_id: int) -> bool:
+    if not redis_client: return False
+    key = _get_cart_key(user_id)
+    try:
+        await redis_client.delete(key)
+        logger.info(f"Користувач {user_id}: кошик очищено.")
+        return True
+    except Exception as e:
+        logger.error(f"Помилка Redis (delete) для user {user_id}: {e}", exc_info=True)
+        return False

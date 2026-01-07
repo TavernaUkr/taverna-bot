@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>👑 Адмін-Панель</title>
+    <script src="js/app.js"></script>
+    <style>
+        :root { /* ... (всі твої стилі :root) ... */ }
+        body { font-family: -apple-system, sans-serif; margin: 0; padding: 15px; background-color: var(--tg-secondary-bg); color: var(--tg-text); }
+        #loader { text-align: center; padding: 50px; font-size: 20px; color: var(--tg-hint); }
+        #admin-panel { display: none; }
+        h1 { font-size: 24px; }
+        h2 { border-bottom: 1px solid var(--tg-hint); padding-bottom: 5px; }
+        
+        /* Список на схвалення */
+        .supplier-card {
+            background-color: var(--tg-bg);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        .supplier-card h3 { margin-top: 0; }
+        .supplier-card p { font-size: 14px; color: var(--tg-hint); }
+        .supplier-card pre { background: #f5f5f5; padding: 10px; border-radius: 8px; white-space: pre-wrap; word-wrap: break-word; }
+        .supplier-actions { display: flex; flex-wrap: wrap; /* <--- ОНОВЛЕНО */ gap: 10px; margin-top: 15px; }
+        .approve-btn, .reject-btn, .prom-sync-btn { /* <--- ОНОВЛЕНО */
+            flex-basis: 100%; /* Займають весь рядок */
+            padding: 10px; border: none; border-radius: 8px; font-size: 16px; cursor: pointer;
+        }
+        .approve-btn { background-color: #34C759; color: white; }
+        .reject-btn { background-color: #FF3B30; color: white; }
+        .prom-sync-btn { background-color: #5E5CE6; color: white; }
+        /* --- НОВІ СТИЛІ (План 27G) --- */
+        .price-rule-card {
+            background-color: var(--tg-bg);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-left: 5px solid var(--tg-link);
+        }
+        .price-rule-card h4 { margin-top: 0; }
+        .price-rule-card p { font-size: 14px; margin: 2px 0; }
+        .price-rule-card code { 
+            background-color: var(--tg-secondary-bg); 
+            padding: 2px 5px;
+            border-radius: 4px;
+        }
+        #god-mode-panel {
+            background-color: var(--tg-bg);
+            border-radius: 12px;
+            padding: 15px;
+            margin-top: 20px;
+            border: 2px solid var(--tg-error); /* Виділяємо червоним */
+        }
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; font-weight: 600; margin-bottom: 8px; }
+        .form-group input {
+            width: 100%; box-sizing: border-box; padding: 12px 15px; font-size: 16px;
+            border: 2px solid var(--tg-secondary-bg); background-color: var(--tg-secondary-bg);
+            color: var(--tg-text); border-radius: 10px; outline: none;
+        }
+        .form-group button {
+            width: 100%; padding: 12px; font-size: 16px; border: none;
+            border-radius: 10px; background-color: var(--tg-button);
+            color: var(--tg-button-text); cursor: pointer; margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+<div id="loader">Перевірка доступу (Admin)...</div>
+
+    <div id="admin-panel">
+        <h1>👑 Адмін-Панель</h1>
+        
+        <h2>Очікують на схвалення</h2>
+        <div id="pending-list">
+            </div>
+        
+        <h2>"God Mode": Керування Націнками (33% vs 30%)</h2>
+        <div id="price-rules-panel">
+            </div>
+        
+        <h2>"God Mode": Примусовий Постинг/Реклама</h2>
+        <div id="god-mode-panel">
+            <div class="form-group">
+                <label for="god-product-id">ID Товару (Product ID)</label>
+                <input type="number" id="god-product-id" placeholder="Напр: 123">
+            </div>
+            <div class="form-group">
+                <button id="god-force-post-btn">⚡️ Примусовий Постинг (Безкоштовно)</button>
+            </div>
+            <hr>
+            <div class="form-group">
+                <label for="god-platforms">Платформи (через кому)</label>
+                <input type="text" id="god-platforms" placeholder="olx_top,instagram_story">
+            </div>
+            <div class="form-group">
+                <button id="god-force-ad-btn">🚀 Примусова Реклама (Безкоштовно)</button>
+            </div>
+        </div>
+        </div>
+
+    <script src="js/app.js"></script>
+    <script>
+        // Елементи DOM
+        const loader = document.getElementById('loader');
+        const adminPanel = document.getElementById('admin-panel');
+        const pendingList = document.getElementById('pending-list');
+        const priceRulesList = document.getElementById('price-rules-list');
+        const inputGodProductId = document.getElementById('god-product-id');
+        const inputGodPlatforms = document.getElementById('god-platforms');
+        const btnGodPost = document.getElementById('god-force-post-btn');
+        const btnGodAd = document.getElementById('god-force-ad-btn');
+        
+        let tgUser = null; 
+        let jwtToken = null;
+        // --- API-Функції Адмінки ---
+        
+        async function loadPendingSuppliers() {
+            pendingList.innerHTML = "Завантаження заявок...";
+            const data = await apiCall('/api/v1/admin/pending-suppliers', 'GET', null, jwtToken);
+            
+            if (data && data.length > 0) {
+                pendingList.innerHTML = ''; // Очищуємо
+                data.forEach(supplier => {
+                    const card = document.createElement('div');
+                    card.className = 'supplier-card';
+                    
+                    // Додаємо кнопку "Sync to Prom", ТІЛЬКИ якщо це MyDrop
+                    let promButton = '';
+                    if (supplier.type === 'mydrop') {
+                        promButton = `<button class="prom-sync-btn" data-id="${supplier.id}">🌀 Синхр. з Prom.ua</button>`;
+                    }
+                    // ---
+                    
+                    card.innerHTML = `
+                        <h3>${supplier.name} (ID: ${supplier.id})</h3>
+                        <p><strong>Тип:</strong> ${supplier.type}</p>
+                        <p><strong>Email:</strong> ${supplier.contact_email}</p>
+                        <p><strong>Джерело:</strong> ${supplier.xml_url || supplier.shop_url}</p>
+                        <p><strong>Звіт AI-Агента (План 22):</strong></p>
+                        <pre>${supplier.admin_notes || 'Немає звіту'}</pre>
+                        <div class="supplier-actions">
+                            <button class="approve-btn" data-id="${supplier.id}">✅ Схвалити</button>
+                            <button class="reject-btn" data-id="${supplier.id}">❌ Відхилити</button>
+                            ${promButton} </div>
+                    `;
+                    pendingList.appendChild(card);
+                });
+                addCardListeners();
+                
+            } else if (data) {
+                pendingList.innerHTML = "<p>Немає нових заявок на схвалення.</p>";
+            } else {
+                pendingList.innerHTML = "<p>Помилка завантаження заявок.</p>";
+            }
+        }
+        
+        function addCardListeners() {
+            document.querySelectorAll('.approve-btn').forEach(btn => {
+                btn.onclick = async (e) => {
+                    const id = e.currentTarget.dataset.id;
+                    tg.HapticFeedback.impactOccurred('medium');
+                    e.currentTarget.disabled = true;
+                    e.currentTarget.innerText = "Схвалення...";
+                    const data = await apiCall(`/api/v1/admin/approve-supplier/${id}`, 'POST', null, jwtToken);
+                    if (data && data.id) {
+                        e.currentTarget.closest('.supplier-card').style.display = 'none'; // Ховаємо картку
+                    } else {
+                        tg.showAlert('Помилка схвалення.');
+                        e.currentTarget.disabled = false;
+                    }
+                };
+            });
+            // ... (додати обробник для .reject-btn)
+            // --- [НОВЕ - ФАЗА 5.6.5] ---
+            document.querySelectorAll('.prom-sync-btn').forEach(btn => {
+                btn.onclick = async (e) => {
+                    const id = e.currentTarget.dataset.id;
+                    tg.HapticFeedback.impactOccurred('medium');
+                    e.currentTarget.disabled = true;
+                    e.currentTarget.innerText = "Синхронізація...";
+                    
+                    const data = await apiCall(`/api/v1/admin/force-sync-prom/${id}`, 'POST', null, jwtToken);
+                    if (data && data.status === 'success') {
+                        tg.showPopup({ title: 'Успіх!', message: data.message });
+                    } else {
+                        tg.showAlert(data.detail || 'Помилка синхронізації з Prom.ua.');
+                    }
+                    e.currentTarget.disabled = false;
+                    e.currentTarget.innerText = '🌀 Синхр. з Prom.ua';
+                };
+            });
+        }
+
+        // --- [НОВА ФУНКЦІЯ - ФАЗА 5.4.2] ---
+        async function loadPriceRules() {
+            priceRulesList.innerHTML = "Завантаження правил...";
+            const data = await apiCall('/api/v1/admin/price-rules', 'GET', null, jwtToken);
+            
+            if (data && data.length > 0) {
+                priceRulesList.innerHTML = ''; // Очищуємо
+                data.forEach(rule => {
+                    const card = document.createElement('div');
+                    card.className = 'price-rule-card';
+                    
+                    let condition = `IF (Ціна > ${rule.min_price || 0})`;
+                    if (rule.category_tag) condition += ` AND (Категорія = ${rule.category_tag})`;
+                    
+                    let action = `THEN +${rule.value}%`;
+                    if (rule.rule_type === 'fixed_amount') action = `THEN +${rule.value} грн`;
+
+                    card.innerHTML = `
+                        <h4>${rule.name} (Пріоритет: ${rule.priority})</h4>
+                        <p><code>${condition}</code></p>
+                        <p><code>${action}</code></p>
+                    `;
+                    priceRulesList.appendChild(card);
+                });
+            } else if (data) {
+                priceRulesList.innerHTML = "<p>Немає кастомних правил. Діє націнка за замовчуванням (+33%).</p>";
+            } else {
+                priceRulesList.innerHTML = "<p>Помилка завантаження правил.</p>";
+            }
+        }
+
+async function forcePost() {
+            const productId = parseInt(inputGodProductId.value, 10);
+            if (!productId) {
+                tg.showAlert('Введіть ID Товару.');
+                return;
+            }
+            
+            btnGodPost.disabled = true;
+            btnGodPost.innerText = 'Запуск...';
+            
+            const data = await apiCall('/api/v1/admin/force-post', 'POST', { product_id: productId });
+            if (data && data.success) {
+                tg.showPopup({ title: 'Успіх!', message: data.message });
+            } else {
+                tg.showAlert(data.detail || 'Помилка примусового постингу.');
+            }
+            btnGodPost.disabled = false;
+            btnGodPost.innerText = '⚡️ Примусовий Постинг (Безкоштовно)';
+        }
+        
+        async function forceAd() {
+            const productId = parseInt(inputGodProductId.value, 10);
+            const platforms = inputGodPlatforms.value.split(',').map(p => p.trim()).filter(p => p);
+            
+            if (!productId || platforms.length === 0) {
+                tg.showAlert('Введіть ID Товару та Платформи (напр. olx_top).');
+                return;
+            }
+
+            btnGodAd.disabled = true;
+            btnGodAd.innerText = 'Запуск...';
+            
+            const data = await apiCall('/api/v1/admin/force-advertise', 'POST', {
+                product_id: productId,
+                platforms: platforms,
+                days: 1 // (Адмін запускає на 1 день)
+            });
+            
+            if (data && data.success) {
+                tg.showPopup({ title: 'Успіх!', message: data.message });
+            } else {
+                tg.showAlert(data.detail || 'Помилка примусової реклами.');
+            }
+            btnGodAd.disabled = false;
+            btnGodAd.innerText = '🚀 Примусова Реклама (Безкоштовно)';
+        }
+
+        // --- Головна Функція ---
+        async function main() {
+            tg.ready();
+            
+            // 1. АВТОРИЗАЦІЯ (Критично!)
+            jwtToken = localStorage.getItem('jwt_token');
+            const userStr = localStorage.getItem('current_user');
+            if (!jwtToken || !userStr) {
+                window.location.href = 'login.html';
+                return;
+            }
+            tgUser = JSON.parse(userStr);
+            
+            // 2. ПЕРЕВІРКА РОЛІ
+            if (tgUser.role !== 'admin') {
+                window.location.href = 'index.html';
+                return;
+            }
+            logger.info("Доступ Адміна підтверджено.");
+            
+            // 3. Налаштовуємо кнопки
+            tg.BackButton.show();
+            tg.BackButton.onClick(() => {
+                window.location.href = 'index.html';
+            });
+            
+            // --- [НОВЕ] Прив'язка кнопок "God Mode" ---
+            btnGodPost.onclick = forcePost;
+            btnGodAd.onclick = forceAd;
+            // ---
+
+            // 4. Завантажуємо дані
+            loader.style.display = 'none';
+            adminPanel.style.display = 'block';
+            
+            await Promise.all([
+                loadPendingSuppliers(),
+                loadPriceRules() 
+            ]);
+        }
+        
+        // ... (apiCall з `admin.html`, яка вже вміє передавати JWT-токен) ...
+        async function apiCall(endpoint, method = 'GET', body = null, token = jwtToken) { // <-- Беремо токен
+            try {
+                const options = { 
+                    method: method, 
+                    headers: { 'Content-Type': 'application/json' } 
+                };
+                if (body) options.body = JSON.stringify(body);
+                if (token) {
+                    options.headers['Authorization'] = `Bearer ${token}`;
+                }
+                
+                const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
+                
+                if (response.status === 401) {
+                    window.location.href = 'login.html';
+                    return null;
+                }
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail || `HTTP помилка: ${response.status}`);
+                }
+                if (response.status === 204) return { success: true };
+                return await response.json();
+            } catch (error) {
+                logger.error(`Помилка API (${endpoint}): ${error.message}`);
+                tg.showAlert(`Помилка: ${error.message}.`);
+                return null;
+            }
+        }
+        
+        main();
+    </script>
+</body>
+</html>

@@ -1,149 +1,299 @@
 # keyboards/inline_keyboards.py
-import re
-from typing import List
+import logging
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardMarkup
-
-# Імпортуємо FSM, щоб кнопка "Назад" знала, куди повертатись
-from fsm import order_states
+from typing import Optional, List
+from database.models import Product, ProductVariant
 from config_reader import config
 
-# --- Фабрики CallbackData ---
-class ProductCallback(CallbackData, prefix="prod"):
-    action: str
-    sku: str
-    offer_id: str
+logger = logging.getLogger(__name__)
 
-class CartCallback(CallbackData, prefix="cart"):
-    action: str
-    item_id: str | None = None
-
-class NavigationCallback(CallbackData, prefix="nav"):
-    action: str
-
-class OrderCallback(CallbackData, prefix="order"):
-    action: str
-    order_id: str | None = None
-
-class PaymentCallback(CallbackData, prefix="payment"):
-    method: str
-
-# НОВА Фабрика для кнопки "Назад"
-class BackCallback(CallbackData, prefix="back"):
-    to: str # Назва стану FSM або спец. маркер ('main_menu', 'previous_delivery_step')
-
-# --- Клавіатури ---
-
-def get_main_menu_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="🛍️ Вибрати товар на каналі", url=config.main_channel_url)
-    builder.button(text="🔎 Знайти товар по назві/артикулу", callback_data=NavigationCallback(action="start_search").pack())
-    builder.button(text="🛒 Мій кошик", callback_data=CartCallback(action="show").pack())
-    builder.adjust(1)
-    return builder.as_markup()
-
-def get_product_card_keyboard(product: dict) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    available_offers = [offer for offer in product.get('offers', []) if offer.get('available')]
-    numeric_sizes, text_sizes = [], []
-    for offer in available_offers:
-        size = offer.get('size', 'N/A')
-        numeric_part_match = re.match(r'^(\d+)', size)
-        if numeric_part_match:
-            numeric_sizes.append((int(numeric_part_match.group(1)), size, offer.get('offer_id')))
+def format_product_card(product: Product) -> str:
+    """
+    Формує текстову картку товару з моделі Product.
+    """
+    # Знаходимо діапазон цін
+    active_variants = [v for v in product.variants if v.is_available and v.final_price > 0]
+    price_text = "<b>Ціну уточнюйте</b>"
+    if active_variants:
+        min_price = min(v.final_price for v in active_variants)
+        max_price = max(v.final_price for v in active_variants)
+        if min_price == max_price:
+            price_text = f"<b>💰 Ціна: {min_price} грн</b>"
         else:
-            text_sizes.append((size, offer.get('offer_id')))
-    numeric_sizes.sort(); text_sizes.sort()
-    sorted_offers = [(size, offer_id) for _, size, offer_id in numeric_sizes] + text_sizes
-    for size, offer_id in sorted_offers:
-        callback_data = ProductCallback(action='select_size', sku=product['sku'], offer_id=offer_id).pack()
-        builder.button(text=size, callback_data=callback_data)
-    builder.adjust(3)
-    # ЗМІНЕНО: Кнопка Назад веде в головне меню
-    builder.row(builder.button(text="⬅️ До головного меню", callback_data=BackCallback(to='main_menu').pack()))
-    return builder.as_markup()
+            price_text = f"<b>💰 Ціна: від {min_price} до {max_price} грн</b>"
+    
+    # Отримуємо опис, обрізаємо до 600 символів
+    description = (product.description or "Опис відсутній.")
+    if len(description) > 600:
+        description = description[:600] + "..."
 
+    text_parts = [
+        f"<b>{product.name}</b>\n",
+        f"<b>Артикул:</b> <code>{product.sku}</code>\n",
+        price_text,
+        "\n" + "—" * 20 + "\n",
+        f"<b>Опис:</b>\n{description}"
+    ]
+    return "\n".join(text_parts)
 
-def get_cart_view_keyboard(cart_items: List[dict]) -> InlineKeyboardMarkup:
+def build_product_details_kb(product: Product, back_url: Optional[str] = None) -> InlineKeyboardMarkup:
+    """
+    Створює клавіатуру з вибором розмірів на основі product.variants.
+    """
     builder = InlineKeyboardBuilder()
-    total_sum = sum(item.get('final_price', 0) * item.get('quantity', 1) for item in cart_items)
-    if cart_items:
-        for item in cart_items:
-            item_id = item.get('item_id'); item_text = f"⚙️ {item.get('name')} ({item.get('size')})"
-            builder.button(text=item_text, callback_data="do_nothing") # Placeholder
-            builder.row(
-                builder.button(text="💳 Оформити", callback_data=f"checkout_item:{item_id}"), # Placeholder
-                builder.button(text="✏️ Змінити", callback_data=CartCallback(action='edit_item', item_id=item_id).pack()),
-                builder.button(text="❌ Видалити", callback_data=CartCallback(action='remove_item', item_id=item_id).pack())
+    
+    # Сортуємо варіанти
+    # TODO: Додати краще сортування (напр. 42, 44, S, M, L)
+    try:
+        sorted_variants = sorted(
+            [v for v in product.variants if v.is_available], 
+            key=lambda v: (
+                float(v.size) if v.size.replace('.', '', 1).isdigit() else float('inf'), 
+                v.size
             )
+        )
+    except Exception:
+        # Fallback на просте сортування, якщо конвертація в float не вдалася
+        sorted_variants = sorted(
+            [v for v in product.variants if v.is_available], 
+            key=lambda v: v.size
+        )
+
+    if not sorted_variants:
+        # Якщо немає доступних варіантів
+        builder.row(
+            InlineKeyboardButton(text="❌ Немає в наявності", callback_data="product:unavailable")
+        )
+    else:
+        # Додаємо кнопки розмірів (3 в ряд)
+        for variant in sorted_variants:
+            # Використовуємо supplier_offer_id, бо він 100% унікальний
+            builder.add(
+                InlineKeyboardButton(
+                    text=f"{variant.size} ({variant.final_price} грн)",
+                    callback_data=f"select_size:{variant.supplier_offer_id}"
+                )
+            )
+        # Налаштовуємо по 3 кнопки в ряд
+        builder.adjust(3)
+
+    # Додаємо кнопки навігації
+    nav_buttons = []
+    if back_url:
+        nav_buttons.append(InlineKeyboardButton(text="↩️ На канал", url=back_url))
+    
+    # Кнопка "Скасувати", яка веде на /start
+    nav_buttons.append(InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_action"))
+    builder.row(*nav_buttons)
+    
+    return builder.as_markup()
+
+def build_start_kb() -> InlineKeyboardMarkup:
+    """
+    Клавіатура для /start (ОНОВЛЕНО З MINIAPP)
+    """
+    builder = InlineKeyboardBuilder()
+    
+    # --- 1. Кнопка MiniApp ---
+    # Перевіряємо, чи URL взагалі встановлено в .env
+    if config.webapp_url:
+        logger.debug(f"Додаю кнопку WebApp з URL: {config.webapp_url}")
+        builder.row(
+            InlineKeyboardButton(
+                text="🛒 Відкрити Каталог (MiniApp)",
+                # WebAppInfo вказує Telegram, що ця кнопка запускає MiniApp
+                web_app=WebAppInfo(url=config.webapp_url)
+            )
+        )
+    else:
+        logger.warning("WEBAPP_URL не вказано в .env! Кнопка MiniApp не буде додана.")
+
+    # --- 2. Інші кнопки ---
+    builder.row(
+        InlineKeyboardButton(
+            text="🔎 Пошук товару (в боті)", 
+            callback_data="start_search"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="🛍️ Наш канал (Taverna Army)", 
+            url=config.main_channel_url # Використовуємо URL з .env
+        )
+    )
+    return builder.as_markup()
+
+def build_ask_quantity_kb(variant_offer_id: str) -> InlineKeyboardMarkup:
+    """
+    Клавіатура для вибору кількості (після вибору розміру).
+    """
+    builder = InlineKeyboardBuilder()
+    qty_buttons = [
+        InlineKeyboardButton(text=f"{i} шт.", callback_data=f"select_qty:{variant_offer_id}:{i}")
+        for i in [1, 2, 3, 5, 10]
+    ]
+    builder.row(*qty_buttons)
+    builder.row(
+        InlineKeyboardButton(text="⬅️ Назад (до вибору розміру)", callback_data="back_to_sizes"),
+        InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_action")
+    )
+    return builder.as_markup()
+
+def build_cart_kb(cart_items: List[Dict[str, Any]], total_price: int) -> InlineKeyboardMarkup:
+    """
+    Створює клавіатуру для повідомлення про вміст кошика.
+    (ВЕРСІЯ БЕЗ КНОПКИ 'CHECKOUT')
+    """
+    builder = InlineKeyboardBuilder()
+    
+    for item in cart_items:
+        offer_id = item.get('variant_offer_id')
+        name = item.get('name', 'Товар')
+        size = item.get('size', '-')
+        builder.row(
+            InlineKeyboardButton(
+                text=f"🗑️ Видалити: {name} ({size})",
+                callback_data=f"cart:remove:{offer_id}"
+            )
+        )
+    
     if cart_items:
-        builder.row(builder.button(text=f"✅ Оформити все ({total_sum} грн)", callback_data=CartCallback(action="checkout").pack()))
-        builder.row(builder.button(text="🗑 Очистити кошик", callback_data=CartCallback(action="clear").pack()))
-    # ЗМІНЕНО: Кнопка веде в головне меню
-    builder.row(builder.button(text="🛍️ До головного меню", callback_data=BackCallback(to='main_menu').pack()))
+        builder.row(
+            InlineKeyboardButton(
+                text="🧹 Очистити кошик",
+                callback_data="cart:clear"
+            )
+        )
+        
+    # Кнопка "Продовжити покупки" (повертає на пошук в боті)
+    builder.row(
+        InlineKeyboardButton(
+            text="➕ Продовжити покупки (в боті)",
+            callback_data="start_search" # Та ж, що і в /start
+        )
+    )
+    # Кнопка "Оформити" видалена. Оформлення - тільки через MiniApp.
+    
     return builder.as_markup()
 
-def get_floating_cart_keyboard(user_id: int, total_sum: int, is_checkout: bool = False, checkout_sum: int = 0) -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder(); text = f"🛒 Ваш кошик - Загальна сума: {total_sum} грн"
-    if is_checkout and checkout_sum > 0: text += f" | Оформлення: {checkout_sum} грн"
-    builder.button(text=text, callback_data=CartCallback(action='show').pack())
-    return builder.as_markup()
-
-# --- Клавіатури для оформлення замовлення (ОНОВЛЕНО з кнопкою "Назад") ---
-
-def get_delivery_type_keyboard() -> InlineKeyboardMarkup:
+# ЗАМІНИ ЦЮ ФУНКЦІЮ:
+def build_cart_added_kb(total_price: int) -> InlineKeyboardMarkup:
+    """
+    Коротка клавіатура, яка з'являється після додавання товару.
+    (ВЕРСІЯ БЕЗ КНОПКИ 'CHECKOUT')
+    """
     builder = InlineKeyboardBuilder()
-    builder.button(text="🚚 Відправка на відділення", callback_data="delivery_type:branch")
-    builder.button(text="🏠 Доставка кур'єром", callback_data="delivery_type:courier")
-    builder.button(text="🏢 Самовивіз (по ТТН)", callback_data="delivery_type:pickup")
-    # Назад до стану введення телефону
-    builder.button(text="⬅️ Назад", callback_data=BackCallback(to=order_states.OrderFSM.awaiting_phone.state).pack())
-    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text=f"🛒 Переглянути кошик ({total_price} грн)",
+            callback_data="cart:open"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="➕ Продовжити покупки (в боті)",
+            callback_data="start_search"
+        )
+    )
+    # Кнопка "Оформити" видалена.
     return builder.as_markup()
 
-def get_delivery_service_keyboard() -> InlineKeyboardMarkup:
+def build_delivery_kb() -> InlineKeyboardMarkup:
+    """
+    Клавіатура вибору служби доставки.
+    """
     builder = InlineKeyboardBuilder()
-    builder.button(text="<Нова Пошта>", callback_data="delivery_service:np")
-    builder.button(text="<Укрпошта>", callback_data="delivery_service:ukrpost")
-    # TODO: Додати інші служби
-    # Назад до вибору типу доставки
-    builder.button(text="⬅️ Назад", callback_data=BackCallback(to=order_states.OrderFSM.awaiting_delivery_choice.state).pack())
-    builder.adjust(2, 1)
+    # TODO: Додати інші служби (UkrPoshta), коли буде готова логіка
+    builder.row(
+        InlineKeyboardButton(
+            text="🚚 Нова Пошта",
+            callback_data="delivery:nova_poshta"
+        )
+    )
+    # builder.row(
+    #     InlineKeyboardButton(
+    #         text="📮 Укрпошта",
+    #         callback_data="delivery:ukr_poshta"
+    #     )
+    # )
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ Скасувати оформлення",
+            callback_data="order:cancel"
+        )
+    )
     return builder.as_markup()
 
-def get_payment_method_keyboard() -> InlineKeyboardMarkup:
+
+def build_payment_kb() -> InlineKeyboardMarkup:
+    """
+    Клавіатура вибору типу оплати.
+    """
     builder = InlineKeyboardBuilder()
-    builder.button(text="💵 Накладений платіж", callback_data=PaymentCallback(method='cod').pack())
-    builder.button(text="💳 Повна передоплата", callback_data=PaymentCallback(method='full').pack())
-    builder.button(text="💸 Часткова передоплата (33%)", callback_data=PaymentCallback(method='partial').pack())
-    # Назад до попереднього кроку доставки (спеціальний маркер)
-    builder.button(text="⬅️ Назад", callback_data=BackCallback(to='previous_delivery_step').pack())
-    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="💵 Накладений платіж",
+            callback_data="payment:cod" # Cash on Delivery
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="💳 Повна передоплата (LiqPay/Monobank)",
+            callback_data="payment:prepaid"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад (до вибору адреси)",
+            callback_data="back_to:address"
+        )
+    )
     return builder.as_markup()
 
-def get_payment_url_keyboard(payment_url: str, order_id: str) -> InlineKeyboardMarkup:
+
+def build_skip_kb(step_key: str) -> InlineKeyboardMarkup:
+    """
+    Клавіатура з кнопкою "Пропустити" та "Назад".
+    step_key: (напр. 'note') куди повернутись
+    """
     builder = InlineKeyboardBuilder()
-    builder.button(text="👉 Перейти до оплати 👈", url=payment_url)
-    builder.button(text="✅ Я оплатив(-ла)", callback_data=OrderCallback(action='check_payment', order_id=order_id).pack())
-    # Назад до вибору способу оплати
-    builder.button(text="⬅️ Назад", callback_data=BackCallback(to=order_states.OrderFSM.awaiting_payment_choice.state).pack())
-    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="⏭️ Пропустити",
+            callback_data=f"skip:{step_key}"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад (до вибору оплати)",
+            callback_data="back_to:payment"
+        )
+    )
     return builder.as_markup()
 
-def get_skip_notes_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    builder.button(text="➡️ Пропустити", callback_data="notes:skip")
-    # Назад до вибору оплати
-    builder.button(text="⬅️ Назад", callback_data=BackCallback(to=order_states.OrderFSM.awaiting_payment_choice.state).pack())
-    builder.adjust(1)
-    return builder.as_markup()
 
-def get_final_confirmation_keyboard(order_id: str) -> InlineKeyboardMarkup:
+def build_confirmation_kb() -> InlineKeyboardMarkup:
+    """
+    Клавіатура фінального підтвердження замовлення.
+    """
     builder = InlineKeyboardBuilder()
-    builder.button(text="✅ Все вірно, підтвердити", callback_data=OrderCallback(action='confirm', order_id=order_id).pack())
-    # Назад до приміток
-    builder.button(text="⬅️ Назад", callback_data=BackCallback(to=order_states.OrderFSM.awaiting_notes.state).pack())
-    builder.button(text="❌ Скасувати замовлення", callback_data=OrderCallback(action='cancel').pack())
-    builder.adjust(1)
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Все вірно, Підтвердити",
+            callback_data="order:confirm"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="⬅️ Назад (до примітки)",
+            callback_data="back_to:note"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text="❌ Скасувати (почати FSM заново)",
+            callback_data="order:cancel"
+        )
+    )
     return builder.as_markup()
