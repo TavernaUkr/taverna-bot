@@ -1,361 +1,297 @@
 # handlers/order_handlers.py
+import logging
 import re
-import uuid
-import logging # Додаємо логування
-from aiogram import Router, F, types, Bot, Dispatcher # Додаємо Dispatcher
+from aiogram import Router, F, Bot
+from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery, ContentType
-from aiogram.fsm.state import State # Потрібно для кнопки Назад
-from aiogram.exceptions import TelegramBadRequest # Для обробки помилок редагування
 
 from fsm.order_states import OrderFSM
-from keyboards import inline_keyboards, reply_keyboards
-from keyboards.inline_keyboards import CartCallback, PaymentCallback, OrderCallback, BackCallback
-from services import (
-    cart_service,
-    delivery_service,
-    payment_service,
-    order_service,
-    mydrop_service,
-    notification_service,
-    gdrive_service,
-    xml_parser, # Потрібен для розрахунку часткової оплати
+from services import cart_service, order_service
+from keyboards.inline_keyboards import (
+    build_delivery_kb,
+    build_payment_kb,
+    build_skip_kb,
+    build_confirmation_kb
 )
-from config_reader import config # Потрібен для фінального підтвердження
 
-logger = logging.getLogger(__name__) # Ініціалізуємо логер
+logger = logging.getLogger(__name__)
 router = Router()
 
-# --- Валідація (без змін) ---
-def is_valid_pib(text: str) -> str | None:
-    parts = text.strip().split()
-    if not (2 <= len(parts) <= 3): return None
-    for part in parts:
-        if not re.fullmatch(r"[А-ЯҐЄІЇа-яґєії'\-]+", part): return None
-    formatted_parts = [p.capitalize() for p in parts]
-    return " ".join(formatted_parts)
+# --- ВАЛІДАТОРИ (з bot_updated_77 – копія.py) ---
 
-def is_valid_phone(text: str) -> str | None:
-    digits_only = re.sub(r'\D', '', text)
-    match = re.match(r'^(?:380|0)(\d{9})$', digits_only)
-    if match: return f"+380{match.group(1)}"
-    return None
-
-# --- Початок оформлення, ПІБ, Телефон (без змін, крім видалення reply клавіатури) ---
-@router.callback_query(CartCallback.filter(F.action == "checkout"))
-async def cb_start_checkout(callback: CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    cart = await cart_service.get_cart(user_id)
-    if not cart.get("items"):
-        await callback.answer("Ваш кошик порожній!", show_alert=True)
-        return
-    await callback.message.edit_text("✍️ Введіть ваше повне ім'я:")
-    await state.set_state(OrderFSM.awaiting_name)
-    await callback.answer()
-
-@router.message(OrderFSM.awaiting_name, F.text)
-async def process_name(message: Message, state: FSMContext):
-    validated_name = is_valid_pib(message.text)
-    if not validated_name:
-        await message.answer("❌ Введіть коректне ім'я та прізвище.")
-        return
-    await state.update_data(customer_name=validated_name)
-    await message.answer("📞 Надішліть номер телефону:", reply_markup=reply_keyboards.get_phone_request_keyboard())
-    await state.set_state(OrderFSM.awaiting_phone)
-
-@router.message(OrderFSM.awaiting_phone, (F.text | F.contact))
-async def process_phone(message: Message, state: FSMContext):
-    phone_number = message.contact.phone_number if message.contact else message.text
-    validated_phone = is_valid_phone(phone_number)
-    if not validated_phone:
-        await message.answer("❌ Некоректний формат номера.")
-        return
-    await state.update_data(customer_phone=validated_phone)
-    msg_to_delete = None
-    try:
-        sent_msg = await message.answer("🚚 Оберіть спосіб доставки:", reply_markup=inline_keyboards.get_delivery_type_keyboard())
-        # Видаляємо reply клавіатуру, відправивши порожню і видаливши повідомлення
-        msg_to_delete = await message.answer("...", reply_markup=reply_keyboards.remove_kb)
-        await msg_to_delete.delete()
-    except Exception as e:
-        logger.error(f"Помилка при видаленні reply клавіатури: {e}")
-        if msg_to_delete: try: await msg_to_delete.delete() except: pass
-    await state.set_state(OrderFSM.awaiting_delivery_choice)
-
-
-# --- Універсальний обробник кнопки "Назад" ---
-@router.callback_query(BackCallback.filter())
-async def process_back_button(callback: CallbackQuery, state: FSMContext, callback_data: BackCallback, dp: Dispatcher): # Додали dp
-    target_state_str = callback_data.to
-    current_state_str = (await state.get_state())
-
-    # Логіка для "previous_delivery_step"
-    if target_state_str == 'previous_delivery_step':
-        user_data = await state.get_data()
-        delivery_type = user_data.get('delivery_type')
-        if delivery_type == 'branch':
-            service = user_data.get('delivery_service')
-            if service == 'Нова Пошта': target_state_str = OrderFSM.awaiting_np_warehouse.state
-            elif service == 'Укрпошта': target_state_str = OrderFSM.awaiting_ukrposhta_address.state
-            else: target_state_str = OrderFSM.awaiting_delivery_service.state
-        elif delivery_type == 'courier': target_state_str = OrderFSM.awaiting_courier_address.state
-        else: target_state_str = OrderFSM.awaiting_delivery_choice.state # Самовивіз або помилка
-
-    # Головне меню
-    if target_state_str == 'main_menu':
-        await state.clear()
-        try: await callback.message.edit_text("👋 Головне меню:", reply_markup=inline_keyboards.get_main_menu_keyboard())
-        except TelegramBadRequest:
-             await callback.message.answer("👋 Головне меню:", reply_markup=inline_keyboards.get_main_menu_keyboard())
-             try: await callback.message.delete()
-             except: pass
-        await callback.answer("Повернення до головного меню.")
-        return
-
-    # Знаходимо об'єкт State за допомогою states_map_inv
-    target_state: State | None = OrderFSM.states_map_inv.get(target_state_str)
-
-    if target_state is None:
-        logger.error(f"Не вдалося знайти стан '{target_state_str}' для кнопки 'Назад'")
-        await state.clear()
-        await callback.message.edit_text("Помилка навігації. Головне меню.", reply_markup=inline_keyboards.get_main_menu_keyboard())
-        await callback.answer("Помилка", show_alert=True)
-        return
-
-    # --- Відображення повідомлень та клавіатур ---
-    await state.set_state(target_state)
-    message_text = "↩️ Повернення до попереднього кроку.\n\n"
-    reply_markup = None
-    edit_mode = True
-
-    # Визначаємо текст та клавіатуру для кожного стану
-    if target_state == OrderFSM.awaiting_name: message_text += "Введіть ваше ПІБ:"
-    elif target_state == OrderFSM.awaiting_phone:
-        message_text += "Надішліть номер телефону:"; reply_markup = reply_keyboards.get_phone_request_keyboard(); edit_mode = False
-    elif target_state == OrderFSM.awaiting_delivery_choice:
-        message_text += "Оберіть спосіб доставки:"; reply_markup = inline_keyboards.get_delivery_type_keyboard()
-    elif target_state == OrderFSM.awaiting_delivery_service:
-        message_text += "Оберіть службу доставки:"; reply_markup = inline_keyboards.get_delivery_service_keyboard()
-    elif target_state == OrderFSM.awaiting_city: message_text += "Введіть назву населеного пункту (для НП):"
-    elif target_state == OrderFSM.awaiting_np_warehouse: message_text += "Введіть номер або адресу відділення НП:"
-    elif target_state == OrderFSM.awaiting_ukrposhta_address: message_text += "Введіть повну адресу для Укрпошти (індекс, місто, вулиця, дім):"
-    elif target_state == OrderFSM.awaiting_courier_address: message_text += "Введіть адресу для кур'єра (місто, вулиця, дім):"
-    elif target_state == OrderFSM.awaiting_payment_choice:
-        message_text += "Оберіть спосіб оплати:"; reply_markup = inline_keyboards.get_payment_method_keyboard()
-    elif target_state == OrderFSM.awaiting_notes:
-        message_text += "Додайте примітку або пропустіть:"; reply_markup = inline_keyboards.get_skip_notes_keyboard()
-    else: message_text += "Продовжуйте." # Generic
-
-    # Надсилаємо або редагуємо повідомлення
-    try:
-        if edit_mode: await callback.message.edit_text(message_text, reply_markup=reply_markup)
-        else:
-            try: await callback.message.delete() # Видаляємо старе inline
-            except: pass # Ігноруємо помилку, якщо вже видалено
-            await callback.message.answer(message_text, reply_markup=reply_markup) # Надсилаємо нове з reply
-    except TelegramBadRequest as e:
-        logger.warning(f"Помилка edit/send 'Назад': {e}. Спроба відправити нове.")
-        try:
-            await callback.message.answer(message_text, reply_markup=reply_markup)
-            try: await callback.message.delete() # Спробувати видалити старе
-            except: pass
-        except Exception as inner_e: logger.error(f"Не вдалося відправити нове 'Назад': {inner_e}")
-    await callback.answer("Повернення назад")
-
-
-# --- Обробники вибору доставки (ОНОВЛЕНО) ---
-
-@router.callback_query(F.data.startswith("delivery_type:"), OrderFSM.awaiting_delivery_choice)
-async def select_delivery_type(callback: CallbackQuery, state: FSMContext):
-    delivery_type = callback.data.split(":")[1]
-    await state.update_data(delivery_type=delivery_type)
-    if delivery_type == 'branch':
-        await callback.message.edit_text("Оберіть службу доставки:", reply_markup=inline_keyboards.get_delivery_service_keyboard())
-        await state.set_state(OrderFSM.awaiting_delivery_service)
-    elif delivery_type == 'courier':
-        await state.update_data(delivery_service="Кур'єр Нової Пошти") # TODO: Додати вибір служби
-        await callback.message.edit_text("🏠 Введіть адресу кур'єра (місто, вулиця, дім):")
-        await state.set_state(OrderFSM.awaiting_courier_address)
-    elif delivery_type == 'pickup':
-        await state.update_data(delivery_service="Самовивіз", delivery_city_name="Самовивіз", delivery_warehouse="За ТТН")
-        await callback.message.edit_text("✅ Самовивіз.\nОберіть спосіб оплати:", reply_markup=inline_keyboards.get_payment_method_keyboard())
-        await state.set_state(OrderFSM.awaiting_payment_choice)
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("delivery_service:"), OrderFSM.awaiting_delivery_service)
-async def select_delivery_service(callback: CallbackQuery, state: FSMContext):
-    service = callback.data.split(":")[1]; message_text, next_state = "", None
-    if service == 'np':
-        await state.update_data(delivery_service="Нова Пошта")
-        message_text = "🏙️ Введіть місто:"; next_state = OrderFSM.awaiting_city
-    elif service == 'ukrpost':
-        await state.update_data(delivery_service="Укрпошта")
-        message_text = "📬 Введіть повну адресу (індекс, місто, вулиця, дім):"; next_state = OrderFSM.awaiting_ukrposhta_address
-    else: await callback.answer("Невідома служба."); return
-    await callback.message.edit_text(message_text); await state.set_state(next_state); await callback.answer()
-
-# Обробники НП (без змін)
-@router.message(OrderFSM.awaiting_city, F.text)
-async def process_city_np(message: Message, state: FSMContext):
-    cities = await delivery_service.find_np_city(message.text)
-    if not cities: await message.answer("❌ Не знайдено. Спробуйте ще раз."); return
-    selected_city = cities[0]; city_name = selected_city.get("Present"); city_ref = selected_city.get("Ref")
-    await state.update_data(delivery_city_name=city_name, delivery_city_ref=city_ref)
-    await message.answer(f"✅ Місто: {city_name}.\nВведіть номер/адресу відділення:"); await state.set_state(OrderFSM.awaiting_np_warehouse)
-
-@router.message(OrderFSM.awaiting_np_warehouse, F.text)
-async def process_warehouse_np(message: Message, state: FSMContext):
-    user_data = await state.get_data(); city_ref = user_data.get("delivery_city_ref")
-    warehouses = await delivery_service.find_np_warehouses(city_ref, message.text)
-    if not warehouses: await message.answer("❌ Не знайдено відділення. Спробуйте ще раз."); return
-    selected_warehouse = warehouses[0]; warehouse_desc = selected_warehouse.get("Description")
-    await state.update_data(delivery_warehouse=warehouse_desc)
-    await message.answer(f"✅ Відділення: {warehouse_desc}.\nОберіть спосіб оплати:", reply_markup=inline_keyboards.get_payment_method_keyboard()); await state.set_state(OrderFSM.awaiting_payment_choice)
-
-# Обробник адреси для Укрпошти
-@router.message(OrderFSM.awaiting_ukrposhta_address, F.text)
-async def process_ukrposhta_address(message: Message, state: FSMContext):
-    address = message.text.strip()
-    # Посилюємо перевірку: 5 цифр індексу на початку, потім хоча б 2 слова
-    if not re.match(r'^\d{5}\s+\S+\s+\S+', address):
-        await message.answer("❌ Введіть адресу у форматі: Індекс Місто Вулиця Дім (напр., 58000 Чернівці Головна 1)")
-        return
-    # Зберігаємо місто окремо, якщо можливо (беремо друге слово)
-    parts = address.split()
-    city_name = parts[1] if len(parts) > 1 else "Укрпошта"
-    await state.update_data(delivery_city_name=city_name, delivery_warehouse=address)
-    await message.answer("✅ Адресу збережено.\nОберіть спосіб оплати:", reply_markup=inline_keyboards.get_payment_method_keyboard())
-    await state.set_state(OrderFSM.awaiting_payment_choice)
-
-# Обробник адреси для кур'єра
-@router.message(OrderFSM.awaiting_courier_address, F.text)
-async def process_courier_address(message: Message, state: FSMContext):
-    address = message.text.strip()
-    if len(address.split()) < 3:
-        await message.answer("❌ Введіть повну адресу (Місто Вулиця Дім).")
-        return
-    parts = address.split(maxsplit=1); city = parts[0]; street_house = parts[1] if len(parts) > 1 else ""
-    await state.update_data(delivery_city_name=city, delivery_warehouse=f"Кур'єр: {street_house}")
-    await message.answer("✅ Адресу збережено.\nОберіть спосіб оплати:", reply_markup=inline_keyboards.get_payment_method_keyboard())
-    await state.set_state(OrderFSM.awaiting_payment_choice)
-
-
-# --- Обробка оплати, приміток, підтвердження (ОНОВЛЕНО з кнопкою Назад) ---
-
-@router.callback_query(PaymentCallback.filter(), OrderFSM.awaiting_payment_choice)
-async def process_payment_choice(callback: CallbackQuery, callback_data: PaymentCallback, state: FSMContext):
-    user_id = callback.from_user.id; payment_method = callback_data.method
-    await state.update_data(payment_method=payment_method)
-    cart = await cart_service.get_cart(user_id); total_sum = sum(item['final_price'] * item['quantity'] for item in cart.get("items", []))
-    order_id = str(uuid.uuid4().hex[:10]); await state.update_data(order_id=order_id)
-
-    if payment_method == 'cod':
-        await state.update_data(payment_display_name="Накладений платіж")
-        await callback.message.edit_text("✍️ Додайте примітку або пропустіть:", reply_markup=inline_keyboards.get_skip_notes_keyboard())
-        await state.set_state(OrderFSM.awaiting_notes)
-    elif payment_method in ['full', 'partial']:
-        amount_to_pay, payment_display_name = 0, ""
-        if payment_method == 'full': amount_to_pay = total_sum; payment_display_name = "Повна передоплата"
-        else: # partial
-            try:
-                # Використовуємо _aggressive_rounding з xml_parser
-                partial_sum = sum(xml_parser._aggressive_rounding(Decimal(item['final_price']) / Decimal('1.33') * Decimal('0.33')) * item['quantity'] for item in cart.get("items", []) if isinstance(item['final_price'], (int, float)) or str(item.get('final_price','')).isdigit()) # Додано get
-                amount_to_pay = partial_sum if partial_sum > 0 else int(total_sum * 0.33)
-            except Exception as e: logger.error(f"Помилка розрахунку часткової оплати: {e}"); amount_to_pay = int(total_sum * 0.33)
-            payment_display_name = "Часткова передоплата"
-        await state.update_data(payment_display_name=payment_display_name)
-        payment_link = await payment_service.create_payment_link(order_id, amount_to_pay, f"Замовлення #{order_id}")
-        if not payment_link: await callback.answer("Помилка оплати.", show_alert=True); return
-        keyboard = inline_keyboards.get_payment_url_keyboard(payment_link, order_id)
-        await callback.message.edit_text(f"Сума: {amount_to_pay} грн. Оплатіть та натисніть 'Я оплатив(-ла)'.", reply_markup=keyboard)
-    await callback.answer()
-
-@router.callback_query(OrderCallback.filter(F.action == 'check_payment'), OrderFSM.awaiting_payment_choice)
-async def check_payment(callback: CallbackQuery, callback_data: OrderCallback, state: FSMContext):
-    is_paid = await payment_service.check_payment_status(callback_data.order_id)
-    if is_paid:
-        await callback.answer("✅ Оплата успішна!", show_alert=True)
-        await callback.message.edit_text("✍️ Додайте примітку або пропустіть:", reply_markup=inline_keyboards.get_skip_notes_keyboard())
-        await state.set_state(OrderFSM.awaiting_notes)
-    else: await callback.answer("❌ Оплата ще не надійшла.", show_alert=True)
-
-@router.callback_query(F.data == "notes:skip", OrderFSM.awaiting_notes)
-async def process_skip_notes(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(notes=None)
-    await show_final_confirmation(callback, state) # Передаємо callback
-    await callback.answer()
-
-@router.message(OrderFSM.awaiting_notes, F.text)
-async def process_notes(message: Message, state: FSMContext):
-    await state.update_data(notes=message.text)
-    await show_final_confirmation(message, state)
-
-# Функція показу фінального підтвердження (ОНОВЛЕНО)
-async def show_final_confirmation(target: types.Message | types.CallbackQuery, state: FSMContext):
-    user_id = target.from_user.id
-    message = target.message if isinstance(target, types.CallbackQuery) else target
-
-    user_data = await state.get_data(); cart = await cart_service.get_cart(user_id)
-    cart_items = cart.get("items", []); total_sum = sum(item['final_price'] * item['quantity'] for item in cart_items)
-    items_text = "".join([f"▪️ {item['name']} ({item['size']}) - {item['quantity']} шт. x {item['final_price']} грн\n" for item in cart_items])
-
-    delivery_details = ""; delivery_service_name = user_data.get('delivery_service', 'Не обрано')
-    delivery_city = user_data.get('delivery_city_name', ''); delivery_warehouse = user_data.get('delivery_warehouse', '')
-    if delivery_service_name == "Самовивіз": delivery_details = f"🏢 <b>Спосіб:</b> {delivery_service_name}"
-    elif "Кур'єр" in delivery_service_name: delivery_details = f"🏠 <b>Спосіб:</b> {delivery_service_name}\n📍 <b>Адреса:</b> {delivery_city}, {delivery_warehouse.replace('Курєр: ', '')}" # Прибираємо префікс
-    elif delivery_service_name == "Укрпошта": delivery_details = f"📬 <b>Служба:</b> {delivery_service_name}\n📍 <b>Адреса:</b> {delivery_warehouse}"
-    elif delivery_service_name == "Нова Пошта": delivery_details = f"🚚 <b>Служба:</b> {delivery_service_name}\n📍 <b>Місто:</b> {delivery_city}\n🏤 <b>Відділення:</b> {delivery_warehouse}"
-    else: delivery_details = "🚚 <b>Доставка:</b> Не вказано"
-
-    summary_text = f"""
-    <b>⚠️ Будь ласка, перевірте ваше замовлення:</b>
-
-    👤 <b>Отримувач:</b> {user_data.get('customer_name')}
-    📞 <b>Телефон:</b> {user_data.get('customer_phone')}
-
-    {delivery_details}
-
-    💳 <b>Оплата:</b> {user_data.get('payment_display_name', 'Не обрано')}
-    📝 <b>Примітка:</b> {user_data.get('notes', 'немає')}
-
-    🛒 <b>Товари:</b>
-{items_text}
-    💰 <b>Загальна сума: {total_sum} грн</b>
+def _validate_pib(text: str) -> Tuple[bool, str, str]:
     """
-    keyboard = inline_keyboards.get_final_confirmation_keyboard(user_data.get('order_id'))
-    try:
-        if isinstance(target, types.CallbackQuery): await message.edit_text(summary_text, reply_markup=keyboard)
-        else: await message.answer(summary_text, reply_markup=keyboard)
-    except TelegramBadRequest as e:
-        logger.warning(f"Помилка edit confirm: {e}. Нове повідомлення.")
-        await message.answer(summary_text, reply_markup=keyboard)
+    Валідує ПІБ. 
+    Повертає (is_valid, error_message, formatted_name)
+    """
+    parts = text.strip().split()
+    if len(parts) < 2 or len(parts) > 3:
+        return False, "❌ Введіть Прізвище та Ім'я (2 слова), або Прізвище, Ім'я, По-батькові (3 слова).", ""
+    
+    cyrillic_pattern = re.compile(r"^[А-ЯҐЄІЇа-яґєії']+$")
+    
+    for part in parts:
+        if not cyrillic_pattern.match(part) or len(part) < 2:
+            return False, "❌ ПІБ має складатися лише з українських літер (дозволено апостроф) та містити мінімум 2 символи у кожному слові.", ""
+            
+    formatted_name = " ".join([part.title() for part in parts])
+    return True, "", formatted_name
+
+
+def _validate_phone(text: str) -> Tuple[bool, str, str]:
+    """
+    Валідує телефон. 
+    Повертає (is_valid, error_message, formatted_phone)
+    """
+    phone = re.sub(r"[^\d+]", "", text) # Видаляємо все, крім цифр та +
+    
+    if phone.startswith('+380') and len(phone) == 13:
+        digits = phone[4:] # 9 цифр
+    elif phone.startswith('380') and len(phone) == 12:
+        digits = phone[3:] # 9 цифр
+    elif phone.startswith('0') and len(phone) == 10:
+        digits = phone[1:] # 9 цифр
+    else:
+        return False, "❌ Некоректний формат. Номер має містити 10, 12 або 13 цифр (з +380).", ""
+
+    # Перевірка кодів операторів (з твого старого файлу)
+    VALID_CODES = {
+        "67", "68", "96", "97", "98", "50", "66", "95", "99", 
+        "75", "63", "73", "93", "91", "92", "94"
+    }
+    if digits[:2] not in VALID_CODES:
+        return False, f"❌ Невідомий код оператора (0{digits[:2]}). Спробуйте ще раз.", ""
+
+    formatted_phone = f"+380{digits}"
+    return True, "", formatted_phone
+
+# --- FSM Хендлери ---
+
+@router.message(OrderFSM.awaiting_name)
+async def handle_name(msg: Message, state: FSMContext):
+    """Обробляє введене ПІБ."""
+    is_valid, error_msg, formatted_name = _validate_pib(msg.text)
+    
+    if not is_valid:
+        await msg.answer(error_msg)
+        return
+        
+    await state.update_data(pib=formatted_name)
+    await state.set_state(OrderFSM.awaiting_phone)
+    await msg.answer(f"✅ ПІБ: {formatted_name}\n\nТепер введіть Ваш <b>номер телефону</b>:")
+
+@router.message(OrderFSM.awaiting_phone)
+async def handle_phone(msg: Message, state: FSMContext):
+    """Обробляє введений телефон."""
+    is_valid, error_msg, formatted_phone = _validate_phone(msg.text)
+    
+    if not is_valid:
+        await msg.answer(error_msg)
+        return
+        
+    await state.update_data(phone=formatted_phone)
+    await state.set_state(OrderFSM.awaiting_delivery_service)
+    await msg.answer(f"✅ Телефон: {formatted_phone}\n\nОберіть <b>службу доставки</b>:", reply_markup=build_delivery_kb())
+
+@router.callback_query(F.data.startswith("delivery:"))
+async def handle_delivery_service(cb: CallbackQuery, state: FSMContext):
+    """Обробляє вибір служби доставки."""
+    service_key = cb.data.split(":")[1]
+    await state.update_data(delivery_service=service_key)
+    
+    await state.set_state(OrderFSM.awaiting_address)
+    
+    service_name_map = {
+        "nova_poshta": "Нова Пошта",
+        "ukr_poshta": "Укрпошта"
+    }
+    service_name = service_name_map.get(service_key, "Доставка")
+    
+    # TODO: Тут буде інтеграція з API Нової Пошти (в наступних кроках)
+    # Поки що просимо ввести текстом
+    await cb.message.edit_text(
+        f"✅ Служба: {service_name}\n\n"
+        "Введіть Ваше <b>місто та номер відділення</b> (наприклад: <code>Київ, відділення 100</code>):"
+    )
+    await cb.answer()
+
+@router.message(OrderFSM.awaiting_address)
+async def handle_address(msg: Message, state: FSMContext):
+    """Обробляє введену адресу."""
+    address_text = msg.text.strip()
+    if len(address_text) < 5:
+        await msg.answer("❌ Будь ласка, введіть повнішу адресу (місто та відділення).")
+        return
+
+    await state.update_data(address=address_text)
+    await state.set_state(OrderFSM.awaiting_payment_type)
+    await msg.answer(
+        f"✅ Адреса: {address_text}\n\n"
+        "Оберіть <b>спосіб оплати</b>:",
+        reply_markup=build_payment_kb()
+    )
+
+@router.callback_query(F.data.startswith("payment:"))
+async def handle_payment_type(cb: CallbackQuery, state: FSMContext):
+    """Обробляє вибір типу оплати."""
+    payment_key = cb.data.split(":")[1]
+    
+    payment_name_map = {
+        "cod": "Накладений платіж",
+        "prepaid": "Повна передоплата"
+    }
+    payment_name = payment_name_map.get(payment_key, "Оплата")
+    
+    await state.update_data(payment_type=payment_key)
+    await state.set_state(OrderFSM.awaiting_note)
+    await cb.message.edit_text(
+        f"✅ Оплата: {payment_name}\n\n"
+        "Додайте <b>примітку</b> до замовлення (або натисніть 'Пропустити'):",
+        reply_markup=build_skip_kb("note")
+    )
+    await cb.answer()
+
+@router.message(OrderFSM.awaiting_note)
+async def handle_note(msg: Message, state: FSMContext):
+    """Обробляє примітку."""
+    await state.update_data(note=msg.text.strip())
+    await msg.answer("✅ Примітку додано.")
+    await show_confirmation_summary(msg, state) # Переходимо до підтвердження
+
+@router.callback_query(F.data == "skip:note")
+async def handle_skip_note(cb: CallbackQuery, state: FSMContext):
+    """Обробляє пропуск примітки."""
+    await state.update_data(note=None)
+    await cb.message.delete() # Видаляємо повідомлення з кнопкою "Пропустити"
+    await show_confirmation_summary(cb.message, state) # Переходимо до підтвердження
+    await cb.answer("Примітку пропущено.")
+
+async def show_confirmation_summary(msg: Message, state: FSMContext):
+    """
+    Показує фінальний екран підтвердження замовлення.
+    """
+    user_id = msg.chat.id
+    fsm_data = await state.get_data()
+    cart_items, total_price = await cart_service.get_cart_contents(user_id)
+    
+    if not cart_items:
+        await msg.answer("❌ Ваш кошик порожній. Неможливо оформити замовлення.")
+        await state.clear()
+        return
+
+    # Формуємо текст
+    summary_lines = ["🧾 <b>Перевірте Ваше замовлення:</b>\n"]
+    
+    # Блок 1: Товари
+    for i, item in enumerate(cart_items, 1):
+        summary_lines.append(
+            f"<b>{i}. {item.get('name')}</b> (<code>{item.get('sku')}</code>)"
+        )
+        summary_lines.append(
+            f"   Розмір: {item.get('size', '-')} | {item.get('price', 0)} грн x {item.get('quantity', 0)} шт. = <b>{item.get('total_item_price', 0)} грн</b>"
+        )
+    
+    summary_lines.append("\n" + "—" * 20)
+    
+    # Блок 2: Отримувач
+    payment_map = {"cod": "Накладений платіж", "prepaid": "Повна передоплата"}
+    delivery_map = {"nova_poshta": "Нова Пошта", "ukr_poshta": "Укрпошта"}
+    
+    summary_lines.append(f"<b>Отримувач:</b>")
+    summary_lines.append(f"  ПІБ: {fsm_data.get('pib')}")
+    summary_lines.append(f"  Телефон: {fsm_data.get('phone')}")
+    summary_lines.append(f"<b>Доставка:</b>")
+    summary_lines.append(f"  Служба: {delivery_map.get(fsm_data.get('delivery_service'))}")
+    summary_lines.append(f"  Адреса: {fsm_data.get('address')}")
+    summary_lines.append(f"<b>Оплата:</b>")
+    summary_lines.append(f"  Тип: {payment_map.get(fsm_data.get('payment_type'))}")
+    if fsm_data.get('note'):
+        summary_lines.append(f"  Примітка: {fsm_data.get('note')}")
+        
+    summary_lines.append("\n" + "—" * 20)
+    summary_lines.append(f"🔥 <b>Загальна сума до сплати: {total_price} грн</b>")
+    
     await state.set_state(OrderFSM.awaiting_confirmation)
+    await msg.answer("\n".join(summary_lines), reply_markup=build_confirmation_kb())
 
-# Фінальне підтвердження та скасування (без змін)
-@router.callback_query(OrderCallback.filter(F.action == 'confirm'), OrderFSM.awaiting_confirmation)
-async def final_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot):
-    await callback.message.edit_text("⏳ Обробляємо...")
-    user_data = await state.get_data(); cart = await cart_service.get_cart(callback.from_user.id)
-    order_id = user_data.get('order_id'); supplier_name = "Landliz Drop" # TODO: Динамічно
-    full_order_data = {**user_data, "order_id": order_id, "cart": cart, "supplier_name": supplier_name, "customer_id": callback.from_user.id}
-    mydrop_response = await mydrop_service.create_order(full_order_data)
-    if mydrop_response.get("success"): ttn = mydrop_response.get("ttn"); full_order_data['ttn'] = ttn # Тепер ttn це словник
-    else: await callback.message.edit_text("❌ Помилка створення замовлення."); return
-    filename = order_service.generate_order_filename(order_id, user_data.get('customer_name'))
-    txt_content = order_service.format_order_to_txt(full_order_data)
-    if config.use_gdrive:
-        try:
-             # Використовуємо photo_filename як ім'я для .txt файлу
-             await gdrive_service.save_order_txt(txt_content.encode('utf-8'), filename=filename) # Потрібна нова функція в gdrive_service
-        except Exception as e: logger.error(f"Помилка GDrive TXT: {e}")
-    await notification_service.send_new_order_notifications(bot, full_order_data, txt_content, filename)
-    await state.clear(); await cart_service.clear_cart(callback.from_user.id)
-    try: await callback.message.delete()
-    except: pass
-    await callback.answer("Замовлення підтверджено!")
+@router.callback_query(OrderFSM.awaiting_confirmation, F.data == "order:confirm")
+async def handle_order_confirm(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    """
+    ФІНАЛЬНИЙ крок. Обробляє замовлення.
+    (ВЕРСІЯ БЕЗ ЗАГЛУШКИ)
+    """
+    user_id = cb.from_user.id
+    fsm_data = await state.get_data()
+    cart_items, total_price = await cart_service.get_cart_contents(user_id)
+    
+    if not cart_items:
+        await cb.answer("Кошик порожній!", show_alert=True)
+        await state.clear()
+        return
 
-@router.callback_query(OrderCallback.filter(F.action == 'cancel'), OrderFSM.awaiting_confirmation)
-async def final_cancel(callback: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text("⏳ <b>Обробляємо Ваше замовлення...</b>", reply_markup=None)
+    
+    try:
+        # --- ОСЬ ТУТ ЗАМІНА ЗАГЛУШКИ ---
+        success, order_uid = await order_service.create_order(
+            bot=bot,
+            user_id=user_id,
+            fsm_data=fsm_data,
+            cart_items=cart_items,
+            total_price=total_price
+        )
+        # --- КІНЕЦЬ ЗАМІНИ ---
+
+        if success:
+            await cb.message.answer(
+                f"✅ <b>Дякуємо, Ваше замовлення <code>{order_uid}</code> прийнято!</b>\n\n"
+                f"Наш менеджер зв'яжеться з Вами найближчим часом для підтвердження."
+            )
+            # Очищуємо кошик в Redis
+            await cart_service.clear_cart(user_id)
+            
+        else:
+            await cb.message.answer(
+                "❌ <b>Сталася помилка під час створення замовлення.</b>\n\n"
+                "Будь ласка, спробуйте ще раз або зв'яжіться з нами напряму."
+            )
+            
+    except Exception as e:
+        logger.error(f"Критична помилка при handle_order_confirm: {e}", exc_info=True)
+        await cb.message.answer("❌ <b>Сталася критична помилка.</b> Ваші дані не втрачено, але, будь ласка, повідомте адміністратора.")
+    finally:
+        # Завершуємо FSM
+        await state.clear()
+
+@router.callback_query(OrderFSM.awaiting_confirmation, F.data == "order:cancel")
+async def handle_order_cancel(cb: CallbackQuery, state: FSMContext):
+    """
+    Скасовує FSM, але НЕ чистить кошик.
+    """
     await state.clear()
-    await callback.message.edit_text("❌ Замовлення скасовано.", reply_markup=inline_keyboards.get_main_menu_keyboard())
-    await callback.answer()
+    await cb.message.edit_text(
+        "❌ Оформлення скасовано.\n\n"
+        "Ваш кошик збережено. Ви можете повернутися до нього в будь-який час за командою /basket"
+    )
+    await cb.answer("Оформлення скасовано.")
+
+# --- Обробники "Назад" ---
+# (Дозволяють користувачу рухатись по FSM)
+
+@router.callback_query(F.data == "back_to:address")
+async def go_back_to_address(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(OrderFSM.awaiting_address)
+    await cb.message.edit_text("⬅️ Повернення...\n\nВведіть <b>місто та номер відділення</b>:")
+    await cb.answer()
+
+@router.callback_query(F.data == "back_to:payment")
+async def go_back_to_payment(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(OrderFSM.awaiting_payment_type)
+    await cb.message.edit_text("⬅️ Повернення...\n\nОберіть <b>спосіб оплати</b>:", reply_markup=build_payment_kb())
+    await cb.answer()
+    
+@router.callback_query(F.data == "back_to:note")
+async def go_back_to_note(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(OrderFSM.awaiting_note)
+    await cb.message.edit_text("⬅️ Повернення...\n\nДодайте <b>примітку</b> (або 'Пропустити'):", reply_markup=build_skip_kb("note"))
+    await cb.answer()
