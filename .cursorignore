@@ -1,8 +1,14 @@
 # Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)
+# Python envs
 .venv/
 venv/
+ENV/
+env/
+
+# Python cache
 __pycache__/
 *.pyc
+
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
@@ -14,3 +20,7 @@ node_modules/
 *.log
 *.sqlite*
 uploads/
+
+# IDE
+.vscode/
+.cursor/
