@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label';
 import { useTelegramAuthContext } from './TelegramAuthProvider';
 import { CartItem } from '@/hooks/useCart';
 import { supabase } from '@/integrations/supabase/client';
+import { createBackendOrder, BackendApiError, type BackendOrderPayload } from '@/lib/backendApi';
 import { toast } from 'sonner';
 import { hapticNotification } from '@/lib/haptics';
 import { useBonuses } from '@/hooks/useBonuses';
@@ -501,127 +502,89 @@ export function CheckoutModal({ isOpen, onClose, items, onOrderComplete }: Check
     setIsSubmitting(true);
 
     try {
-      const orderData = {
-        payment_method: paymentMethod,
-        delivery_cost: deliveryCost,
-        subtotal: subtotal,
-        total: total,
-        notes: orderNotes || null,
-        items: items.map(item => ({
-          product_id: item.productId,
+      // Адреса доставки одним текстовим полем (бо `orders.delivery_address`
+      // на бекенді - це один Text-стовпець, а не набір city/warehouse/ref).
+      const deliveryAddressParts = [
+        deliveryData.city,
+        deliveryData.warehouse ? `Відділення №${deliveryData.warehouse}` : '',
+        deliveryData.deliveryType === 'courier' ? deliveryData.courierAddress : '',
+        deliveryData.postalCode ? `Індекс: ${deliveryData.postalCode}` : '',
+        deliveryData.pickupPoint,
+      ].filter(Boolean);
+
+      const orderPayload: BackendOrderPayload = {
+        customer_name: `${contactData.firstName} ${contactData.lastName}`.trim(),
+        customer_phone: contactData.phone,
+        delivery_address: deliveryAddressParts.join(', ') || 'Не вказано',
+        delivery_service: deliveryData.service,
+        payment_type: paymentType,
+        note: orderNotes || undefined,
+        items: items.map((item) => ({
+          // `variantId` заповнюється в ProductDetail.tsx при виборі розміру/кольору.
+          variant_id: item.variantId ? Number(item.variantId) : null,
+          product_id: /^\d+$/.test(item.productId) ? Number(item.productId) : null,
           product_name: item.name,
-          product_image: item.image,
-          price: item.price,
           quantity: item.quantity,
-          size: item.size || null,
-          color: item.color || null,
-          total: item.price * item.quantity,
+          price: item.price,
+          options_text: [item.size, item.color].filter(Boolean).join(', ') || null,
         })),
       };
 
-      if (isAuthenticated && sessionToken) {
-        // Authenticated order - first save address
-        const { data, error } = await supabase.functions.invoke('telegram-auth', {
-          body: {
-            action: 'create_order',
-            session_token: sessionToken,
-            guest_info: {
-              recipient_name: `${contactData.firstName} ${contactData.lastName}`,
-              phone: contactData.phone,
-              city: deliveryData.city,
-              city_ref: deliveryData.cityRef,
-              warehouse_number: deliveryData.warehouse,
-              warehouse_ref: deliveryData.warehouseRef,
-              delivery_type: 'warehouse',
-              delivery_service: 'nova_poshta',
-            },
-            order: orderData,
-          },
-        });
+      // POST /api/v1/orders/ — замовлення пишеться напряму в БД нашого
+      // FastAPI-бекенду (таблиці `orders` + `order_items`). Supabase для
+      // створення замовлення більше НЕ використовується.
+      const order = await createBackendOrder(orderPayload);
 
-        if (error) throw error;
-
-        if (data?.success && data?.order) {
-          // Spend bonuses if used
-          if (bonusesToUse > 0) {
-            await spendBonuses(bonusesToUse);
-          }
-          // Track promo usage
-          if (promoApplied && promoDbId && profile?.id) {
-            await supabase.from("used_promo_codes").insert({
-              profile_id: profile.id,
-              promo_code_id: promoDbId,
-              order_id: data.order.id,
-            });
-            await supabase.from("promo_codes").update({
-              current_uses: (await supabase.from("promo_codes").select("current_uses").eq("id", promoDbId).single()).data?.current_uses! + 1,
-            }).eq("id", promoDbId);
-            localStorage.removeItem(PROMO_STORAGE_KEY);
-          }
-          toast.success(`Замовлення #${data.order.order_number} створено!`);
-          if (paymentMethod === 'taverna_balance') {
-            try {
-              await payWithBalance(data.order.id, true);
-              toast.success('Оплачено з рахунку Taverna');
-            } catch {
-              toast.error('Недостатньо коштів на рахунку');
-            }
-            onOrderComplete(data.order.id);
-            return;
-          }
-          if (paymentMethod === 'telegram_wallet') {
-            setWalletOrder({ id: data.order.id, number: data.order.order_number });
-            return;
-          }
-          onOrderComplete(data.order.id);
-        } else {
-          throw new Error(data?.error || 'Failed to create order');
-        }
-      } else {
-        // Guest order
-        const { data, error } = await supabase.functions.invoke('telegram-auth', {
-          body: {
-            action: 'create_guest_order',
-            guest_info: {
-              recipient_name: `${contactData.firstName} ${contactData.lastName}`,
-              phone: contactData.phone,
-              city: deliveryData.city,
-              city_ref: deliveryData.cityRef,
-              warehouse_number: deliveryData.warehouse,
-              warehouse_ref: deliveryData.warehouseRef,
-              delivery_type: 'warehouse',
-              delivery_service: 'nova_poshta',
-            },
-            order: orderData,
-          },
-        });
-
-        if (error) throw error;
-
-        if (data?.success && data?.order) {
-          toast.success(`Замовлення #${data.order.order_number} створено!`);
-          if (paymentMethod === 'taverna_balance') {
-            try {
-              await payWithBalance(data.order.id, true);
-              toast.success('Оплачено з рахунку Taverna');
-            } catch {
-              toast.error('Недостатньо коштів на рахунку');
-            }
-            onOrderComplete(data.order.id);
-            return;
-          }
-          if (paymentMethod === 'telegram_wallet') {
-            setWalletOrder({ id: data.order.id, number: data.order.order_number });
-            return;
-          }
-          onOrderComplete(data.order.id);
-        } else {
-          throw new Error(data?.error || 'Failed to create order');
+      // [ОБМЕЖЕННЯ] Списання бонусів лишилось на Supabase (окрема фіча,
+      // не залежить від order_id) — робимо це "best effort": якщо впаде,
+      // замовлення в FastAPI вже створено, тож не блокуємо успіх користувачу.
+      if (bonusesToUse > 0) {
+        try {
+          await spendBonuses(bonusesToUse);
+        } catch (e) {
+          console.error('spendBonuses error:', e);
         }
       }
+
+      // [ОБМЕЖЕННЯ] Трекінг використання промокоду (`used_promo_codes` в
+      // Supabase) прибрано: та таблиця прив'язана до Supabase-замовлень
+      // (окремий order_id), а тепер замовлення живе у FastAPI/Postgres.
+      // Знижка від промокоду й далі рахується в `total` вище — просто
+      // лічильник "скільки разів використано" по цьому промокоду більше
+      // не оновлюється автоматично. Якщо це критично — потрібен окремий
+      // ендпоінт на бекенді для обліку промокодів.
+      if (promoApplied) {
+        localStorage.removeItem(PROMO_STORAGE_KEY);
+      }
+
+      toast.success(`Замовлення #${order.order_uid} створено!`);
+
+      // [ОБМЕЖЕННЯ] "Рахунок Taverna" і "Telegram Wallet" — окремі фічі,
+      // які раніше працювали з Supabase-замовленням (той самий order.id).
+      // Тепер order.id — це ID з FastAPI, а не Supabase, тож ці способи
+      // оплати можуть не спрацювати коректно, поки їх не переведуть на
+      // FastAPI теж. Залишаємо код як є (з обробкою помилки), щоб не
+      // блокувати створення самого замовлення.
+      if (paymentMethod === 'taverna_balance') {
+        try {
+          await payWithBalance(String(order.id), true);
+          toast.success('Оплачено з рахунку Taverna');
+        } catch {
+          toast.error('Недостатньо коштів на рахунку');
+        }
+        onOrderComplete(String(order.id));
+        return;
+      }
+      if (paymentMethod === 'telegram_wallet') {
+        setWalletOrder({ id: String(order.id), number: order.order_uid });
+        return;
+      }
+
+      onOrderComplete(String(order.id));
     } catch (err) {
       console.error('Order creation error:', err);
-      toast.error('Помилка створення замовлення');
+      const message = err instanceof BackendApiError ? err.message : 'Помилка створення замовлення';
+      toast.error(message);
     } finally {
       setIsSubmitting(false);
     }

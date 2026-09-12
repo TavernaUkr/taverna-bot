@@ -47,6 +47,7 @@ from handlers import (
     supplier_dashboard_handlers, client_handlers
 )
 from api.products import router as products_router  # Import products router
+from api.orders import router as orders_router  # Checkout з Mini App (POST /api/v1/orders/)
 from services.auth_service import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -429,6 +430,7 @@ app.include_router(admin_handlers.router)
 app.include_router(supplier_dashboard_handlers.router)
 app.include_router(client_handlers.router)
 app.include_router(products_router)  # Include products router
+app.include_router(orders_router)  # Checkout з Mini App (POST /api/v1/orders/)
 
 # --- Віддача статичних файлів (Frontend) ---
 static_dir = Path(__file__).parent / "static"

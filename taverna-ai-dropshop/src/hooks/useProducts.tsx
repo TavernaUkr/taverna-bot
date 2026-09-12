@@ -1,11 +1,15 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   fetchBackendProducts,
+  fetchProductById as fetchBackendProductById,
+  searchBackendProducts,
   BackendApiError,
   type BackendProduct,
+  type BackendProductVariant,
+  type BackendProductOption,
 } from '@/lib/backendApi';
 
-interface Product {
+export interface Product {
   id: string;
   external_id?: string;
   group_id?: string;
@@ -39,9 +43,15 @@ interface Product {
     slug: string;
     parent_id?: string | null;
   } | null;
+  // Оригінальні варіанти/опції товару з бекенду (з `id` конкретного
+  // variant_id). Потрібні картці товару (`ProductCard.tsx`) і модалці вибору
+  // варіанту (`VariantSelectionModal.tsx`), щоб знайти ТОЧНИЙ variant_id для
+  // обраної комбінації розмір+колір (так само, як у `ProductDetail.tsx`).
+  variants?: BackendProductVariant[];
+  options?: BackendProductOption[];
 }
 
-interface Category {
+export interface Category {
   id: string;
   external_id?: string;
   name: string;
@@ -64,7 +74,7 @@ interface Category {
  *  - in_stock відсутній        -> true, якщо є хоча б один доступний варіант
  *  - sizes/colors відсутні     -> витягуємо зі values опцій "Розмір"/"Колір"
  */
-function mapBackendProductToUi(bp: BackendProduct): Product {
+export function mapBackendProductToUi(bp: BackendProduct): Product {
   const variants = bp.variants ?? [];
   const availableVariants = variants.filter((v) => v.is_available && v.quantity > 0);
   const primaryVariant = availableVariants[0] ?? variants[0];
@@ -93,11 +103,13 @@ function mapBackendProductToUi(bp: BackendProduct): Product {
     category: categoryTag
       ? { id: categoryTag, name: categoryTag, slug: categoryTag, parent_id: null }
       : null,
+    variants,
+    options,
   };
 }
 
 /** Будує список категорій (з кількістю товарів) на основі товарів бекенду. */
-function buildCategoriesFromProducts(products: Product[]): Category[] {
+export function buildCategoriesFromProducts(products: Product[]): Category[] {
   const counts = new Map<string, number>();
 
   for (const p of products) {
@@ -218,10 +230,8 @@ export function useProducts() {
 
   const getProductById = useCallback(async (id: string): Promise<Product | null> => {
     try {
-      // Наш бекенд поки не має окремого /products/{id} ендпоінту,
-      // тож шукаємо серед повного списку.
-      const backendProducts = await fetchBackendProducts();
-      const found = backendProducts.find((p) => String(p.id) === id);
+      // GET /api/v1/products/{id} — тягне лише один товар, а не весь каталог.
+      const found = await fetchBackendProductById(id);
       return found ? mapBackendProductToUi(found) : null;
     } catch (err) {
       console.error('Get product error:', err);
@@ -232,6 +242,17 @@ export function useProducts() {
   const searchProducts = useCallback(async (query: string) => {
     return fetchProducts({ search: query, limit: 20 });
   }, [fetchProducts]);
+
+  /** Пошук товарів напряму через бекенд (без клієнтських фільтрів fetchProducts). */
+  const searchBackendCatalog = useCallback(async (query: string): Promise<Product[]> => {
+    try {
+      const backendProducts = await searchBackendProducts(query);
+      return backendProducts.map(mapBackendProductToUi);
+    } catch (err) {
+      console.error('Search products error:', err);
+      return [];
+    }
+  }, []);
 
   useEffect(() => {
     fetchProducts();
@@ -247,5 +268,6 @@ export function useProducts() {
     fetchCategories,
     getProductById,
     searchProducts,
+    searchBackendCatalog,
   };
 }

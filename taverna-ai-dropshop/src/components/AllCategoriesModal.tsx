@@ -3,7 +3,8 @@ import { ChevronRight, ArrowLeft, Loader2 } from "lucide-react";
 import { Shield, Shirt, Watch, Footprints, Backpack, Target, Car, Gamepad, Gift, Home, Smartphone, Baby } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { supabase } from "@/integrations/supabase/client";
+import { fetchBackendProducts, BackendApiError } from "@/lib/backendApi";
+import { mapBackendProductToUi } from "@/hooks/useProducts";
 import { getCategoryGradient } from "@/lib/categoryColors";
 import { motion } from "framer-motion";
 
@@ -123,55 +124,48 @@ export const AllCategoriesModal = ({ isOpen, onClose, onSelectCategory }: AllCat
   const [dbCategories, setDbCategories] = useState<Category[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Fetch categories from database
+  // Категорії будуємо з унікальних тегів `category` товарів нашого
+  // FastAPI-бекенду (той самий підхід, що в useProducts.tsx).
+  // Бекенд не має ієрархії категорій, тож підкатегорій тут немає —
+  // тільки плаский список з кількістю товарів.
   useEffect(() => {
     if (!isOpen) return;
-    
+
     const fetchCategories = async () => {
       setIsLoading(true);
       try {
-        const { data, error } = await supabase
-          .from('categories')
-          .select('id, name, slug, parent_id, product_count, is_active')
-          .eq('is_active', true)
-          .order('name');
-        
-        if (error) throw error;
-        
-        if (data && data.length > 0) {
-          // Build hierarchical structure
-          const parentCategories = data.filter(c => !c.parent_id);
-          const childCategories = data.filter(c => c.parent_id);
-          
-          const categoriesWithSubs: Category[] = parentCategories.map(parent => {
-            const subs = childCategories
-              .filter(c => c.parent_id === parent.id)
-              .map(c => ({ id: c.id, name: c.name, count: c.product_count || 0 }));
-            
-            return {
-              id: parent.id,
-              slug: parent.slug,
-              name: parent.name,
-              icon: iconMap[parent.slug] || <Target className="h-5 w-5" />,
-              count: parent.product_count || 0,
-              gradient: getCategoryGradient(parent.slug),
-              subcategories: subs.length > 0 ? subs : undefined,
-            };
-          });
-          
-          setDbCategories(categoriesWithSubs);
-        } else {
-          // Fallback to static categories if no DB data
-          setDbCategories(allCategories);
+        const backendProducts = await fetchBackendProducts();
+        const mapped = backendProducts.map(mapBackendProductToUi);
+
+        const counts = new Map<string, number>();
+        for (const p of mapped) {
+          if (p.category?.name) {
+            counts.set(p.category.name, (counts.get(p.category.name) ?? 0) + 1);
+          }
         }
+
+        const categoriesFromBackend: Category[] = Array.from(counts.entries())
+          .map(([name, count]) => ({
+            id: name,
+            slug: name,
+            name,
+            icon: iconMap[name] || <Target className="h-5 w-5" />,
+            count,
+            gradient: getCategoryGradient(name),
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        // Fallback до статичних категорій, якщо бекенд ще не має товарів/категорій
+        setDbCategories(categoriesFromBackend.length > 0 ? categoriesFromBackend : allCategories);
       } catch (err) {
-        console.error('Error fetching categories:', err);
+        const message = err instanceof BackendApiError ? err.message : String(err);
+        console.error('Error fetching categories from backend:', message);
         setDbCategories(allCategories);
       } finally {
         setIsLoading(false);
       }
     };
-    
+
     fetchCategories();
   }, [isOpen]);
 

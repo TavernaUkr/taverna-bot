@@ -229,6 +229,44 @@ class SupplierRegisterRequest(BaseModel):
     payout_card_token: Optional[str] = None
 
 
+# --- МОДЕЛІ ДЛЯ `api/orders.py` (Checkout з Mini App) ---
+
+class OrderItemCreate(BaseModel):
+    """
+    Один товар у замовленні з чекауту.
+
+    `variant_id` — головний спосіб ідентифікувати конкретний розмір/колір
+    (посилається на `product_variants.id`). Якщо у товару немає варіантів
+    (розмір/колір не потрібні), `variant_id` можна не передавати — тоді
+    зберігаємо позицію просто по `product_id` / `product_name`.
+    """
+    variant_id: Optional[int] = None
+    product_id: Optional[int] = None
+    product_name: str = Field(min_length=1)
+    quantity: int = Field(ge=1)
+    price: int = Field(ge=0)  # ціна за 1 шт., яку бачив клієнт у кошику
+    options_text: Optional[str] = None  # напр. "Розмір: XL, Колір: Чорний"
+
+
+class OrderCreate(BaseModel):
+    """Вхідні дані для POST /api/v1/orders/ (чекаут з Mini App, без JWT/сесії)."""
+    customer_name: str = Field(min_length=1)
+    customer_phone: str = Field(min_length=5)
+    delivery_address: str = Field(min_length=1)
+    delivery_service: Optional[str] = None
+    payment_type: Optional[str] = None
+    note: Optional[str] = None
+    items: List[OrderItemCreate] = Field(min_length=1)
+
+
+class OrderCreateResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    order_uid: str
+    total_price: int
+    status: OrderStatus
+
+
 class SupplierResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

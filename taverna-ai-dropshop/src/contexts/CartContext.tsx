@@ -13,7 +13,9 @@ interface CartContextType {
     price: number,
     image: string,
     size?: string,
-    color?: string
+    color?: string,
+    quantity?: number,
+    variantId?: string
   ) => Promise<boolean>;
   updateQuantity: (cartItemId: string, quantity: number) => Promise<boolean>;
   removeItem: (cartItemId: string) => Promise<boolean>;

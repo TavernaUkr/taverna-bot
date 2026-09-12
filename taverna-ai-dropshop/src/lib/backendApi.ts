@@ -67,19 +67,54 @@ export class BackendApiError extends Error {
   }
 }
 
+// Скільки максимум чекати відповідь бекенду, перш ніж вважати запит "завислим".
+// Без цього таймауту fetch() може висіти невизначено довго (наприклад, якщо
+// порт мовчки "тримає" з'єднання), а UI — вічно показувати skeleton-лоадери.
+const REQUEST_TIMEOUT_MS = 15000;
+
+/**
+ * fetch() з примусовим таймаутом через AbortController.
+ * Гарантує, що виклик ЗАВЖДИ завершиться (успіхом або помилкою) за
+ * прогнозований час, і компонент зможе скинути isLoading -> false.
+ */
+async function fetchWithTimeout(
+  url: string,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+  init?: RequestInit
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+      ...init,
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 /**
  * GET-запит до FastAPI бекенду з людяною обробкою помилок.
- * Розрізняє мережеву помилку/CORS (TypeError від fetch) та HTTP-помилку (4xx/5xx).
+ * Розрізняє мережеву помилку/CORS (TypeError від fetch), таймаут (AbortError)
+ * та HTTP-помилку (4xx/5xx) — і в ЖОДНОМУ з цих випадків не "висне":
+ * завжди або повертає дані, або кидає BackendApiError.
  */
 async function backendGet<T>(url: string): Promise<T> {
   let response: Response;
 
   try {
-    response = await fetch(url, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-    });
+    response = await fetchWithTimeout(url);
   } catch (networkError) {
+    if (networkError instanceof DOMException && networkError.name === "AbortError") {
+      throw new BackendApiError(
+        `Бекенд не відповів за ${REQUEST_TIMEOUT_MS / 1000}с. Перевірте, чи запущений ` +
+          `FastAPI (uvicorn web_app:app) на ${API_BASE_URL}.`
+      );
+    }
     // fetch кидає TypeError при мережевій помилці або блокуванні CORS —
     // в обох випадках response взагалі не приходить.
     throw new BackendApiError(
@@ -101,4 +136,141 @@ async function backendGet<T>(url: string): Promise<T> {
 /** Отримати всі товари з нашого FastAPI-бекенду. */
 export async function fetchBackendProducts(): Promise<BackendProduct[]> {
   return backendGet<BackendProduct[]>(PRODUCTS_ENDPOINT);
+}
+
+/**
+ * Отримати ОДИН товар за ID з бекенду (GET /api/v1/products/{id}).
+ * Використовується сторінкою товару (ProductDetail.tsx), щоб не тягнути
+ * весь каталог лише для показу однієї картки.
+ *
+ * Повертає null, якщо товар не знайдено (404) — виклики мають самі
+ * показати відповідний UI ("Товар не знайдено").
+ */
+export async function fetchProductById(id: string | number): Promise<BackendProduct | null> {
+  const url = `${PRODUCTS_ENDPOINT}${encodeURIComponent(String(id))}`;
+
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(url);
+  } catch (networkError) {
+    if (networkError instanceof DOMException && networkError.name === "AbortError") {
+      throw new BackendApiError(
+        `Бекенд не відповів за ${REQUEST_TIMEOUT_MS / 1000}с. Перевірте, чи запущений ` +
+          `FastAPI (uvicorn web_app:app) на ${API_BASE_URL}.`
+      );
+    }
+    throw new BackendApiError(
+      "Не вдалося з'єднатися з сервером бекенду. Перевірте, чи запущений " +
+        `FastAPI (uvicorn web_app:app) на ${API_BASE_URL}, та чи дозволений CORS для цього джерела.`
+    );
+  }
+
+  if (response.status === 404) {
+    return null;
+  }
+
+  if (!response.ok) {
+    throw new BackendApiError(
+      `Бекенд повернув помилку ${response.status} (${response.statusText})`,
+      response.status
+    );
+  }
+
+  return (await response.json()) as BackendProduct;
+}
+
+/**
+ * Пошук товарів через FastAPI-бекенд.
+ *
+ * Бекенд (GET /api/v1/products/) поки не приймає query-параметри пошуку,
+ * тож фільтруємо на фронтенді по всьому каталогу — так само, як це робить
+ * `useProducts().searchProducts`. Якщо бекенд згодом отримає власний
+ * пошуковий ендпоінт (`?search=`), достатньо буде оновити тільки цю функцію.
+ */
+export async function searchBackendProducts(query: string): Promise<BackendProduct[]> {
+  const all = await fetchBackendProducts();
+  const q = query.trim().toLowerCase();
+  if (!q) return all;
+
+  return all.filter((p) => {
+    const haystack = [p.name, p.description ?? "", p.sku, p.category ?? ""]
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(q);
+  });
+}
+
+// --- Замовлення (Checkout Mini App -> POST /api/v1/orders/) ------------------
+
+// Роут зареєстровано в api/orders.py як APIRouter(prefix="/api/v1/orders")
+// з @router.post("/"), тож фінальний шлях обов'язково має слаш в кінці.
+export const ORDERS_ENDPOINT = `${API_BASE_URL}/api/v1/orders/`;
+
+export interface BackendOrderItemPayload {
+  variant_id?: number | null;
+  product_id?: number | null;
+  product_name: string;
+  quantity: number;
+  price: number;
+  options_text?: string | null;
+}
+
+export interface BackendOrderPayload {
+  customer_name: string;
+  customer_phone: string;
+  delivery_address: string;
+  delivery_service?: string;
+  payment_type?: string;
+  note?: string;
+  items: BackendOrderItemPayload[];
+}
+
+export interface BackendOrderResponse {
+  id: number;
+  order_uid: string;
+  total_price: number;
+  status: string;
+}
+
+/**
+ * Створює замовлення на нашому FastAPI-бекенді (POST /api/v1/orders/).
+ * Використовується в чекауті (`CheckoutModal.tsx`) замість Supabase Edge
+ * Function `telegram-auth` (action: create_order / create_guest_order).
+ */
+export async function createBackendOrder(orderData: BackendOrderPayload): Promise<BackendOrderResponse> {
+  let response: Response;
+
+  try {
+    response = await fetchWithTimeout(ORDERS_ENDPOINT, REQUEST_TIMEOUT_MS, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(orderData),
+    });
+  } catch (networkError) {
+    if (networkError instanceof DOMException && networkError.name === "AbortError") {
+      throw new BackendApiError(
+        `Бекенд не відповів за ${REQUEST_TIMEOUT_MS / 1000}с при створенні замовлення.`
+      );
+    }
+    throw new BackendApiError(
+      "Не вдалося з'єднатися з сервером бекенду для створення замовлення. Перевірте, чи запущений " +
+        `FastAPI (uvicorn web_app:app) на ${API_BASE_URL}.`
+    );
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const errJson = await response.json();
+      if (errJson?.detail) detail = ` (${errJson.detail})`;
+    } catch {
+      // тіло відповіді не JSON — ігноруємо, покажемо базовий статус помилки
+    }
+    throw new BackendApiError(
+      `Не вдалося створити замовлення: помилка ${response.status}${detail}`,
+      response.status
+    );
+  }
+
+  return (await response.json()) as BackendOrderResponse;
 }

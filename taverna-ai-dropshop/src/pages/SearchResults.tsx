@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { 
   ArrowLeft, Search, SlidersHorizontal, X, ChevronDown, ChevronUp, 
@@ -7,7 +7,8 @@ import {
 import { ProductCard } from "@/components/ProductCard";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 import { useCartContext } from "@/contexts/CartContext";
-import { supabase } from "@/integrations/supabase/client";
+import { fetchBackendProducts, BackendApiError, type BackendProductVariant, type BackendProductOption } from "@/lib/backendApi";
+import { mapBackendProductToUi, buildCategoriesFromProducts } from "@/hooks/useProducts";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -31,6 +32,7 @@ import {
 interface Product {
   id: string;
   name: string;
+  description?: string;
   price: number;
   original_price?: number;
   images?: string[];
@@ -43,6 +45,10 @@ interface Product {
   stock_quantity?: number;
   vendor_code?: string;
   ai_tags?: string[];
+  // Потрібно для ProductCard і VariantSelectionModal, щоб знайти ТОЧНИЙ
+  // variant_id для обраної комбінації розмір+колір.
+  variants?: BackendProductVariant[];
+  options?: BackendProductOption[];
 }
 
 interface Category {
@@ -81,6 +87,8 @@ export default function SearchResults() {
   const showAll = searchParams.get("all") === "true";
   
   const [searchInput, setSearchInput] = useState(query);
+  // Повний немодифікований каталог з FastAPI-бекенду (без фільтрів/пошуку).
+  const [allProducts, setAllProducts] = useState<Product[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -97,121 +105,102 @@ export default function SearchResults() {
   const { isFavorite, toggleFavorite } = useFavoritesContext();
   const { addItem } = useCartContext();
 
-  // Fetch categories
+  // Завантажуємо повний каталог з нашого FastAPI-бекенду ОДИН РАЗ.
+  // Пошук/фільтри/категорії застосовуються далі на фронтенді (бекенд ще
+  // не приймає query-параметри пошуку — так само, як у useProducts.tsx).
   useEffect(() => {
-    const fetchCategories = async () => {
-      const { data } = await supabase
-        .from("categories")
-        .select("id, name, slug, product_count")
-        .eq("is_active", true)
-        .order("name");
-      if (data) setCategories(data);
+    const loadCatalog = async () => {
+      setIsLoading(true);
+      try {
+        const backendProducts = await fetchBackendProducts();
+        const mapped = backendProducts
+          .map(mapBackendProductToUi)
+          .filter((p) => p.in_stock);
+
+        setAllProducts(mapped);
+        setCategories(buildCategoriesFromProducts(mapped));
+
+        // Діапазон цін по всьому каталогу (до фільтрів)
+        let minP = Infinity, maxP = 0;
+        mapped.forEach((p) => {
+          if (p.price < minP) minP = p.price;
+          if (p.price > maxP) maxP = p.price;
+        });
+        if (minP !== Infinity && maxP !== 0) {
+          setPriceRange({ min: minP, max: maxP });
+          setFilters((prev) => ({ ...prev, maxPrice: maxP }));
+        }
+      } catch (err) {
+        const message = err instanceof BackendApiError ? err.message : "Помилка завантаження каталогу";
+        console.error("Search catalog load error:", err);
+        toast.error(message);
+      } finally {
+        setIsLoading(false);
+      }
     };
-    fetchCategories();
+    loadCatalog();
   }, []);
 
-  // Fetch products with filters
-  const fetchProducts = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      let queryBuilder = supabase
-        .from("products")
-        .select(`
-          id, name, price, original_price, images, brand, model, 
-          sizes, colors, in_stock, stock_quantity, vendor_code, ai_tags,
-          category:categories(id, name, slug)
-        `)
-        .eq("in_stock", true);
-
-      // Text search (skip if showing all products)
-      if (query && !showAll) {
-        queryBuilder = queryBuilder.or(
-          `name.ilike.%${query}%,description.ilike.%${query}%,brand.ilike.%${query}%,model.ilike.%${query}%,vendor_code.ilike.%${query}%`
-        );
-      }
-
-      // Category filter
-      if (filters.categories.length > 0) {
-        queryBuilder = queryBuilder.in("category_id", filters.categories);
-      }
-
-      // Price filter
-      if (filters.minPrice > 0) {
-        queryBuilder = queryBuilder.gte("price", filters.minPrice);
-      }
-      if (filters.maxPrice < priceRange.max) {
-        queryBuilder = queryBuilder.lte("price", filters.maxPrice);
-      }
-
-      // Brand filter
-      if (filters.brands.length > 0) {
-        queryBuilder = queryBuilder.in("brand", filters.brands);
-      }
-
-      // Model filter
-      if (filters.models.length > 0) {
-        queryBuilder = queryBuilder.in("model", filters.models);
-      }
-
-      const { data, error } = await queryBuilder.order("created_at", { ascending: false });
-
-      if (error) throw error;
-
-      let filteredData = data || [];
-
-      // Client-side filtering for arrays (colors, sizes)
-      if (filters.colors.length > 0) {
-        filteredData = filteredData.filter((p) =>
-          p.colors?.some((c: string) => filters.colors.includes(c))
-        );
-      }
-
-      if (filters.sizes.length > 0) {
-        filteredData = filteredData.filter((p) =>
-          p.sizes?.some((s: string) => filters.sizes.includes(s))
-        );
-      }
-
-      setProducts(filteredData);
-
-      // Extract available options from all products (before filtering)
-      const allColors = new Set<string>();
-      const allSizes = new Set<string>();
-      const allBrands = new Set<string>();
-      const allModels = new Set<string>();
-      let minP = Infinity, maxP = 0;
-
-      (data || []).forEach((p) => {
-        p.colors?.forEach((c: string) => allColors.add(c));
-        p.sizes?.forEach((s: string) => allSizes.add(s));
-        if (p.brand) allBrands.add(p.brand);
-        if (p.model) allModels.add(p.model);
-        if (p.price < minP) minP = p.price;
-        if (p.price > maxP) maxP = p.price;
-      });
-
-      setAvailableColors(Array.from(allColors).sort());
-      setAvailableSizes(Array.from(allSizes).sort());
-      setAvailableBrands(Array.from(allBrands).sort());
-      setAvailableModels(Array.from(allModels).sort());
-      
-      if (minP !== Infinity && maxP !== 0) {
-        setPriceRange({ min: minP, max: maxP });
-        if (filters.maxPrice === defaultFilters.maxPrice) {
-          setFilters(prev => ({ ...prev, maxPrice: maxP }));
-        }
-      }
-    } catch (err) {
-      console.error("Search error:", err);
-      toast.error("Помилка пошуку");
-    } finally {
-      setIsLoading(false);
-    }
-  }, [query, filters, showAll]);
-
+  // Клієнтська фільтрація/пошук по вже завантаженому каталогу
   useEffect(() => {
-    fetchProducts();
-  }, [fetchProducts]);
+    let filtered = allProducts;
+
+    // Текстовий пошук (пропускаємо, якщо показуємо всі товари)
+    if (query && !showAll) {
+      const q = query.toLowerCase();
+      filtered = filtered.filter((p) =>
+        [p.name, p.description, p.brand, p.model, p.vendor_code]
+          .some((field) => field?.toLowerCase().includes(q))
+      );
+    }
+
+    // Категорії
+    if (filters.categories.length > 0) {
+      filtered = filtered.filter((p) => p.category && filters.categories.includes(p.category.id));
+    }
+
+    // Ціна
+    if (filters.minPrice > 0) {
+      filtered = filtered.filter((p) => p.price >= filters.minPrice);
+    }
+    if (filters.maxPrice < priceRange.max) {
+      filtered = filtered.filter((p) => p.price <= filters.maxPrice);
+    }
+
+    // Бренд / модель
+    if (filters.brands.length > 0) {
+      filtered = filtered.filter((p) => p.brand && filters.brands.includes(p.brand));
+    }
+    if (filters.models.length > 0) {
+      filtered = filtered.filter((p) => p.model && filters.models.includes(p.model));
+    }
+
+    // Колір / розмір
+    if (filters.colors.length > 0) {
+      filtered = filtered.filter((p) => p.colors?.some((c) => filters.colors.includes(c)));
+    }
+    if (filters.sizes.length > 0) {
+      filtered = filtered.filter((p) => p.sizes?.some((s) => filters.sizes.includes(s)));
+    }
+
+    setProducts(filtered);
+
+    // Доступні опції фільтрів рахуємо по ВСЬОМУ каталогу (не по вже відфільтрованому)
+    const allColors = new Set<string>();
+    const allSizes = new Set<string>();
+    const allBrands = new Set<string>();
+    const allModels = new Set<string>();
+    allProducts.forEach((p) => {
+      p.colors?.forEach((c) => allColors.add(c));
+      p.sizes?.forEach((s) => allSizes.add(s));
+      if (p.brand) allBrands.add(p.brand);
+      if (p.model) allModels.add(p.model);
+    });
+    setAvailableColors(Array.from(allColors).sort());
+    setAvailableSizes(Array.from(allSizes).sort());
+    setAvailableBrands(Array.from(allBrands).sort());
+    setAvailableModels(Array.from(allModels).sort());
+  }, [allProducts, query, showAll, filters, priceRange.max]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -220,12 +209,16 @@ export default function SearchResults() {
     }
   };
 
-  const handleAddToCart = async (product: Product) => {
+  const handleAddToCart = async (product: Product, size?: string, color?: string, variantId?: string) => {
     const success = await addItem(
       product.id,
       product.name,
       product.price,
-      product.images?.[0]
+      product.images?.[0],
+      size,
+      color,
+      1,
+      variantId
     );
     if (success) toast.success(`${product.name} додано до кошика`);
   };
@@ -591,9 +584,11 @@ export default function SearchResults() {
                 stockQuantity={product.stock_quantity}
                 sizes={product.sizes}
                 colors={product.colors}
+                variants={product.variants}
+                options={product.options}
                 isFavorite={isFavorite(product.id)}
                 onClick={() => navigate(`/product/${product.id}`)}
-                onAddToCart={() => handleAddToCart(product)}
+                onAddToCart={(size, color, variantId) => handleAddToCart(product, size, color, variantId)}
                 onToggleFavorite={() => handleToggleFavorite(product)}
               />
             ))}

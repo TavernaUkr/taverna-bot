@@ -2,10 +2,11 @@ import { ShoppingCart, Heart, Package, Star, TrendingUp, Sparkles } from "lucide
 import { cn } from "@/lib/utils";
 import { LowStockBadge } from "./product/LowStockBadge";
 import { VerifiedBadge } from "./ui/verified-badge";
-import { VariantSelectionModal } from "./product/VariantSelectionModal";
 import { FindSimilarButton } from "./product/FindSimilarButton";
+import { VariantSelectionModal } from "./product/VariantSelectionModal";
 import { useState } from "react";
 import { hapticImpact } from "@/lib/haptics";
+import type { BackendProductVariant, BackendProductOption } from "@/lib/backendApi";
 
 interface ProductCardProps {
   id: string;
@@ -19,6 +20,12 @@ interface ProductCardProps {
   stockQuantity?: number;
   sizes?: string[];
   colors?: string[];
+  // Оригінальні варіанти/опції товару з бекенду (з `id` = variant_id).
+  // Потрібні, щоб зрозуміти, скільки насправді варіантів у товару (>1 =>
+  // треба обрати розмір/колір через модалку) і, якщо варіант один — узяти
+  // саме його `id` для кошика без модалки.
+  variants?: BackendProductVariant[];
+  options?: BackendProductOption[];
   rating?: number;
   reviewCount?: number;
   isFavorite?: boolean;
@@ -28,7 +35,7 @@ interface ProductCardProps {
   supplierVerified?: boolean;
   aiTags?: string[];
   onClick?: () => void;
-  onAddToCart?: (size?: string, color?: string) => void;
+  onAddToCart?: (size?: string, color?: string, variantId?: string) => void;
   onToggleFavorite?: () => void;
 }
 
@@ -76,6 +83,8 @@ export const ProductCard = ({
   stockQuantity,
   sizes,
   colors,
+  variants,
+  options,
   rating,
   reviewCount,
   isFavorite = false,
@@ -89,7 +98,17 @@ export const ProductCard = ({
   onToggleFavorite,
 }: ProductCardProps) => {
   const [isVariantModalOpen, setIsVariantModalOpen] = useState(false);
-  const hasVariants = (sizes && sizes.length > 0) || (colors && colors.length > 0);
+  // Товар "має опції" (розмір/колір), якщо є розміри/кольори АБО просто
+  // більше одного варіанту в БД (навіть без розмірів/кольорів — напр. інші
+  // типи опцій). У такому разі кошик НЕ повинен вгадувати variant_id.
+  const hasOptions = Boolean(
+    (sizes && sizes.length > 0) || (colors && colors.length > 0) || (variants && variants.length > 1)
+  );
+  // Якщо опцій немає — товар має рівно 1 (базовий) варіант. Саме його `id`
+  // підставляємо в кошик при швидкому додаванні через "+" на картці.
+  const singleVariant = !hasOptions
+    ? variants?.find((v) => v.is_available && v.quantity > 0) ?? variants?.[0]
+    : undefined;
   const marketingOldPrice = Math.ceil(price * 1.18 / 50) * 50;
   const discount = Math.round((1 - price / marketingOldPrice) * 100);
   const displaySizes = sizes?.slice(0, 4) || [];
@@ -101,15 +120,19 @@ export const ProductCard = ({
   const handleAddToCart = (e: React.MouseEvent) => {
     e.stopPropagation();
     hapticImpact("medium");
-    if (hasVariants) {
+    if (hasOptions) {
+      // Товар має розміри/кольори — додавати "навмання" без variant_id
+      // небезпечно (замовлення на бекенді його не приймуть). Відкриваємо
+      // модалку вибору варіанту прямо над карткою каталогу.
       setIsVariantModalOpen(true);
       return;
     }
-    onAddToCart?.();
+    // Опцій немає — одразу додаємо єдиний варіант товару з його variant_id.
+    onAddToCart?.(undefined, undefined, singleVariant ? String(singleVariant.id) : undefined);
   };
 
-  const handleVariantAddToCart = (selectedSize?: string, selectedColor?: string) => {
-    onAddToCart?.(selectedSize, selectedColor);
+  const handleVariantAddToCart = (selectedSize?: string, selectedColor?: string, variantId?: string) => {
+    onAddToCart?.(selectedSize, selectedColor, variantId);
   };
 
   const handleToggleFavorite = (e: React.MouseEvent) => {
@@ -206,10 +229,13 @@ export const ProductCard = ({
           </div>
         )}
 
-        {/* Cart button */}
+        {/* Cart button — якщо товар має опції (розмір/колір), відкриває
+            модалку вибору варіанту замість "наосліп" додавання без variant_id */}
         {inStock && (
           <button
             onClick={handleAddToCart}
+            aria-label={hasOptions ? "Обрати розмір/колір" : "Додати в кошик"}
+            title={hasOptions ? "Обрати розмір/колір" : "Додати в кошик"}
             className="absolute bottom-2 right-2 w-9 h-9 rounded-full z-30 bg-primary text-primary-foreground flex items-center justify-center active:scale-90 transition-transform"
           >
             <ShoppingCart className="h-4 w-4" />
@@ -308,6 +334,8 @@ export const ProductCard = ({
         productImage={image}
         sizes={sizes}
         colors={colors}
+        options={options}
+        variants={variants}
         onAddToCart={handleVariantAddToCart}
       />
     </div>

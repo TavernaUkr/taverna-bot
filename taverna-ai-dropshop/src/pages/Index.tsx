@@ -124,7 +124,7 @@ const CatalogTab = ({
 }: { 
   onOpenAllCategories: () => void; 
   onProductClick: (id: string) => void;
-  onAddToCart: (product: any, size?: string, color?: string) => void;
+  onAddToCart: (product: any, size?: string, color?: string, variantId?: string) => void;
   onToggleFavorite: (product: any) => void;
   isFavorite: (id: string) => boolean;
   products: any[];
@@ -202,13 +202,15 @@ const CatalogTab = ({
                 stockQuantity={product.stock_quantity}
                 sizes={product.sizes}
                 colors={product.colors}
+                variants={product.variants}
+                options={product.options}
                 rating={product.rating}
                 reviewCount={product.review_count}
                 isBoosted={product.is_boosted}
                 viewsCount={product.views_count}
                 isFavorite={isFavorite(product.id)}
                 onClick={() => onProductClick(product.id)}
-                onAddToCart={(size?: string, color?: string) => onAddToCart(product, size, color)}
+                onAddToCart={(size?: string, color?: string, variantId?: string) => onAddToCart(product, size, color, variantId)}
                 onToggleFavorite={() => onToggleFavorite(product)}
               />
             ))}
@@ -264,12 +266,21 @@ const Index = () => {
   const { isFavorite, toggleFavorite, totalFavorites } = useFavoritesContext();
   
   // Use products hook for real database products with Trending sort
-  const { products, categories, isLoading, fetchProducts } = useProducts();
+  const { products, categories, isLoading, error, fetchProducts } = useProducts();
   
   // Fetch products sorted by trending on mount
   useEffect(() => {
     fetchProducts({ sortBy: 'trending', limit: 20 });
   }, [fetchProducts]);
+
+  // Якщо бекенд недосяжний/впав — isLoading все одно стає false (хук це
+  // гарантує в finally), але користувач має побачити ЩО сталося, а не
+  // мовчки отримати fallback-товари без пояснення.
+  useEffect(() => {
+    if (error) {
+      toast.error(error);
+    }
+  }, [error]);
 
   useEffect(() => {
     const tabFromUrl = getTabFromSearch(location.search);
@@ -319,14 +330,16 @@ const Index = () => {
     toast.success("Дякуємо за замовлення!");
   };
 
-  const handleAddToCart = async (product: any, size?: string, color?: string) => {
+  const handleAddToCart = async (product: any, size?: string, color?: string, variantId?: string) => {
     const success = await addItem(
       product.id,
       product.name,
       product.price,
       product.images?.[0] || product.image,
       size,
-      color
+      color,
+      1,
+      variantId
     );
     if (success) {
       toast.success(`${product.name} додано до кошика`);

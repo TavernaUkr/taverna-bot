@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { 
   ArrowLeft, ShoppingCart, Heart, Share2, Minus, Plus, Check, 
@@ -8,6 +8,14 @@ import {
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import {
+  fetchProductById,
+  BackendApiError,
+  type BackendProduct,
+  type BackendProductVariant,
+  type BackendProductOption,
+} from "@/lib/backendApi";
+import { formatProductDescription } from "@/lib/formatDescription";
 import { useCartContext } from "@/contexts/CartContext";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 import { Button } from "@/components/ui/button";
@@ -72,6 +80,45 @@ interface Product {
       slug: string;
     };
   };
+  // Оригінальні варіанти/опції з бекенду (потрібні, щоб знайти ТОЧНИЙ
+  // variant_id для обраної комбінації розмір+колір — див. `selectedVariant`).
+  variants?: BackendProductVariant[];
+  options?: BackendProductOption[];
+}
+
+/**
+ * Мапить товар з нашого FastAPI-бекенду (GET /api/v1/products/{id}) у формат,
+ * який очікує UI сторінки товару. Той самий підхід, що в useProducts.tsx
+ * (mapBackendProductToUi), але з локальним типом Product цієї сторінки —
+ * тут `category` без `null` (лише `undefined`), тож тримаємо мапер окремо.
+ */
+function mapBackendProductToDetail(bp: BackendProduct): Product {
+  const variants = bp.variants ?? [];
+  const availableVariants = variants.filter((v) => v.is_available && v.quantity > 0);
+  const primaryVariant = availableVariants[0] ?? variants[0];
+  const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
+
+  const options = bp.options ?? [];
+  const sizeOption = options.find((o) => /розмір|size/i.test(o.name));
+  const colorOption = options.find((o) => /колір|цвет|color/i.test(o.name));
+
+  const categoryTag = bp.category?.trim() || undefined;
+
+  return {
+    id: String(bp.id),
+    name: bp.name,
+    description: bp.description ?? undefined,
+    price: primaryVariant?.final_price ?? 0,
+    images: bp.pictures ?? [],
+    sizes: sizeOption?.values.map((v) => v.value),
+    colors: colorOption?.values.map((v) => v.value),
+    vendor_code: bp.sku,
+    in_stock: availableVariants.length > 0,
+    stock_quantity: totalStock,
+    category: categoryTag ? { id: categoryTag, name: categoryTag, slug: categoryTag } : undefined,
+    variants,
+    options,
+  };
 }
 
 interface Review {
@@ -108,6 +155,58 @@ const ProductDetail = () => {
   const [newReview, setNewReview] = useState({ rating: 5, title: "", content: "" });
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
 
+  /**
+   * Знаходить ТОЧНИЙ варіант товару (з конкретною ціною/залишком) для
+   * обраної комбінації розмір+колір. Без цього кошик не знав би, який
+   * саме `variant_id` додавати — усі розміри/кольори мали б однакову ціну
+   * першого варіанту з каталогу.
+   */
+  const selectedVariant = useMemo<BackendProductVariant | undefined>(() => {
+    if (!product?.variants?.length) return undefined;
+
+    const hasSize = !!product.sizes?.length;
+    const hasColor = !!product.colors?.length;
+
+    // Товар без розмірів/кольорів -> завжди один (перший доступний) варіант.
+    if (!hasSize && !hasColor) {
+      return product.variants.find((v) => v.is_available && v.quantity > 0) ?? product.variants[0];
+    }
+
+    const sizeOption = product.options?.find((o) => /розмір|size/i.test(o.name));
+    const colorOption = product.options?.find((o) => /колір|цвет|color/i.test(o.name));
+
+    const sizeValueId = hasSize ? sizeOption?.values.find((v) => v.value === selectedSize)?.id : undefined;
+    const colorValueId = hasColor ? colorOption?.values.find((v) => v.value === selectedColor)?.id : undefined;
+
+    // Розмір/колір обрано в UI, але ще не змаплено на option_value_id — чекаємо
+    if ((hasSize && selectedSize && sizeValueId === undefined) || (hasColor && selectedColor && colorValueId === undefined)) {
+      return undefined;
+    }
+    if ((hasSize && !selectedSize) || (hasColor && !selectedColor)) return undefined;
+
+    return product.variants.find((v) => {
+      const ids = v.option_value_ids ?? [];
+      if (hasSize && !ids.includes(sizeValueId as number)) return false;
+      if (hasColor && !ids.includes(colorValueId as number)) return false;
+      return true;
+    });
+  }, [product, selectedSize, selectedColor]);
+
+  // Ціна/наявність, що реально відповідають ОБРАНІЙ комбінації розмір+колір
+  // (а не просто першому варіанту товару в каталозі).
+  const effectivePrice = selectedVariant?.final_price ?? product?.price ?? 0;
+  const effectiveStock = selectedVariant?.quantity;
+  const isSelectedVariantAvailable = selectedVariant
+    ? selectedVariant.is_available && selectedVariant.quantity > 0
+    : product?.in_stock ?? false;
+
+  // Якщо переключили варіант і в ньому залишків менше за обрану кількість — коригуємо кількість.
+  useEffect(() => {
+    if (typeof effectiveStock === "number" && effectiveStock > 0 && quantity > effectiveStock) {
+      setQuantity(effectiveStock);
+    }
+  }, [effectiveStock]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (id) {
       fetchProduct();
@@ -117,27 +216,32 @@ const ProductDetail = () => {
 
   const fetchProduct = async () => {
     try {
-      const { data, error } = await supabase
-        .from("products")
-        .select(`
-          *,
-          category:categories(id, name, slug, parent:parent_id(id, name, slug))
-        `)
-        .eq("id", id)
-        .single();
+      if (!id) {
+        toast.error("Товар не знайдено");
+        navigate("/");
+        return;
+      }
 
-      if (error) throw error;
-      
-      const productData = data as unknown as Product;
+      // GET /api/v1/products/{id} — окремий ендпоінт, не тягне весь каталог.
+      const backendProduct = await fetchProductById(id);
+
+      if (!backendProduct) {
+        toast.error("Товар не знайдено");
+        navigate("/");
+        return;
+      }
+
+      const productData = mapBackendProductToDetail(backendProduct);
       setProduct(productData);
-      
+
       // Auto-select first color if available
       if (productData.colors?.length) {
         setSelectedColor(productData.colors[0]);
       }
     } catch (err) {
+      const message = err instanceof BackendApiError ? err.message : "Товар не знайдено";
       console.error("Error fetching product:", err);
-      toast.error("Товар не знайдено");
+      toast.error(message);
       navigate("/");
     } finally {
       setIsLoading(false);
@@ -172,14 +276,29 @@ const ProductDetail = () => {
       toast.error("Оберіть колір");
       return;
     }
+    // Розмір/колір обрано, але саме такої комбінації немає серед варіантів товару
+    if ((product.sizes?.length || product.colors?.length) && !selectedVariant) {
+      toast.error("Цієї комбінації розмір/колір немає в наявності");
+      return;
+    }
+    if (!isSelectedVariantAvailable) {
+      toast.error("Немає в наявності");
+      return;
+    }
+    if (typeof effectiveStock === "number" && quantity > effectiveStock) {
+      toast.error(`В наявності лише ${effectiveStock} шт.`);
+      return;
+    }
 
     addItem(
       product.id,
       product.name,
-      product.price,
+      effectivePrice,
       product.images?.[0] || "/placeholder.svg",
       selectedSize || undefined,
-      selectedColor || undefined
+      selectedColor || undefined,
+      quantity,
+      selectedVariant ? String(selectedVariant.id) : undefined
     );
 
     toast.success(`${product.name} додано до кошика`);
@@ -593,7 +712,7 @@ const ProductDetail = () => {
           <div className="mt-3 space-y-1">
             <div className="flex items-baseline gap-3">
               <span className="text-2xl font-bold text-primary">
-                {product.price.toLocaleString()} ₴
+                {effectivePrice.toLocaleString()} ₴
               </span>
               {product.original_price && (
                 <span className="text-base text-muted-foreground line-through">
@@ -602,20 +721,22 @@ const ProductDetail = () => {
               )}
             </div>
             
-            {/* Stock Quantity Info */}
-            {product.in_stock && product.stock_quantity !== undefined && product.stock_quantity > 0 && (
+            {/* Stock Quantity Info — залишок для ОБРАНОГО варіанту (розмір/колір), якщо він визначений */}
+            {isSelectedVariantAvailable && (
               <div className="flex items-center gap-2 text-sm">
                 <span className="text-success">✓ В наявності</span>
-                <span className="text-muted-foreground">
-                  ({product.stock_quantity > 99 ? "99+" : product.stock_quantity} шт)
-                </span>
+                {typeof effectiveStock === "number" && (
+                  <span className="text-muted-foreground">
+                    ({effectiveStock > 99 ? "99+" : effectiveStock} шт)
+                  </span>
+                )}
                 {/* Low Stock FOMO Badge */}
-                {product.stock_quantity <= 5 && (
-                  <LowStockBadge quantity={product.stock_quantity} />
+                {typeof effectiveStock === "number" && effectiveStock > 0 && effectiveStock <= 5 && (
+                  <LowStockBadge quantity={effectiveStock} />
                 )}
               </div>
             )}
-            {!product.in_stock && (
+            {!isSelectedVariantAvailable && (
               <div className="text-sm text-destructive">✗ Немає в наявності</div>
             )}
           </div>
@@ -674,8 +795,13 @@ const ProductDetail = () => {
             </button>
             <span className="w-12 text-center font-semibold text-lg">{quantity}</span>
             <button
-              onClick={() => setQuantity(quantity + 1)}
-              className="w-10 h-10 rounded-lg bg-muted flex items-center justify-center hover:bg-muted/80 transition-all"
+              onClick={() =>
+                setQuantity((prev) =>
+                  typeof effectiveStock === "number" ? Math.min(prev + 1, Math.max(effectiveStock, 1)) : prev + 1
+                )
+              }
+              disabled={typeof effectiveStock === "number" && quantity >= effectiveStock}
+              className="w-10 h-10 rounded-lg bg-muted flex items-center justify-center hover:bg-muted/80 disabled:opacity-50 transition-all"
             >
               <Plus className="h-4 w-4" />
             </button>
@@ -694,7 +820,7 @@ const ProductDetail = () => {
             <Truck className="h-5 w-5 mx-auto mb-1 text-primary" />
             <p className="text-xs text-muted-foreground">Доставка</p>
             <p className="text-[10px] text-primary font-medium mt-0.5">
-              від {product.price < 500 ? 50 : product.price < 1000 ? 60 : 70} ₴
+              від {effectivePrice < 500 ? 50 : effectivePrice < 1000 ? 60 : 70} ₴
             </p>
           </button>
           <button 
@@ -753,9 +879,11 @@ const ProductDetail = () => {
                 </div>
               )}
               
-              {/* Original Description */}
+              {/* Original Description — <br /> та інші HTML-теги з фіда постачальника
+                  прибираємо (formatProductDescription), переноси рядків лишаємо
+                  завдяки whitespace-pre-line */}
               <p className="text-sm text-muted-foreground whitespace-pre-line leading-relaxed">
-                {product.description || "Опис товару відсутній"}
+                {formatProductDescription(product.description) || "Опис товару відсутній"}
               </p>
             </div>
           </TabsContent>
@@ -921,15 +1049,15 @@ const ProductDetail = () => {
           <div className="flex-1">
             <span className="text-xs text-muted-foreground">Разом:</span>
             <div className="text-xl font-bold text-foreground">
-              {(product.price * quantity).toLocaleString()} ₴
+              {(effectivePrice * quantity).toLocaleString()} ₴
             </div>
           </div>
           <Button
             onClick={handleAddToCart}
             disabled={
-              !product.in_stock || 
-              (product.sizes?.length && !selectedSize) || 
-              (product.colors?.length && !selectedColor)
+              !isSelectedVariantAvailable ||
+              (!!product.sizes?.length && !selectedSize) ||
+              (!!product.colors?.length && !selectedColor)
             }
             className={cn(
               "flex-1 py-6 rounded-xl font-semibold text-base",
@@ -937,10 +1065,10 @@ const ProductDetail = () => {
             )}
           >
             <ShoppingCart className="h-5 w-5" />
-            {!product.in_stock 
-              ? "Немає в наявності" 
-              : (product.sizes?.length && !selectedSize) || (product.colors?.length && !selectedColor)
-                ? "Оберіть варіант"
+            {(product.sizes?.length && !selectedSize) || (product.colors?.length && !selectedColor)
+              ? "Оберіть варіант"
+              : !isSelectedVariantAvailable
+                ? "Немає в наявності"
                 : "Додати до кошика"
             }
           </Button>
