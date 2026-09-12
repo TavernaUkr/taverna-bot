@@ -2,9 +2,6 @@
 import asyncio
 from logging.config import fileConfig
 
-from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy import pool
-
 from alembic import context
 
 # --- НОВІ ІМПОРТИ ---
@@ -15,17 +12,18 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 # ---
 
-# Імпортуємо моделі ТА конфіг
-from models.base import Base # Завдяки sys.path.append
-from config_reader import config # Завдяки sys.path.append
-# ---
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from config_reader import config
+from database.db import _engine_kwargs, normalize_database_url
+from database.models import Base
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config_obj = context.config # Перейменовуємо, щоб не було конфлікту з 'config' з config_reader
 
 # Interpret the config file for Python logging.
-# This line sets up loggers basically.
+# This sets up loggers basically.
 if config_obj.config_file_name is not None:
     fileConfig(config_obj.config_file_name)
 
@@ -39,8 +37,8 @@ db_url_object = config.database_url
 db_url_str = None
 
 if db_url_object:
-    # 2. Одразу перетворюємо на РЯДОК
-    db_url_str = str(db_url_object)
+    # 2. Одразу перетворюємо на РЯДОК і нормалізуємо драйвер (asyncpg / aiosqlite)
+    db_url_str = normalize_database_url(str(db_url_object))
 
 # 3. Перевіряємо РЯДОК
 if not db_url_str or "user:password@host:port/dbname" in db_url_str:
@@ -55,9 +53,7 @@ config_obj.set_main_option('sqlalchemy.url', db_url_str)
 
 
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode.
-    # ... (решта файлу залишається без змін) ...
-    """
+    """Run migrations in 'offline' mode."""
     url = config_obj.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
@@ -71,27 +67,25 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection):
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        render_as_batch=(connection.dialect.name == "sqlite"),
+        compare_type=True,
+    )
 
     with context.begin_transaction():
         context.run_migrations()
 
 
 async def run_migrations_online() -> None:
-    """Run migrations in 'online' mode.
-    # ... (решта файлу залишається без змін) ...
-    """
-    
-    # Використовуємо наш `engine` з `models/base.py`
-    from models.base import engine
-    
-    if engine is None:
-        raise Exception("Engine in models/base.py is None. Check DATABASE_URL.")
-
-    async with engine.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await engine.dispose()
+    """Run migrations in 'online' mode."""
+    connectable = create_async_engine(db_url_str, **_engine_kwargs(db_url_str))
+    try:
+        async with connectable.connect() as connection:
+            await connection.run_sync(do_run_migrations)
+    finally:
+        await connectable.dispose()
 
 
 if context.is_offline_mode():

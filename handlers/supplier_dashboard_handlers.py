@@ -43,7 +43,7 @@ async def get_supplier_stats(
     supplier = (await db.execute(select(Supplier).where(Supplier.user_id == current_user.id))).scalar_one_or_none()
     if not supplier: raise HTTPException(status_code=404, detail="Supplier profile not found for this user.")
     pending_orders_q = await db.execute(select(func.count(Order.id)).where((Order.supplier_id == supplier.id) & (Order.status.in_([OrderStatus.new, OrderStatus.confirmed]))))
-    completed_orders_q = await db.execute(select(func.count(Order.id)).where((Order.supplier_id == supplier.id) & (Order.status == OrderStatus.completed)))
+    completed_orders_q = await db.execute(select(func.count(Order.id)).where((Order.supplier_id == supplier.id) & (Order.status == OrderStatus.delivered)))
     total_products_q = await db.execute(select(func.count(Product.id)).where(Product.supplier_id == supplier.id))
     return SupplierStatsResponse(
         pending_orders=pending_orders_q.scalar(),

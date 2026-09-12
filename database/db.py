@@ -7,46 +7,80 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
+Base = declarative_base()
+engine = None
+AsyncSessionLocal = None
+
+
+def is_postgres_url(url: str) -> bool:
+    u = (url or "").lower()
+    return u.startswith("postgresql") or u.startswith("postgres://")
+
+
+def normalize_database_url(url: str) -> str:
+    """
+    Async SQLAlchemy потребує драйвер у URL:
+    postgresql:// → postgresql+asyncpg://
+    sqlite:// → sqlite+aiosqlite://
+    """
+    raw = (url or "").strip()
+    lower = raw.lower()
+
+    if lower.startswith("postgresql+asyncpg://") or lower.startswith("postgresql+psycopg://"):
+        return raw
+    if lower.startswith("postgresql://"):
+        return "postgresql+asyncpg://" + raw[len("postgresql://"):]
+    if lower.startswith("postgres://"):
+        return "postgresql+asyncpg://" + raw[len("postgres://"):]
+    if lower.startswith("sqlite+aiosqlite://"):
+        return raw
+    if lower.startswith("sqlite://"):
+        return raw.replace("sqlite://", "sqlite+aiosqlite://", 1)
+    return raw
+
+
+def _engine_kwargs(url: str) -> dict:
+    kwargs = {"pool_pre_ping": True}
+    if is_postgres_url(url):
+        return kwargs
+    kwargs["connect_args"] = {"timeout": 60}
+    return kwargs
+
+
 # Перевіряємо, чи є DATABASE_URL
 if not config.database_url:
     logger.error("Критична помилка: DATABASE_URL не знайдено в .env файлі.")
     # (Ми не кидаємо Exception тут, щоб дати `models.py` шанс імпортуватися)
-    engine = None
-    AsyncSessionLocal = None
-    Base = declarative_base() # Створюємо Base, навіть якщо engine = None
 else:
     try:
-        # Створюємо "двигун" (engine)
-        # Ми використовуємо str() для Pydantic v2 Secret/Url типів
-        engine = create_async_engine(
-            str(config.database_url),
-            pool_pre_ping=True,
-            connect_args={"timeout": 60},
-        )
+        db_url = normalize_database_url(str(config.database_url))
+        engine = create_async_engine(db_url, **_engine_kwargs(db_url))
 
-        async def init_db_pragmas() -> None:
-            async with engine.begin() as conn:
-                await conn.execute(text("PRAGMA journal_mode=WAL;"))
-                await conn.execute(text("PRAGMA synchronous=NORMAL;"))
-        
-        # Створюємо "фабрику" сесій
         AsyncSessionLocal = async_sessionmaker(
             bind=engine,
             class_=AsyncSession,
             expire_on_commit=False
         )
-        
-        # Створюємо базовий клас для наших моделей (models.py)
-        Base = declarative_base()
-        
-        logger.info("SQLAlchemy engine та AsyncSessionLocal успішно створено.")
+
+        backend = "PostgreSQL" if is_postgres_url(db_url) else "SQLite"
+        logger.info("SQLAlchemy engine та AsyncSessionLocal успішно створено (%s).", backend)
 
     except Exception as e:
         logger.error(f"Помилка створення SQLAlchemy engine: {e}")
-        # Це критична помилка, бо `models.py` впаде
-        Base = declarative_base() # Створюємо Base, навіть якщо engine = None
         engine = None
         AsyncSessionLocal = None
+
+
+async def init_db_pragmas() -> None:
+    """SQLite-only. Для PostgreSQL нічого не робить."""
+    if engine is None:
+        return
+    if engine.dialect.name != "sqlite":
+        return
+    async with engine.begin() as conn:
+        await conn.execute(text("PRAGMA journal_mode=WAL;"))
+        await conn.execute(text("PRAGMA synchronous=NORMAL;"))
+
 
 async def get_db() -> AsyncSession:
     """
@@ -73,7 +107,6 @@ async def init_db() -> None:
         logger.error("Не можу ініціалізувати БД: engine is None.")
         return
 
-    # застосувати PRAGMA (SQLite)
     await init_db_pragmas()
 
     async with engine.begin() as conn:

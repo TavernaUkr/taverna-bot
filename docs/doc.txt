@@ -1,0 +1,6 @@
+https://docs.aiogram.dev/en/latest/
+https://fastapi.tiangolo.com/
+https://docs.sqlalchemy.org/
+https://docs.telethon.dev/
+https://docs.github.com/en/apps/creating-github-apps/about-creating-github-apps/about-creating-github-apps
+https://github.com/modelcontextprotocol/servers-archived/tree/main/src/postgres

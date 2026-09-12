@@ -26,9 +26,10 @@ class OrderStatus(str, enum.Enum):
     new = "new"
     pending = "pending"
     confirmed = "confirmed"
+    processing = "processing"
     shipped = "shipped"
-    completed = "completed"
-    canceled = "canceled"
+    delivered = "delivered"
+    cancelled = "cancelled"
     returned = "returned"
 
 class PaymentStatus(str, enum.Enum):
@@ -99,6 +100,7 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     orders = relationship("Order", back_populates="user")
+    bonus_history = relationship("BonusHistory", back_populates="user")
 
 class Channel(Base):
     __tablename__ = 'channels'
@@ -162,6 +164,9 @@ class Product(Base):
     name = Column(String(512), nullable=False)
     description = Column(Text, nullable=True)
     category = Column(String(100), index=True)
+    brand = Column(String(255), nullable=True)
+    model = Column(String(255), nullable=True)
+    ai_category = Column(String(255), nullable=True, index=True)
     status = Column(Enum(ProductStatus), default=ProductStatus.active) # 'active', 'inactive'
     pictures = Column(JSON, nullable=True) # Зберігаємо як JSON список URL
     
@@ -233,7 +238,9 @@ class Order(Base):
     user_telegram_id = Column(BigInteger, ForeignKey("users.telegram_id"), index=True)
     status = Column(Enum(OrderStatus), default=OrderStatus.new, index=True)
     payment_status = Column(Enum(PaymentStatus), default=PaymentStatus.pending, index=True)
-    total_price = Column(Integer, nullable=False) 
+    total_price = Column(Integer, nullable=False)
+    subtotal = Column(Float, default=0.0, nullable=False)
+    delivery_cost = Column(Float, default=0.0, nullable=False)
     
     supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True, index=True)
     customer_message_id = Column(Integer, nullable=True)
@@ -243,12 +250,16 @@ class Order(Base):
     delivery_service = Column(String(50))
     delivery_address = Column(Text)
     address_ref = Column(String(100), nullable=True) 
-    city_ref = Column(String(100), nullable=True) 
+    city_ref = Column(String(100), nullable=True)
+    warehouse_ref = Column(String(100), nullable=True)
     ttn = Column(String(50), index=True)
+    tracking_status = Column(String(100), nullable=True, index=True)
+    last_tracking_at = Column(DateTime(timezone=True), nullable=True)
     payment_type = Column(String(50))
     note = Column(Text)
     rating = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     user = relationship("User", back_populates="orders")
     
@@ -314,3 +325,13 @@ class PaidService(Base):
     user = relationship("User")
     product = relationship("Product")
     order = relationship("Order")
+
+class BonusHistory(Base):
+    __tablename__ = "bonus_history"
+    id = Column(Integer, primary_key=True)
+    user_telegram_id = Column(BigInteger, ForeignKey("users.telegram_id"), nullable=False, index=True)
+    amount = Column(Integer, nullable=False)
+    reason = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User", back_populates="bonus_history")

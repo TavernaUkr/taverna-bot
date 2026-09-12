@@ -16,7 +16,7 @@ FEEDBACK_CHAT_ID = config.feedback_chat_id
 async def request_feedback(bot: Bot, order: Order):
     """
     (Фаза 3.7) Надсилає клієнту запит на оцінку (Poll) після
-    завершення замовлення (коли status='completed').
+    завершення замовлення (коли status='delivered').
     """
     # TODO: Ця функція буде викликатися, коли ми отримаємо
     # webhook від Фулфілмент-Хабу НП про те, що замовлення "Доставлено".

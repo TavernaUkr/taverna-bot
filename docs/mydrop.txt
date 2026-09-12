@@ -1,0 +1,1072 @@
+Вітаємо вас в API CRM МійДроп! CRM має дві версії: для постачальників і для дропшиперів. У цій документації описані способи інтеграції для обох версій у відповідних розділах.
+
+Приклади готового коду на PHP | Наш GitHub
+
+Версія для постачальників
+Авторизація
+Для авторизації у всіх запитах до API використовуйте заголовок X-API-KEY. API-ключ можна знайти на цій сторінці у розділі "Інтеграції".
+
+Увага! Сторінка доступна лише після реєстрації.
+
+Також обов’язковим заголовком при запитах є Content-Type: application/json
+
+Створення замовлення
+Запит для додавання нового замовлення в CRM. Приклад коду на PHP для інтеграції простих лендингів і автоматичної передачі замовлень із них доступний на нашому GitHub.
+
+POST https://backend.mydrop.com.ua/vendor/api/orders
+
+Приклад запиту:
+
+{
+    "name": "Іван Петренко",
+    "phone": "+380960000001",
+    "products": [
+        {
+            "product_title": "Кеди Nike",
+            "product_sku": "ld-1245",
+            "manufacturer": "nike",
+            "assembly_price": 450,
+            "price": 780,
+            "amount": 1,
+            "size_title": "XL",
+            "size_note": "30 см"
+        }
+    ],
+    "city": "Київ",
+    "warehouse_number": "1",
+    "order_source": "Лендинг",
+    "traffic_source": "AdWords",
+    "utm_source": "some_utm_source",
+    "utm_medium": "some_utm_medium",
+    "utm_term": "some_utm_term",
+    "utm_content": "some_utm_content",
+    "utm_campaign": "some_utm_campaign"
+}
+Приклад відповіді: такий самий, як при запиті на отримання даних про замовлення за ID (наведено нижче в документації)
+
+HTTP-запит
+POST https://backend.mydrop.com.ua/vendor/api/orders
+
+JSON-поля при POST-запиті
+Поле	Опис	Приклад значення	Обов’язково
+name	ім’я покупця	Іван Петренко	так
+phone	телефон	+380960000001	так
+products	масив із товарами замовлення (структура описана нижче)		так
+dropshipper_id	ID дропшипера (необов’язково для роздрібних замовлень)		ні
+delivery_payment	сума накладеного платежу	1000	ні
+prepay_amount	сума передоплати	200	ні
+delivery_service	служба доставки	nova_poshta, ukr_poshta, meest	ні
+city	місто для відправлення	Київ	ні
+warehouse_number	відділення пошти	1	ні
+delivery_paid	доставка за рахунок відправника	false	ні
+pickup	самовивіз	false	ні
+home_delivery	кур’єрська доставка	false	ні
+street	вулиця текстом	вул. Садова (Дарницький р-н, Осокорки)	так, якщо home_delivery = true
+street_ref	ref вулиці з бази вулиць Нової Пошти	3c5dde87-684a-11e6-8304-00505688561d	так, якщо home_delivery = true і delivery_service = nova_poshta
+house_number	номер будинку	3	так, якщо home_delivery = true
+flat_number	номер квартири	15	так, якщо home_delivery = true
+volumetric_length	довжина коробки посилки (в см)	10	ні
+volumetric_height	висота коробки посилки (в см)	20	ні
+volumetric_width	ширина коробки посилки (в см)	30	ні
+weight	вага коробки посилки (в кг)	30	ні
+delivery_address	адреса доставки текстом (для служб доставки без повної інтеграції)	вул. Миру, буд. 3, кв. 15	так, лише для служб без повної інтеграції
+ttn	номер ТТН (необов’язково, буде згенерований автоматично)	20450535304114	ні
+description	примітка		ні
+order_source	джерело замовлення	Лендинг	ні
+traffic_source	джерело трафіку	AdWords	ні
+payment_status	статус оплати текстом	Не оплачено	ні
+utm_source	utm_source		ні
+utm_medium	utm_medium		ні
+utm_term	utm_term		ні
+utm_content	utm_content		ні
+utm_campaign	utm_campaign		ні
+JSON-поля об'єкта структури products
+Поле	Опис	Приклад значення	Обов’язково
+title	назва нового або існуючого товару	Кеди Nike	так, якщо не вказано sku
+sku	артикул	ld-1245	так, якщо не вказано title
+manufacturer	виробник	nike	ні
+assembly_price	закупівельна ціна товару (собівартість)	450	ні, якщо не вказано — буде автоматично підставлено значення з картки товару
+drop_price	дроп. ціна товару	600	ні, якщо не вказано — буде автоматично підставлено значення з картки товару
+price	ціна продажу товару	780	так
+amount	кількість товару	1	так
+size_title	варіація / розмір товару	XL	ні
+size_note	примітка до розміру	30 см	ні
+Отримання списку замовлень
+Запит для отримання списку замовлень.
+
+GET https://backend.mydrop.com.ua/vendor/api/orders
+
+Приклад відповіді:
+
+{
+    "results": [
+        {
+            "id": 123,
+            "index": 34,
+            "ttn": "20450535304114",
+            "returnTtn": null,
+            "name": "Іван Петренко",
+            "phone": "+380960000001",
+            "products": [
+                {
+                    "product": {
+                        "id": 3210,
+                        "title": "Футболка синя",
+                        "sku": "t-shirt-1"
+                    },
+                    "amount": 1,
+                    "assembly_price": 100,
+                    "drop_price": 300,
+                    "price": 500,
+                    "size": {
+                        "id": 342,
+                        "title": "L",
+                        "note": null
+                    }
+                }
+            ],
+            "dateTime": "2022-05-05T21:21:40.489181",
+            "orderStatus": {
+                "id": 145, 
+                "title": "Новий",
+                "type": "success",
+                "final": false
+            },
+            "prepayAmount": 0,
+            "deliveryPayment": 500,
+            "total": 500,
+            "dropPrice": 300,
+            "dropshipperPayout": 200,
+            "realMargin": 200,
+            "loss": 0,
+            "directDeliveryLoss": 51,
+            "reverseDeliveryLoss": null,
+            "deliveryService": "nova_poshta",
+            "pickup": false,
+            "homeDelivery": false,
+            "street": null,
+            "streetRef": null,
+            "houseNumber": null,
+            "city": "м. Київ, Київська",
+            "cityRef": "e718a680-4b33-11e4-ab6d-005056801329",
+            "warehouseNumber": "1",
+            "warehouseRef": "ec09d88-e1c2-11e3-8c4a-0050568002cf",
+            "description": "Приклад примітки",
+            "createdWith": "api",
+            "vendorDropshipper": {
+                "id": 4343,
+                "dropshipper": {
+                    "id": 1,
+                    "name": "Євген"
+                }
+            },
+            "weight": 0.5,
+            "deliveryStatusCode": "1",
+            "deliveryStatus": "Нова пошта очікує надходження від відправника",
+            "returnDeliveryStatusCode": null,
+            "returnDeliveryStatus": null,
+            "manager": {
+                "id": 45,
+                "name": "Аня"
+            }
+        }
+    ],
+    "meta": {
+        "page": 1,
+        "from": 1,
+        "to": 20,
+        "perPage": 20,
+        "totalCount": 188,
+        "totalPages": 10
+    }
+}
+HTTP-запит
+GET https://backend.mydrop.com.ua/vendor/api/orders
+
+Query-параметри
+Параметр	Опис	Приклад значення	Обов’язково
+page	сторінка	1	так
+per_page	елементів на сторінці (максимум 50)	20	так
+sub_type	підтип замовлення, якщо вказано dropshippers — виводить лише замовлення з дропшиперами, якщо вказати all — виведе всі замовлення, якщо вказати not_dropshippers — виведе всі роздрібні (без дропшиперів)	all	ні
+date_type	тип фільтрації за часом (period, day)	period	ні
+date	день	29/03/2023	так, якщо date_type = day
+date_start	дата початку періоду	19/03/2023	так, якщо date_type = period
+date_end	дата кінця періоду	29/03/2023	так, якщо date_type = period
+Отримання даних замовлення за ID
+Запит для отримання інформації про конкретне замовлення за його ID (внутрішній ID із CRM, можна отримати при запиті списку замовлень).
+
+GET https://backend.mydrop.com.ua/vendor/api/orders/<order_id>
+
+Приклад відповіді:
+
+{
+    "id": 123,
+    "index": 34,
+    "ttn": "20450535304114",
+    "returnTtn": null,
+    "name": "Іван Петренко",
+    "phone": "+380960000001",
+    "products": [
+        {
+            "product": {
+                "id": 3210,
+                "title": "Футболка синя",
+                "sku": "t-shirt-1"
+            },
+            "amount": 1,
+            "assembly_price": 100,
+            "drop_price": 300,
+            "price": 500,
+            "size": {
+                "id": 342,
+                "title": "L",
+                "note": null
+            }
+        }
+    ],
+    "dateTime": "2022-05-05T21:21:40.489181",
+    "orderStatus": {
+        "id": 145, 
+        "title": "Новий",
+        "type": "success",
+        "final": false
+    },
+    "prepayAmount": 0,
+    "deliveryPayment": 500,
+    "total": 500,
+    "dropPrice": 300,
+    "dropshipperPayout": 200,
+    "realMargin": 200,
+    "loss": 0,
+    "directDeliveryLoss": 51,
+    "reverseDeliveryLoss": null,
+    "deliveryService": "nova_poshta",
+    "pickup": false,
+    "homeDelivery": false,
+    "street": null,
+    "streetRef": null,
+    "houseNumber": null,
+    "city": "м. Київ, Київська",
+    "cityRef": "e718a680-4b33-11e4-ab6d-005056801329",
+    "warehouseNumber": "1",
+    "warehouseRef": "ec09d88-e1c2-11e3-8c4a-0050568002cf",
+    "description": "Приклад примітки",
+    "createdWith": "api",
+    "vendorDropshipper": {
+        "id": 4343,
+        "dropshipper": {
+            "id": 1,
+            "name": "Євген"
+        }
+    },
+    "weight": 0.5,
+    "deliveryStatusCode": "1",
+    "deliveryStatus": "Нова пошта очікує надходження від відправника",
+    "returnDeliveryStatusCode": null,
+    "returnDeliveryStatus": null,
+    "manager": {
+        "id": 45,
+        "name": "Аня"
+    }
+}
+HTTP-запит
+GET https://backend.mydrop.com.ua/vendor/api/orders/<order_id>
+
+URL-параметри
+Параметр	Опис	Обов’язково
+order_id	ID замовлення	так
+Зміна даних замовлення
+Запит для зміни номера ТТН і/або статусу замовлення. Якщо потрібно змінити лише один із параметрів — вкажіть тільки його у запиті. Переглянути стандартні та налаштувати власні статуси замовлень можна на цій сторінці після реєстрації в CRM.
+
+PUT https://backend.mydrop.com.ua/vendor/api/orders/<order_id>
+
+Приклад запиту:
+
+{
+    "ttn": "20450535304114",
+    "status": "Продаж",
+    "manualStatus": false
+}
+Приклад відповіді: такий самий, як при запиті на отримання даних про замовлення за ID
+
+HTTP-запит
+PUT https://backend.mydrop.com.ua/vendor/api/orders/<order_id>
+
+URL-параметри
+Параметр	Опис	Обов’язково
+order_id	ID замовлення	так
+JSON-поля при POST-запиті
+Поле	Опис	Приклад значення	Обов’язково
+name	ім’я покупця	Іван Петренко	так
+phone	телефон	+380960000001	так
+products	масив товарів замовлення (структура нижче)		так
+products_mode	режим роботи з товарами: replace або add	replace - замінити існуючі товари на нові, add - доповнити список товарів	так
+delivery_payment	сума накладеного платежу	1000	ні
+prepay_amount	сума передоплати	200	ні
+change_delivery_address	змінювати дані доставки?	true	ні
+delivery_service	служба доставки	nova_poshta, ukr_poshta, rozetka_delivery, meest	ні
+city	місто відправлення	Київ	ні
+warehouse_number	відділення пошти	1	ні
+delivery_paid	доставка за рахунок відправника	false	ні
+pickup	самовивіз	false	ні
+home_delivery	кур’єрська доставка	false	ні
+street	вулиця текстом	вул. Садова (Дарницький р-н, Осокорки)	так, якщо home_delivery = true
+street_ref	ref вулиці з бази Нової Пошти	3c5dde87-684a-11e6-8304-00505688561d	так, якщо home_delivery = true та delivery_service = nova_poshta
+house_number	номер будинку	3	так, якщо home_delivery = true
+flat_number	номер квартири	15	так, якщо home_delivery = true
+volumetric_length	довжина коробки (см)	10	ні
+volumetric_height	висота коробки (см)	20	ні
+volumetric_width	ширина коробки (см)	30	ні
+weight	вага коробки (кг)	30	ні
+delivery_address	адреса доставки текстом (для служб без повної інтеграції)	вул. Миру, буд. 3, кв. 15	так, лише для служб без повної інтеграції
+description	примітка		ні
+ttn	номер ТТН	20450535304114	ні
+status	статус замовлення текстом	Продаж	ні
+payment_status	статус оплати текстом	Не оплачено	ні
+order_source	джерело замовлення	Instagram	ні
+traffic_source	джерело трафіку	Facebook	ні
+manual_status	вказати статус вручну (при значенні true статус замовлення в подальшому не буде змінюватися автоматично на основі зміни статусу ТТН)	false	ні
+Отримання списку дій із замовленнями
+Запит для отримання списку дій із замовленнями.
+
+Параметр serviceAction вказує, чи дія була здійснена автоматично CRM, чи вручну вами або вашим менеджером.
+
+Можливі типи дій actionType:
+
+Значення	Опис
+created	замовлення створено
+edited	замовлення відредаговано
+ttn_generated	ТТН згенеровано
+deleted	замовлення видалено
+status_changed	змінено статус на вказаний у description
+restored	замовлення відновлено
+delivery_payment_received	накладений платіж відзначений як отриманий
+delivery_payment_changed	змінено суму накладеного платежу
+dropshipper_payout_status_changed	змінено статус виплати дропшиперу (див. description)
+У прикладі відповіді сервер повертає дві дії з замовленням: перша — actionType: edited, serviceAction: false — менеджер Аня вручну редагувала замовлення.
+
+Друга — actionType: status_changed, serviceAction: true — CRM автоматично змінила статус на "Продаж" після відстеження ТТН.
+
+GET https://backend.mydrop.com.ua/vendor/api/order_actions
+
+Приклад відповіді:
+
+{
+    "results": [
+        {
+            "actionType": "status_changed",
+            "dateTime": "2023-10-10T16:49:20.477181",
+            "description": "Продаж",
+            "id": 7781714,
+            "serviceAction": true,
+            "vendor": 1558,
+            "vendorId": 1558,
+            "vendorManager": null,
+            "vendorManagerId": null,
+            "vendorOrder": {
+                "id": 1806163,
+                "index": 1,
+                "name": "Мирний Сергій"
+            },
+            "vendorOrderId": 1806163
+        },
+        {
+            "actionType": "edited",
+            "dateTime": "2023-10-10T16:21:58.510118",
+            "description": null,
+            "id": 7781713,
+            "serviceAction": false,
+            "vendor": 1558,
+            "vendorId": 1558,
+            "vendorManager": {
+                "id": 17, 
+                "name": "Аня"
+            },
+            "vendorManagerId": 17,
+            "vendorOrder": {
+                "id": 1806163,
+                "index": 1,
+                "name": "Мирний Сергій"
+            },
+            "vendorOrderId": 1806163
+        }
+    ],
+    "meta": {
+        "page": 1,
+        "from": 1,
+        "to": 20,
+        "perPage": 20,
+        "totalCount": 188,
+        "totalPages": 10
+    }
+}
+HTTP-запит
+GET https://backend.mydrop.com.ua/vendor/api/order_actions
+
+Query-параметри
+Параметр	Опис	Приклад значення	Обов’язково
+page	сторінка	1	так
+per_page	кількість на сторінці (макс. 50)	20	так
+last_id	ID останньої обробленої події	7781713	ні
+Використовуйте параметр last_id, щоб виключити вже оброблені події. У вибірці будуть лише нові дії.
+
+Отримання списку запитів на виплату
+Запит для отримання списку запитів на виплату.
+
+GET https://backend.mydrop.com.ua/vendor/payout_requests
+
+Приклад відповіді:
+
+{
+    "results": [
+        {
+            "dateTime": "2023-05-31T20:18:07.894076",
+            "id": 101283,
+            "loss": 450.0,
+            "margin": 1750.0,
+            "ordersCount": 4,
+            "payout": 1300.0,
+            "payoutAddress": "5644 3455 4323 3234 Кириченко Сергій Павлович",
+            "status": "Не виплачено",
+            "updatedDateTime": null,
+            "vendorDropshipper": {
+                "id": 5,
+                "dropshipperId": 12345,
+                "name": "Тестовий дропшиппер"
+            },
+            "vendorDropshipperId": 5
+        }
+    ],
+    "meta": {
+        "page": 1,
+        "from": 1,
+        "to": 20,
+        "perPage": 20,
+        "totalCount": 188,
+        "totalPages": 10
+    }
+}
+HTTP-запит
+GET https://backend.mydrop.com.ua/vendor/payout_requests
+
+Query-параметри
+Параметр	Опис	Приклад значення	Обов’язково
+page	сторінка	1	так
+per_page	кількість на сторінці (макс. 50)	20	так
+status	статус запиту для фільтрації	Не виплачено	ні
+Отримання списку замовлень у виплаті
+Запит для отримання списку замовлень у виплаті.
+
+GET https://backend.mydrop.com.ua/vendor/payout_requests/<payout_request_id>/orders
+
+URL-параметри
+Параметр	Опис	Обов’язково
+payout_request_id	ID виплати	так
+Приклад відповіді:
+
+{
+    "results": [
+        {
+            "dateTime": "2023-05-31T02:55:30.012593",
+            "deliveryPayment": 1030,
+            "description": null,
+            "dropPrice": 315,
+            "dropshipperLockedAmount": 0,
+            "dropshipperPayout": -159,
+            "dropshipperPayoutStatus": "Не виплачено",
+            "dropshipperRealMargin": 0,
+            "hasDiscount": true,
+            "id": 1775135,
+            "index": 1,
+            "loss": 153,
+            "orderStatus": {
+                "id": 174,
+                "title": "Повернення отримано"
+            },
+            "prepayAmount": 0,
+            "productsFormatted": "Сукня FO-5512 (FO-5512) (S-M)",
+            "surname": "Мирний",
+            "total": 400,
+            "ttn": "20450718777645",
+            "ttnTextStatus": "Відмова одержувача"
+        }
+    ],
+    "meta": {
+        "page": 1,
+        "from": 1,
+        "to": 20,
+        "perPage": 20,
+        "totalCount": 188,
+        "totalPages": 10
+    }
+}
+HTTP-запит
+GET https://backend.mydrop.com.ua/vendor/payout_requests/<payout_request_id>/orders
+
+Query-параметри
+Параметр	Опис	Приклад значення	Обов’язково
+page	сторінка	1	так
+per_page	кількість на сторінці (макс. 50)	20	так
+Зміна статусу виплати
+POST https://backend.mydrop.com.ua/vendor/payout_requests/<payout_request_id>/status
+
+URL-параметри
+Параметр	Опис	Обов’язково
+payout_request_id	ID виплати	так
+Приклад запиту:
+
+{
+    "status": "Виплачено"
+}
+HTTP-запит
+POST https://backend.mydrop.com.ua/vendor/payout_requests/<payout_request_id>/status
+
+JSON-поля при POST-запиті
+Поле	Опис	Приклад значення	Обов’язково
+status	новий статус виплати	Виплачено	так
+Отримання списку товарів і категорій
+Попередньо сформуйте вивантаження YML/XML, щоб ця вивантаження товарів і категорій стала доступною у форматі JSON. Альтернативно для вас завжди доступні вивантаження в інших форматах.
+
+GET https://backend.mydrop.com.ua/vendor/api/export/products/json
+
+HTTP-запит
+GET https://backend.mydrop.com.ua/vendor/api/export/products/json
+
+Оновлення залишків і цін товарів
+У запиті можна вказати лише ті поля й розміри, які ви хочете змінити. Не обов’язково вказувати всі типи цін, якщо ви хочете змінити лише дроп. ціну. Або вкажіть тільки розмір L у масиві sizes, якщо потрібно змінити наявність тільки для цього розміру. Для пошуку товару в базі використовуйте title, sku або import_id — на вибір, але обов’язково щось одне. Послідовність перевірки: import_id -> sku -> title.
+
+У прикладі нижче для товару з артикулом t-shirt-1 ми змінюємо всі три типи цін і залишки для розмірів L і XL. Для товару з артикулом t-shirt-2 ми змінюємо тільки наявність для розміру S.
+
+Увага! Основою JSON-запиту є масив, а не словник, що дозволяє оновити кілька товарів (до 300) за один запит. Якщо потрібно оновити лише один товар — вкажіть один елемент у масиві.
+POST https://backend.mydrop.com.ua/vendor/api/products
+
+Приклад запиту:
+
+[
+    {
+        "sku": "t-shirt-1",
+        "assembly_price": 100,
+        "drop_price": 200,
+        "price": 300,
+        "sizes": [
+            {
+                "title": "L",
+                "amount": 10
+            },
+            {
+                "title": "XL",
+                "amount": 20
+            }
+        ]
+    },
+    {
+        "sku": "t-shirt-2",
+        "sizes": [
+            {
+                "title": "S",
+                "amount": 5
+            }
+        ]
+    }
+]
+Приклад відповіді:
+
+{
+    "productsUpdatedCount": 2, 
+    "sizesUpdatedCount": 3, 
+    "status": "ok"
+}
+HTTP-запит
+POST https://backend.mydrop.com.ua/vendor/api/products
+
+JSON-поля при POST-запиті
+Поле	Опис	Приклад значення	Обов’язково
+title	назва товару	Футболка біла	title, sku, import_id на вибір
+sku	артикул	t-shirt-1	title, sku, import_id на вибір
+import_id	ID імпорту з вигрузки	3214325	title, sku, import_id на вибір
+assembly_price	собівартість	100	ні
+opt_price	оптова ціна	150	ні
+drop_price	дроп. ціна	200	ні
+price	РРЦ / ціна продажу	300	ні
+sizes	масив розмірів (структура описана нижче)		ні
+JSON-поля об’єкта структури sizes
+Поле	Опис	Приклад значення	Обов’язково
+title	назва варіації (розміру)	L	title або sku
+sku	артикул варіації (розміру)	t-shirt-1-L	title або sku
+amount	новий залишок (кількість товару)	10	так
+Завантаження фотографій
+Для товарів можна дозавантажити фотографії. Для цього використовуйте Content-Type: multipart/form-data. Поле для передачі binary-даних зображення називається file, ім’я файлу разом із розширенням передається в полі filename. Можна передати значення import_id через query-параметри. Таким чином якщо зображення вже є в системі, воно буде замінене на нове, але збереже старе filename. Якщо фото з таким import_id ще не існує, воно буде завантажене і отримає нове значення filename.
+
+POST https://backend.mydrop.com.ua/vendor/api/products/upload
+
+POST https://backend.mydrop.com.ua/vendor/api/products/upload?import_id=1234
+
+Приклад запиту:
+
+------WebKitFormBoundarypgPLKMBApAKPyevw
+Content-Disposition: form-data; name="file"; filename="2023-01-28_14-51.png"
+Content-Type: image/png
+
+------WebKitFormBoundarypgPLKMBApAKPyevw--
+Приклад відповіді:
+
+{
+    "filename": "b8583c9d20a27e3c35ec.jpg"
+}
+Query-параметри
+Параметр	Опис	Приклад значення	Обов’язково
+import_id	зовнішній ID для оновлення фотографій	1234	ні
+Завантаження фотографій за URL
+Якщо у вас не вийшло завантажити фотографії попереднім способом, то ви можете завантажити його, наприклад, на файлообмінник, отримати публічне посилання на зображення і завантажити фото в CRM.
+
+POST https://backend.mydrop.com.ua/vendor/api/products/upload/by_url
+
+Приклад запиту:
+
+{
+    "url": "https://somesite.com/image.jpg",
+    "extension": "jpg",
+    "import_id": "1234"
+}
+Приклад відповіді:
+
+{
+    "filename": "b8583c9d20a27e3c35ec.jpg"
+}
+HTTP-запит
+POST https://backend.mydrop.com.ua/vendor/api/products/upload/by_url
+
+JSON-поля при POST-запиті
+Поле	Опис	Приклад значення	Обов’язково
+url	посилання на зображення	https://somesite.com/image.jpg	так
+extension	розширення файлу	jpg	так, якщо в URL немає розширення
+import_id	зовнішній ID для оновлення фотографій	1234	ні
+Додавання і зміна категорій
+За допомогою цього методу можна додати категорії та підкатегорії для товарів у CRM МійДроп. Будь-яка категорія може мати будь-який ступінь вкладеності. Тобто підкатегорія може містити в собі ще список підкатегорій і т.д.
+
+При створенні категорії ви можете використовувати поле import_id, щоб призначити їй зовнішній ID з вашої системи. Спочатку завантажуйте категорії кореневого каталогу (у яких немає батьків), потім по черзі підкатегорії, які знаходяться всередині них.
+
+Використовуйте поле parent_id, якщо створюєте підкатегорії і хочете вказати ID батька, отриманий з поля id при створенні батьківської категорії раніше. Використовуйте поле parent_import_id, щоб вказати зовнішній ID батьківської категорії при створенні підкатегорії (по суті повинен дорівнювати значенню import_id при створенні батьківської категорії).
+
+Якщо товар із зазначеним id або import_id вже доданий до системи, запит оновить інформацію про дану категорію. Якщо в запиті не буде вказано parent_id або parent_import_id, то категорія не матиме батьківської, а отже стане кореневою категорією.
+
+POST https://backend.mydrop.com.ua/vendor/api/categories
+
+Приклад запиту:
+
+{
+    "title": "Футболки",
+    "import_id": "1234",
+    "parent_import_id": "4321",
+    "filename": "b8583c9d20a27e3c35ec.jpg"
+}
+Приклад відповіді:
+
+{
+    "id": 3256,
+    "title": "Футболки",
+    "import_id": "1234",
+    "parent_id": 8345,
+    "image": {"id": 123, "filename": "b8583c9d20a27e3c35ec.jpg"}
+}
+HTTP-запит
+POST https://backend.mydrop.com.ua/vendor/api/categories
+
+JSON-поля при POST-запиті
+Поле	Опис	Приклад значення	Обов’язково
+title	назва	Футболки	так
+id	ID категорії	4547	якщо хочете оновити категорію за ним
+import_id	зовнішній ID категорії	1234	якщо хочете призначити зовнішній ID або оновити категорію за ним
+parent_id	ID батьківської категорії	7345	parent_id або parent_import_id, якщо створюєте підкатегорію
+parent_import_id	зовнішній ID батька	4321	parent_id або parent_import_id, якщо створюєте підкатегорію
+filename	зображення для обкладинки	b8583c9d20a27e3c35ec.jpg	ні
+Редагування і створення товарів
+Цей запит підходить для того, щоб створювати та оновлювати товари через один запит, що дозволяє оновлювати базу товарів в CRM без необхідності додатково перевіряти, чи створений раніше вже цей товар.
+
+У запиті можна вказати ті варіації (розміри) і фото, які ви хочете додати до вже існуючих в товарі. Можна вказувати вже раніше додані варіації (розміри), вони не будуть повторно додані, але їх наявність буде оновлена на вказане в запиті.
+
+Дублікати фотографії також не будуть завантажуватися, якщо ім'я файлу збігається з тим, який вже завантажений. При цьому не обов'язково вказувати в списку фотографії, які були раніше додані. Досить вказати ті, якими необхідно доповнити картку товару.
+
+Для пошуку товару в базі використовуйте title, sku або import_id на вибір, але обов'язково один з них, інакше товар не буде знайдений і не оновиться. Послідовність перевірки import_id -> sku -> title.
+
+Для вказівки категорії для товару використовуйте category_id або category_import_id. Якщо не вказати жодне з полів, то категорія не буде змінена. category_id - це id категорії, отриманий при запиті /vendor/api/categories. category_import_id - це зовнішній ID категорії, такий же, як передаєте (якщо передаєте) при запиті /vendor/api/categories, поле import_id.
+
+Не обов'язково вказувати всі поля: images, description і sizes, якщо хочете доповнити щось одне з них. Якщо товар раніше не був доданий, використовуйте поля title, sku, assembly_price, drop_price, price, щоб заповнити картку товару даними.
+
+У прикладі нижче для товару з артикулом t-shirt-1 ми додаємо розміри L і XL, дві нові фотографії і змінюємо опис. Для товару з артикулом t-shirt-2 ми додаємо тільки 1 нову фотографію.
+
+Увага! Основою JSON-запиту є масив, а не словник, що дозволяє оновити кілька товарів (до 300) за один запит. Якщо потрібно оновити лише один товар — вкажіть один елемент у масиві.
+POST https://backend.mydrop.com.ua/vendor/api/products/create_or_update
+
+Приклад запиту:
+
+[
+    {
+        "title": "Футболка чорна",
+        "sku": "t-shirt-1",
+        "description": "Нове опис",
+        "sizes": [
+            {
+              "title": "L", 
+              "amount": 10
+            },
+            {
+              "title": "XL", 
+              "amount": 20
+            }
+        ],
+        "images": ["b8583c9d20a27e3c35ec.jpg", "2180be21d806a7f8a182.jpg"]
+    },
+    {
+        "sku": "t-shirt-2",
+        "images": ["a947323bf72815445857.jpg"]
+    }
+]
+Приклад відповіді:
+
+{
+    "productsUpdatedCount": 2,
+    "status": "ok"
+}
+HTTP-запит
+POST https://backend.mydrop.com.ua/vendor/api/products/create_or_update
+
+JSON-поля при POST-запиті
+Поле	Опис	Приклад значення	Обов’язково
+title	назва	Футболка біла	title, sku, import_id на вибір, обов’язково якщо новий товар
+sku	артикул	t-shirt-1	title, sku, import_id на вибір
+import_id	ID імпорту з вигрузки	3214325	title, sku, import_id на вибір
+category_id	ID категорії	44345	category_id або category_import_id
+category_import_id	ID імпорту категорії	543343	category_id або category_import_id
+description	опис товару		ні
+sizes	масив з новими розмірами товару (структура описана нижче)		ні
+images	масив із заголовками зображень, отриманих під час завантаження		ні
+JSON-поля об’єкта структури sizes
+Поле	Опис	Приклад значення	Обов’язково
+title	назва нової варіації (розміру)	L	так
+sku	артикул нової варіації (розміру)	t-shirt-1-L	ні
+amount	початкова наявність (кількість товару)	10	так
+Отримання списку дропшипперів
+Запит для отримання списку дропшипперів та пошуку по них.
+
+GET https://backend.mydrop.com.ua/vendor/vendor_dropshippers
+
+Приклад відповіді:
+
+{
+    "meta": {
+        "currentPage": 1,
+        "from": 1,
+        "to": 1,
+        "totalCount": 1,
+        "totalPages": 1
+    },
+    "results": [
+        {
+            "dateTime": "2023-08-18T12:34:14.277747",
+            "dropshipper": {
+                "id": 1,
+                "name": "Тестовий дропшиппер",
+                "real": true
+            },
+            "dropshipperId": 1,
+            "group": {"id": 1, "title": "Топові"},
+            "id": 5,
+            "link": "t.me/someone",
+            "name": "Тестовий",
+            "phone": "+380960000001"
+        }
+    ]
+}
+HTTP-запит
+GET https://backend.mydrop.com.ua/vendor/vendor_dropshippers
+
+Query-параметри
+Параметр	Опис	Приклад значення	Обов’язково
+page	сторінка	1	ні
+per_page	кількість на сторінці (макс. 50)	20	ні
+search_query	пошуковий запит (ID, ім’я, посилання, телефон, адреса для виплат, примітка)		ні
+only_not_verified	показати тільки не верифікованих	false	ні
+Створення нового дропшиппера
+Запит для додавання нового дропшиппера в CRM (без особистого кабінету).
+
+POST https://backend.mydrop.com.ua/vendor/vendor_dropshippers
+
+Приклад запиту:
+
+{
+    "name": "Тестовий Дропшиппер",
+    "phone": "0981234567",
+    "link": "https://t.me/test",
+    "note": "Приклад примітки",
+    "payoutAddress": "1234 4321 1234 4321",
+    "shopLink": "https://instagram.com/test"
+}
+Приклад відповіді: такий самий, як при отриманні списку дропшипперів
+
+HTTP-запит
+POST https://backend.mydrop.com.ua/vendor/vendor_dropshippers
+
+JSON-поля при POST-запиті
+Поле	Опис	Приклад значення	Обов’язково
+name	ім’я дропшиппера	Тестовий Дропшиппер	так
+phone	телефон	0981234567	ні
+link	контакт у соцмережах	https://t.me/test	ні
+note	примітка		ні
+payoutAddress	адреса для виплат	1234 4321 1234 4321	ні
+shopLink	посилання на магазин	https://instagram.com/test	ні
+Версія для дропшипперів
+Отримання списку замовлень
+GET https://backend.mydrop.com.ua/dropshipper/api/orders
+
+Приклад відповіді:
+
+{
+    "results": [
+        {
+            "id": 123,
+            "index": 34,
+            "ttn": "20450535304114",
+            "name": "Іван Петренко",
+            "phone": "+380960000001",
+            "products": [
+                {
+                    "product": {
+                        "id": 3210,
+                        "title": "Футболка синя",
+                        "sku": "t-shirt-1",
+                        "import_id": "4321123"
+                    },
+                    "amount": 1,
+                    "drop_price": 300,
+                    "price": 500,
+                    "size": {
+                        "id": 342,
+                        "title": "L",
+                        "note": null
+                    }
+                }
+            ],
+            "dateTime": "2022-05-05T21:21:40.489181",
+            "orderStatus": {
+                "id": 145, 
+                "title": "Новий",
+                "type": "success",
+                "final": false
+            },
+            "prepayAmount": 0,
+            "deliveryPayment": 500,
+            "total": 500,
+            "dropPrice": 300,
+            "payout": 200,
+            "realMargin": 200,
+            "loss": 0,
+            "directDeliveryLoss": 51,
+            "reverseDeliveryLoss": null,
+            "deliveryService": "nova_poshta",
+            "pickup": false,
+            "homeDelivery": false,
+            "street": null,
+            "streetRef": null,
+            "houseNumber": null,
+            "city": "м. Київ, Київська",
+            "cityRef": "e718a680-4b33-11e4-ab6d-005056801329",
+            "warehouseNumber": "1",
+            "warehouseRef": "ec09d88-e1c2-11e3-8c4a-0050568002cf",
+            "description": "Приклад примітки",
+            "dropshipperVendor": {
+                "id": 4343,
+                "vendor": {
+                    "id": 1,
+                    "name": "Приклад постачальника"
+                }
+            },
+            "deliveryStatusCode": "1",
+            "deliveryStatus": "Нова пошта очікує надходження від відправника"
+        }
+    ],
+    "meta": {
+        "page": 1,
+        "from": 1,
+        "to": 20,
+        "perPage": 20,
+        "totalCount": 188,
+        "totalPages": 10
+    }
+}
+HTTP-запит
+GET https://backend.mydrop.com.ua/dropshipper/api/orders
+
+Query-параметри
+Параметр	Опис	Обов’язково
+page	сторінка	так
+per_page	кількість на сторінці (макс. 50)	так
+Створення замовлення
+Запит для створення нового замовлення в CRM. Приклад коду на PHP для інтеграції простих лендінгів і автоматичної передачі замовлень з них доступний на нашому GitHub.
+
+POST https://backend.mydrop.com.ua/dropshipper/api/orders
+
+Приклад відповіді:
+
+{
+    "id": 123,
+    "index": 34,
+    "ttn": "20450535304114",
+    "name": "Іван Петренко",
+    "phone": "+380960000001",
+    "products": [
+        {
+            "product": {
+                "id": 3210,
+                "title": "Футболка синя",
+                "sku": "t-shirt-1",
+                "import_id": "4321123"
+            },
+            "amount": 1,
+            "drop_price": 300,
+            "price": 500,
+            "size": {
+                "id": 342,
+                "title": "L",
+                "note": null
+            }
+        }
+    ],
+    "dateTime": "2022-05-05T21:21:40.489181",
+    "orderStatus": {
+        "id": 145,
+        "title": "Новий",
+        "type": "success",
+        "final": false
+    },
+    "prepayAmount": 0,
+    "deliveryPayment": 500,
+    "total": 500,
+    "dropPrice": 300,
+    "payout": 200,
+    "realMargin": 200,
+    "loss": 0,
+    "directDeliveryLoss": 51,
+    "reverseDeliveryLoss": null,
+    "deliveryService": "nova_poshta",
+    "pickup": false,
+    "homeDelivery": false,
+    "street": null,
+    "streetRef": null,
+    "houseNumber": null,
+    "city": "м. Київ, Київська",
+    "cityRef": "e718a680-4b33-11e4-ab6d-005056801329",
+    "warehouseNumber": "1",
+    "warehouseRef": "ec09d88-e1c2-11e3-8c4a-0050568002cf",
+    "description": "Приклад примітки",
+    "dropshipperVendor": {
+        "id": 4343,
+        "vendor": {
+            "id": 1,
+            "name": "Приклад постачальника"
+        }
+    },
+    "deliveryStatusCode": "1",
+    "deliveryStatus": "Нова пошта очікує надходження від відправника"
+}
+HTTP-запит
+POST https://backend.mydrop.com.ua/dropshipper/api/orders
+
+JSON-поля при POST-запиті
+Поле	Опис	Приклад значення	Обов’язково
+name	ім’я покупця	Іван Петренко	так
+phone	телефон	+380960000001	так
+products	масив товарів замовлення (структура нижче)		так
+delivery_service	служба доставки	nova_poshta або ukr_poshta	ні
+city	місто відправлення	Київ	ні
+warehouse_number	відділення пошти	1	ні
+description	примітка		ні
+ttn	номер ТТН (необов’язково, генерується автоматично)	20450535304114	ні
+order_source	джерело замовлення	Лендинг	ні
+traffic_source	джерело трафіку	AdWords	ні
+utm_source	utm_source		ні
+utm_medium	utm_medium		ні
+utm_term	utm_term		ні
+utm_content	utm_content		ні
+utm_campaign	utm_campaign		ні
+JSON-поля об'єкта products
+Поле	Опис	Приклад значення	Обов’язково
+vendor_name	назва постачальника	SomeDrop	так
+product_title	назва товару	Кеди Nike	так
+sku	артикул	ld-1245	ні
+drop_price	дроп. ціна	450	ні
+price	ціна продажу	780	так
+amount	кількість товару	1	так
+size_title	варіація / розмір товару	XL	ні
+size_note	примітка до розміру	30 см	ні
+Отримання інформації про замовлення
+Запит для отримання інформації про конкретне замовлення за його ID
+
+POST https://backend.mydrop.com.ua/dropshipper/api/orders/<order_id>
+
+URL-параметри
+Параметр	Опис	Обов’язково
+order_id	ID замовлення	так
+Приклад відповіді:
+
+{
+    "id": 123,
+    "index": 34,
+    "ttn": "20450535304114",
+    "name": "Іван Петренко",
+    "phone": "+380960000001",
+    "products": [
+        {
+            "product": {
+                "id": 3210,
+                "title": "Футболка синя",
+                "sku": "t-shirt-1",
+                "import_id": "4321123"
+            },
+            "amount": 1,
+            "drop_price": 300,
+            "price": 500,
+            "size": {
+                "id": 342,
+                "title": "L",
+                "note": null
+            }
+        }
+    ],
+    "dateTime": "2022-05-05T21:21:40.489181",
+    "orderStatus": {
+        "id": 145,
+        "title": "Новий",
+        "type": "success",
+        "final": false
+    },
+    "prepayAmount": 0,
+    "deliveryPayment": 500,
+    "total": 500,
+    "dropPrice": 300,
+    "payout": 200,
+    "realMargin": 200,
+    "loss": 0,
+    "directDeliveryLoss": 51,
+    "reverseDeliveryLoss": null,
+    "deliveryService": "nova_poshta",
+    "pickup": false,
+    "homeDelivery": false,
+    "street": null,
+    "streetRef": null,
+    "houseNumber": null,
+    "city": "м. Київ, Київська",
+    "cityRef": "e718a680-4b33-11e4-ab6d-005056801329",
+    "warehouseNumber": "1",
+    "warehouseRef": "ec09d88-e1c2-11e3-8c4a-0050568002cf",
+    "description": "Приклад примітки",
+    "dropshipperVendor": {
+        "id": 4343,
+        "vendor": {
+            "id": 1,
+            "name": "Приклад постачальника"
+        }
+    },
+    "deliveryStatusCode": "1",
+    "deliveryStatus": "Нова пошта очікує надходження від відправника"
+}

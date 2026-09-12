@@ -34,7 +34,7 @@ from api_models import (
 )
 
 from services import (
-    xml_parser, cart_service, order_service, 
+    xml_parser, cart_service, order_service,
     payment_service, delivery_service,
     payout_service, publisher_service,
     omnichannel_service as ads_service # <-- ОНОВЛЕНО
@@ -43,9 +43,10 @@ from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession
 from database.models import * # (Імпортуємо все)
 from config_reader import config
 from handlers import (
-    auth_handlers, supplier_handlers, admin_handlers, 
+    auth_handlers, supplier_handlers, admin_handlers,
     supplier_dashboard_handlers, client_handlers
 )
+from api.products import router as products_router  # Import products router
 from services.auth_service import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -55,7 +56,11 @@ app = FastAPI(title="TavernaBot API", version="1.0.0")
 # ... (код CORS, startup, shutdown, get_bot_instance) ...
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "*",
+        "http://localhost:8080",   # React dev-сервер (Vite, дефолтний порт таверна-каталогу)
+        "http://localhost:5173",   # React dev-сервер (Vite, альтернативний порт)
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
@@ -416,13 +421,14 @@ async def api_create_cod_order(
         raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
 
 # --- Підключення роутерів (Реєстрація) ---
-app.include_router(payment_router) 
-app.include_router(delivery_router) 
+app.include_router(payment_router)
+app.include_router(delivery_router)
 app.include_router(auth_handlers.router)
 app.include_router(supplier_handlers.router)
 app.include_router(admin_handlers.router)
 app.include_router(supplier_dashboard_handlers.router)
 app.include_router(client_handlers.router)
+app.include_router(products_router)  # Include products router
 
 # --- Віддача статичних файлів (Frontend) ---
 static_dir = Path(__file__).parent / "static"

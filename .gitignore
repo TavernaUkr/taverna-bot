@@ -2,9 +2,23 @@
 *.session
 *.session-journal
 __pycache__/
-*.pyc
 *.pyo
 *.pyd
 *~
 *.swp
 /data/ # Папка для кошиків та лічильника
+
+# Python envs
+.venv/
+venv/
+ENV/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+
+# IDE
+.vscode/
+.cursor/

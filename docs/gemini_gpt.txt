@@ -1,0 +1,281 @@
+
+Ви сказали
+AIGemini — тільки інтеграція servicesgemini_service.py, батч-пайплайн обробки описівкатегорій. Це чат від нашого проєкту. Все розписано в чаті Info.
+Програма ChatGPT сказала
+
+Обробка тривала 2m 1s
+Зрозумів домен цього чату AIGemini — тільки servicesgemini_service.py + батч-пайплайн для обробки описівкатегорій.
+
+Нижче даю конкретні правки по коду з вашого TavernaBot_V2.zip (я відкрив його локально). Мета
+
+зробити надійний JSON-парсинг відповідей Gemini (часто повертає fenced ```json),
+
+додати батч-пайплайн (конкурентність + ретраї + ліміти),
+
+додати окрему категоризацію (а не через “витяг атрибутів з combined_text”),
+
+мінімально підключити це в місці, де реально потрібно (категоризація постачальника).
+
+Decision + Impact (для чату “Info”)
+Decision у servicesgemini_service.py додаємо
+
+classify_main_category_with_ai(texts list[str]) - Optional[str]
+
+batch_extract_product_attributes_with_ai(items list[dict]) - list[Optional[dict]]
+
+“safe JSON loader” для відповідей Gemini (strip code fences  зайвий текст)
+
+Impact
+
+Категоризація джерела постачальника стане стабільнішою (без помилкових attributes[Категорія] з “комбайну” текстів).
+
+Масова обробка описів (каталогпости) стане контрольованою (конкурентністьретраїобмеження довжини).
+
+Менше падінь через json.loads(response.text).
+
+1) Правка servicesgemini_service.py
+1.1. Що є зараз (старий код — фрагменти)
+Файл servicesgemini_service.py
+Проблема json.loads(response.text) падає, якщо Gemini повертає json … або зайвий текст.
+
+# ... всередині extract_product_attributes_with_ai
+response = await model.generate_content_async(raw_text)
+
+# Витягуємо чистий JSON
+json_data = json.loads(response.text)
+logger.info(f✅ Gemini успішно витягнув атрибути {json_data})
+return json_data
+1.2. Замінитидодати (новий код)
+A) Додайте імпорти
+Файл servicesgemini_service.py
+Додати до верхніх import’ів
+
+import asyncio
+import re
+from typing import Optional, Dict, Any, List
+List у вас частково вже є через typing, але тут зробимо явно.
+
+B) Додайте safe JSON helper
+Файл servicesgemini_service.py
+Додайте після logger = logging.getLogger(__name__) (або перед першою async-функцією)
+
+_JSON_FENCE_RE = re.compile(r```(json)s([sS])s```, re.IGNORECASE)
+
+def _safe_json_loads(text str) - Optional[Dict[str, Any]]
+    
+    Акуратно дістає JSON з відповіді Gemini
+    - прибирає ```json ... ```
+    - пробує знайти перший {...} блок
+    
+    if not text
+        return None
+
+    raw = text.strip()
+
+    # 1) Якщо модель повернула fenced block ```json ... ```
+    m = _JSON_FENCE_RE.search(raw)
+    if m
+        raw = m.group(1).strip()
+
+    # 2) Якщо далі все одно є зайвий текст — пробуємо вирізати перший {...}
+    # (простий, але практичний підхід)
+    first_brace = raw.find({)
+    last_brace = raw.rfind(})
+    if first_brace != -1 and last_brace != -1 and last_brace  first_brace
+        candidate = raw[first_bracelast_brace + 1].strip()
+    else
+        candidate = raw
+
+    try
+        return json.loads(candidate)
+    except Exception
+        return None
+C) Посильте extract_product_attributes_with_ai (заміна блоку парсингу)
+Файл servicesgemini_service.py
+ЗАМІНИТИ цей блок
+
+json_data = json.loads(response.text)
+logger.info(f✅ Gemini успішно витягнув атрибути {json_data})
+return json_data
+НА
+
+json_data = _safe_json_loads(response.text)
+if not isinstance(json_data, dict)
+    logger.warning(fGemini повернув невалідний JSON (extract). Raw {response.text[500]})
+    return None
+
+logger.info(f✅ Gemini успішно витягнув атрибути {json_data})
+return json_data
+1.3. Додайте категоризацію “окремою функцією”
+Файл servicesgemini_service.py
+ДОДАТИ нову функцію внизу файлу (після extract_product_attributes_with_ai)
+
+async def classify_main_category_with_ai(texts List[str]) - Optional[str]
+    
+    Визначає головну категорію магазинупотоку товарів.
+    Повертає коротку категорію (наприклад Одяг, Електроніка, Взуття, Тактичне спорядження, Дім і сад).
+    
+    if not config.gemini_api_key
+        logger.warning(Категоризацію пропущено (немає API key).)
+        return None
+
+    # Мінімізуємо токенишум
+    joined =  .join([t.strip() for t in texts if t and t.strip()])
+    joined = joined[15000]
+
+    system_prompt = 
+Ти - AI-категоризатор для E-commerce платформи TavernaGroup.
+Твоє завдання - визначити ГОЛОВНУ категорію магазину за прикладами описів товарів.
+Поверни ТІЛЬКИ JSON у форматі
+{ category ... }
+
+Правила
+- category коротка назва українською (1-4 слова), без зайвих пояснень.
+- Якщо не впевнений — поверни General.
+
+
+    try
+        model = genai.GenerativeModel(
+            model_name=gemini-1.5-flash-latest,
+            system_instruction=system_prompt,
+            generation_config=genai.types.GenerationConfig(
+                response_mime_type=applicationjson,
+                temperature=0.0
+            )
+        )
+
+        response = await model.generate_content_async(joined)
+        data = _safe_json_loads(response.text)
+        if not isinstance(data, dict)
+            return General
+
+        category = (data.get(category) or General).strip()
+        if not category
+            return General
+
+        logger.info(f✅ Gemini категоризував потік як {category})
+        return category
+
+    except Exception as e
+        logger.error(f❌ Помилка під час запиту до Gemini API (classify) {e}, exc_info=True)
+        return None
+1.4. Додайте батч-пайплайн для описів
+Файл servicesgemini_service.py
+ДОДАТИ ще одну функцію нижче
+
+async def batch_extract_product_attributes_with_ai(
+    items List[Dict[str, Any]],
+    ,
+    default_category_hint str = unknown,
+    max_concurrency int = 3,
+    retries int = 2,
+    truncate_chars int = 15000
+) - List[Optional[Dict[str, Any]]]
+    
+    Батч-обробка описів
+    items [{ raw_text ..., category_hint ... }, ...]
+    Повертає список результатів (dict або None) у тому ж порядку.
+    
+
+    if not items
+        return []
+
+    sem = asyncio.Semaphore(max(1, int(max_concurrency)))
+    results List[Optional[Dict[str, Any]]] = [None]  len(items)
+
+    async def _one(i int)
+        raw_text = (items[i].get(raw_text) or ).strip()
+        category_hint = (items[i].get(category_hint) or default_category_hint).strip()
+
+        if not raw_text
+            results[i] = None
+            return
+
+        raw_text_cut = raw_text[truncate_chars]
+
+        # Ретраї з невеликим backoff
+        for attempt in range(retries + 1)
+            try
+                async with sem
+                    data = await extract_product_attributes_with_ai(raw_text_cut, category_hint)
+                results[i] = data
+                return
+            except Exception as e
+                if attempt = retries
+                    logger.error(fBatch extract item#{i} failed окончательно {e}, exc_info=True)
+                    results[i] = None
+                    return
+                await asyncio.sleep(0.6  (attempt + 1))
+
+    await asyncio.gather([_one(i) for i in range(len(items))])
+    return results
+2) Мінімальна інтеграція категоризація постачальника (одна точка)
+Зараз у вас в servicesai_agent_service.py категорія визначається через extract_product_attributes_with_ai(... combined_text ...), і потім читається з attributes. Це крихко.
+
+2.1. Старий код (фрагмент)
+Файл servicesai_agent_service.py (у analyze_supplier_source)
+
+combined_text =  .join(raw_products_text)
+ai_data = await gemini_service.extract_product_attributes_with_ai(
+    raw_text=combined_text[15000],
+    category_hint=Визнач головну категорію для цього магазину (напр. 'Одяг', 'Електроніка', 'Взуття')
+)
+
+if not ai_data
+    return None, Gemini не зміг проаналізувати товари.
+
+main_category = General
+if ai_data.get(attributes)
+    main_category = ai_data.get(attributes, {}).get(Категорія,
+                        ai_data.get(attributes, {}).get(Тип, General))
+2.2. Новий код (заміна цього блоку)
+Файл servicesai_agent_service.py
+ЗАМІНИТИ весь блок вище НА
+
+main_category = await gemini_service.classify_main_category_with_ai(raw_products_text)
+
+if not main_category
+    return None, Gemini не зміг визначити категорію.
+
+main_category = main_category or General
+Це єдина “інтеграційна” правка поза gemini_service.py, яка напряму стосується “описівкатегорій”.
+
+3) Як перевірити, що фікс спрацював
+3.1. Швидка перевірка без реального Gemini (коли нема ключа)
+В .env тимчасово приберітьзакоментуйте GEMINI_API_KEY.
+
+Запустіть ваш стек.
+
+Очікувана поведінка в логах
+
+GEMINI_API_KEY не знайдено. AI-сервіси буде пропущено.
+
+виклики AI повертають Noneоригінальний текст без падінь.
+
+3.2. Перевірка з ключем (реально)
+В .env встановіть GEMINI_API_KEY=...
+
+Запустіть процес, який викликає
+
+run_ai_onboarding_analysis(...) (постачальник в статусі pending_ai_analysis)
+
+Очікувані логи
+
+Google Gemini API сконфігуровано.
+
+✅ Gemini категоризував потік як ...
+
+відсутні traceback на json.loads(...).
+
+3.3. Перевірка батч-пайплайна (мінімальний ручний тест)
+У будь-якому місці (тимчасово, локально) викличте
+
+items = [
+    {raw_text Тактична сорочка мультикам. Розміри S M L. Ціна 900 грн., category_hint Одяг},
+    {raw_text iPhone 15 Pro 256GB Natural Titanium. Ціна 45000 UAH., category_hint Електроніка},
+]
+out = await gemini_service.batch_extract_product_attributes_with_ai(items, max_concurrency=2)
+print(out)
+Очікування out — список з 2 dict (або None якщо Gemini не відповівнема ключа), без падінь.
+
+Якщо хочеш — у наступному кроці в цьому ж домені я додам “тонкий” режим батчу групування 5–10 описів в один запит (значно дешевше по токенах), але це вже потребує узгодженого JSON-формату [{...}, {...}] і трохи іншого промпту.
