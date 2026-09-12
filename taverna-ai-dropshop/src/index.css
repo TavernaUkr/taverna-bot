@@ -1,0 +1,502 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    /* Taverna — Clean Telegram-Style with Tactical Accents */
+    --background: 0 0% 97%;
+    --foreground: 210 10% 12%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 210 10% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 210 10% 12%;
+
+    /* Olive-Green Primary (Telegram-inspired) */
+    --primary: 130 32% 38%;
+    --primary-foreground: 0 0% 100%;
+
+    /* Light Gray Secondary */
+    --secondary: 210 8% 95%;
+    --secondary-foreground: 210 10% 18%;
+
+    --muted: 210 6% 94%;
+    --muted-foreground: 210 6% 50%;
+
+    /* Bright Lime Accent for CTAs */
+    --accent: 100 50% 46%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    /* Live indicator red */
+    --live: 0 78% 55%;
+    --live-foreground: 0 0% 100%;
+
+    /* Success green */
+    --success: 152 56% 42%;
+    --success-foreground: 0 0% 100%;
+
+    /* Warning/Promo amber */
+    --warning: 42 95% 52%;
+    --warning-foreground: 210 10% 12%;
+
+    /* Rating gold */
+    --rating: 38 90% 48%;
+    --rating-foreground: 0 0% 100%;
+
+    /* Header action accents */
+    --header-referral: 199 89% 48%;
+    --header-referral-foreground: 0 0% 100%;
+    --header-promotion: 270 60% 55%;
+    --header-promotion-foreground: 0 0% 100%;
+    --header-promo: 330 95% 65%;
+    --header-promo-foreground: 210 10% 12%;
+
+    --border: 210 8% 90%;
+    --input: 210 8% 92%;
+    --ring: 130 32% 38%;
+
+    --radius: 0.75rem;
+
+    /* Navigation */
+    --nav-height: 56px;
+    --nav-bg: 0 0% 100%;
+
+    /* Clean shadows — Telegram-like subtlety */
+    --shadow-sm: 0 1px 2px 0 hsl(210 10% 12% / 0.03);
+    --shadow-md: 0 2px 8px -2px hsl(210 10% 12% / 0.06);
+    --shadow-lg: 0 4px 16px -4px hsl(210 10% 12% / 0.08);
+    --shadow-xl: 0 8px 24px -6px hsl(210 10% 12% / 0.1);
+    --shadow-glow: 0 0 16px -4px hsl(100 50% 46% / 0.3);
+    --shadow-card: 0 1px 3px 0 hsl(210 10% 12% / 0.04);
+
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 130 32% 38%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 210 8% 95%;
+    --sidebar-accent-foreground: 210 10% 18%;
+    --sidebar-border: 210 8% 90%;
+    --sidebar-ring: 130 32% 38%;
+  }
+
+  .dark {
+    --background: 220 10% 7%;
+    --foreground: 210 10% 95%;
+
+    --card: 220 10% 11%;
+    --card-foreground: 210 10% 95%;
+
+    --popover: 220 10% 11%;
+    --popover-foreground: 210 10% 95%;
+
+    --primary: 130 40% 50%;
+    --primary-foreground: 220 10% 8%;
+
+    --secondary: 220 10% 16%;
+    --secondary-foreground: 210 10% 92%;
+
+    --muted: 220 10% 18%;
+    --muted-foreground: 210 8% 55%;
+
+    --accent: 100 50% 50%;
+    --accent-foreground: 220 10% 8%;
+
+    --destructive: 0 62% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --live: 0 78% 55%;
+    --live-foreground: 0 0% 100%;
+
+    --success: 152 55% 48%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 42 95% 52%;
+    --warning-foreground: 210 10% 12%;
+
+    --rating: 38 90% 48%;
+    --rating-foreground: 0 0% 100%;
+
+    /* Header action accents */
+    --header-referral: 199 95% 55%;
+    --header-referral-foreground: 0 0% 100%;
+    --header-promotion: 270 70% 65%;
+    --header-promotion-foreground: 0 0% 100%;
+    --header-promo: 330 100% 75%;
+    --header-promo-foreground: 210 10% 12%;
+
+    --border: 220 10% 20%;
+    --input: 220 10% 20%;
+    --ring: 130 40% 50%;
+    
+    --nav-bg: 220 10% 9%;
+
+    --shadow-sm: 0 1px 2px 0 hsl(0 0% 0% / 0.15);
+    --shadow-md: 0 2px 8px -2px hsl(0 0% 0% / 0.2);
+    --shadow-lg: 0 4px 16px -4px hsl(0 0% 0% / 0.3);
+    --shadow-xl: 0 8px 24px -6px hsl(0 0% 0% / 0.35);
+    --shadow-glow: 0 0 20px -4px hsl(130 40% 50% / 0.35);
+    --shadow-card: 0 1px 3px 0 hsl(0 0% 0% / 0.2);
+
+    --sidebar-background: 220 10% 9%;
+    --sidebar-foreground: 210 10% 92%;
+    --sidebar-primary: 130 40% 50%;
+    --sidebar-primary-foreground: 220 10% 8%;
+    --sidebar-accent: 220 10% 16%;
+    --sidebar-accent-foreground: 210 10% 92%;
+    --sidebar-border: 220 10% 20%;
+    --sidebar-ring: 130 40% 50%;
+  }
+}
+
+/* Safe area padding for Telegram/iOS */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.2);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground) / 0.4);
+}
+
+/* Hide scrollbar utility */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* Thin scrollbar utility */
+.scrollbar-thin {
+  scrollbar-width: thin;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  width: 4px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground) / 0.2);
+  border-radius: 2px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Animations */
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes slide-up {
+  from { 
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to { 
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes glow-pulse {
+  0%, 100% { 
+    box-shadow: 0 0 12px -2px hsl(82 55% 48% / 0.3);
+  }
+  50% { 
+    box-shadow: 0 0 24px -2px hsl(82 55% 48% / 0.5);
+  }
+}
+
+.animate-pulse-live {
+  animation: pulse-live 2s ease-in-out infinite;
+}
+
+.animate-pulse-slow {
+  animation: pulse-slow 3s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes pulse-slow {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.88;
+    transform: scale(1.015);
+  }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.animate-fade-in {
+  animation: fade-in 0.35s ease-out;
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+.animate-shimmer {
+  background: linear-gradient(90deg, transparent 0%, hsl(var(--accent) / 0.15) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: shimmer 2s linear infinite;
+}
+
+.animate-glow {
+  animation: glow-pulse 2s ease-in-out infinite;
+}
+
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.animate-scale-in {
+  animation: scale-in 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Badge glow animation for 1st place */
+@keyframes badge-glow-gold {
+  0%, 100% { filter: drop-shadow(0 0 4px hsl(45 93% 47% / 0.4)); }
+  50% { filter: drop-shadow(0 0 10px hsl(45 93% 47% / 0.7)); }
+}
+@keyframes badge-glow-silver {
+  0%, 100% { filter: drop-shadow(0 0 4px hsl(215 15% 60% / 0.4)); }
+  50% { filter: drop-shadow(0 0 10px hsl(215 15% 60% / 0.7)); }
+}
+@keyframes badge-glow-bronze {
+  0%, 100% { filter: drop-shadow(0 0 4px hsl(25 75% 47% / 0.4)); }
+  50% { filter: drop-shadow(0 0 10px hsl(25 75% 47% / 0.7)); }
+}
+@keyframes badge-glow-blue {
+  0%, 100% { filter: drop-shadow(0 0 4px hsl(217 91% 60% / 0.4)); }
+  50% { filter: drop-shadow(0 0 10px hsl(217 91% 60% / 0.7)); }
+}
+
+.animate-badge-glow-gold { animation: badge-glow-gold 2s ease-in-out infinite; }
+.animate-badge-glow-silver { animation: badge-glow-silver 2s ease-in-out infinite; }
+.animate-badge-glow-bronze { animation: badge-glow-bronze 2s ease-in-out infinite; }
+.animate-badge-glow-blue { animation: badge-glow-blue 2s ease-in-out infinite; }
+
+/* Diamond badge glow — violet-blue shimmer for #1 all-time */
+@keyframes badge-glow-diamond {
+  0%, 100% { filter: drop-shadow(0 0 6px hsl(270 70% 60% / 0.5)); }
+  50% { filter: drop-shadow(0 0 14px hsl(260 80% 65% / 0.8)); }
+}
+.animate-badge-glow-diamond { animation: badge-glow-diamond 1.8s ease-in-out infinite; }
+
+/* Name shimmer for #1 in any rating period */
+@keyframes name-shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+.text-diamond-shimmer {
+  background: linear-gradient(90deg, hsl(270 70% 60%) 0%, hsl(200 80% 70%) 50%, hsl(270 70% 60%) 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: name-shimmer 3s linear infinite;
+}
+.text-gold-shimmer {
+  background: linear-gradient(90deg, hsl(42 95% 52%) 0%, hsl(50 100% 70%) 50%, hsl(42 95% 52%) 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: name-shimmer 3s linear infinite;
+}
+.text-silver-shimmer {
+  background: linear-gradient(90deg, hsl(215 15% 60%) 0%, hsl(210 20% 80%) 50%, hsl(215 15% 60%) 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: name-shimmer 3s linear infinite;
+}
+.text-bronze-shimmer {
+  background: linear-gradient(90deg, hsl(25 75% 47%) 0%, hsl(35 90% 60%) 50%, hsl(25 75% 47%) 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: name-shimmer 3s linear infinite;
+}
+.text-blue-shimmer {
+  background: linear-gradient(90deg, hsl(217 91% 60%) 0%, hsl(200 100% 75%) 50%, hsl(217 91% 60%) 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: name-shimmer 3s linear infinite;
+}
+
+/* Trophy heartbeat for 1st place */
+@keyframes heartbeat {
+  0%, 100% { transform: scale(1); }
+  15% { transform: scale(1.25); }
+  30% { transform: scale(1); }
+  45% { transform: scale(1.15); }
+  60% { transform: scale(1); }
+}
+
+.animate-heartbeat {
+  animation: heartbeat 1.5s ease-in-out infinite;
+}
+
+/* Glass morphism utilities */
+.glass {
+  background: hsl(var(--background) / 0.8);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.glass-card {
+  background: hsl(var(--card) / 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid hsl(var(--border) / 0.5);
+}
+
+/* Premium button styles */
+.btn-premium {
+  position: relative;
+  overflow: hidden;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-premium::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, hsl(var(--accent) / 0.15) 0%, transparent 50%);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.btn-premium:hover::before {
+  opacity: 1;
+}
+
+/* Premium card hover effect */
+.card-premium {
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.card-premium:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-lg);
+}
+
+/* Text gradient utility */
+.text-gradient {
+  background: linear-gradient(135deg, hsl(var(--primary)) 0%, hsl(var(--accent)) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Premium brand/live gradients */
+.text-brand-royal {
+  background: linear-gradient(135deg, hsl(38 85% 45%) 0%, hsl(30 90% 52%) 30%, hsl(var(--primary)) 65%, hsl(160 45% 40%) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  filter: drop-shadow(0 1px 2px hsl(38 85% 45% / 0.3));
+}
+
+.text-live-royal {
+  background: linear-gradient(135deg, hsl(0 85% 58%) 0%, hsl(330 80% 55%) 35%, hsl(280 70% 55%) 70%, hsl(260 85% 60%) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  filter: drop-shadow(0 0 6px hsl(330 80% 55% / 0.4));
+}
+
+/* Royal brand font */
+.font-brand {
+  font-family: 'Playfair Display', Georgia, serif;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+/* Gold shimmer for ratings */
+@keyframes gold-shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+.text-gold-shimmer {
+  background: linear-gradient(90deg, hsl(var(--rating)) 0%, hsl(42 100% 70%) 50%, hsl(var(--rating)) 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: gold-shimmer 3s linear infinite;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Better focus styles */
+  :focus-visible {
+    @apply outline-none ring-2 ring-primary/50 ring-offset-2 ring-offset-background;
+  }
+}
