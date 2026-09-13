@@ -129,6 +129,11 @@ class Supplier(Base):
     api_key = Column(String(255), nullable=True)
     xml_url = Column(Text, nullable=True) 
     shop_url = Column(Text, nullable=True)
+
+    # --- MyDrop REST API (заміна XML-парсингу) ---
+    mydrop_api_key = Column(String(255), nullable=True)  # X-API-KEY постачальника з кабінету MyDrop
+    mydrop_api_key_verified = Column(Boolean, nullable=False, default=False)  # чи ключ пройшов тестовий запит
+    mydrop_api_key_verified_at = Column(DateTime(timezone=True), nullable=True)  # коли саме верифікували
     
     supplier_address = Column(Text, nullable=True)
     telegram_channel = Column(String(100), nullable=True)

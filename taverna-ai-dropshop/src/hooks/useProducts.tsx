@@ -82,7 +82,7 @@ export function mapBackendProductToUi(bp: BackendProduct): Product {
   const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
 
   const options = bp.options ?? [];
-  const sizeOption = options.find((o) => /розмір|size/i.test(o.name));
+  const sizeOption = options.find((o) => /розмір|размер|size/i.test(o.name));
   const colorOption = options.find((o) => /колір|цвет|color/i.test(o.name));
 
   const categoryTag = bp.category?.trim() || undefined;

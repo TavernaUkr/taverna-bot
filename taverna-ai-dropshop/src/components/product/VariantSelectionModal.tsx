@@ -1,5 +1,5 @@
-import { useState, useMemo } from "react";
-import { ShoppingCart, ChevronRight } from "lucide-react";
+import { useState, useMemo, useEffect } from "react";
+import { ShoppingCart, ChevronRight, Minus, Plus } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import {
   Dialog,
@@ -20,13 +20,16 @@ interface VariantSelectionModalProps {
   productName: string;
   productPrice: number;
   productImage: string;
-  sizes?: string[];
-  colors?: string[];
-  // Оригінальні опції/варіанти з бекенду — потрібні, щоб знайти ТОЧНИЙ
-  // variant_id для обраної комбінації розмір+колір (як у ProductDetail.tsx).
+  // Опції/варіанти напряму з бекенду (FastAPI) — ЄДИНЕ джерело правди для
+  // рендеру кнопок розміру/кольору і для пошуку variant_id. Рядкові масиви
+  // sizes/colors тут більше не потрібні, щоб не тримати дві копії тих самих
+  // даних, які можуть розійтися.
   options?: BackendProductOption[];
   variants?: BackendProductVariant[];
-  onAddToCart: (size?: string, color?: string, variantId?: string) => void;
+  // Загальний залишок товару — запасний варіант для лічильника кількості,
+  // якщо конкретний variant_id ще не визначено (напр. поки не обрано колір).
+  stockQuantity?: number;
+  onAddToCart: (size?: string, color?: string, variantId?: string, quantity?: number) => void;
 }
 
 export function VariantSelectionModal({
@@ -36,18 +39,27 @@ export function VariantSelectionModal({
   productName,
   productPrice,
   productImage,
-  sizes,
-  colors,
   options,
   variants,
+  stockQuantity,
   onAddToCart,
 }: VariantSelectionModalProps) {
   const navigate = useNavigate();
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
   const [selectedColor, setSelectedColor] = useState<string | null>(null);
+  const [quantity, setQuantity] = useState(1);
 
-  const hasRequiredSizes = Boolean(sizes && sizes.length > 0);
-  const hasRequiredColors = Boolean(colors && colors.length > 0);
+  // Опції "Розмір" і "Колір" шукаємо в масиві options (той самий підхід,
+  // що і в ProductDetail.tsx / useProducts.tsx) — це ЄДИНЕ місце, звідки
+  // беруться і кнопки вибору, і id для пошуку variant_id.
+  const sizeOption = useMemo(() => options?.find((o) => /розмір|размер|size/i.test(o.name)), [options]);
+  const colorOption = useMemo(() => options?.find((o) => /колір|цвет|color/i.test(o.name)), [options]);
+
+  const sizeValues = useMemo(() => sizeOption?.values.map((v) => v.value) ?? [], [sizeOption]);
+  const colorValues = useMemo(() => colorOption?.values.map((v) => v.value) ?? [], [colorOption]);
+
+  const hasRequiredSizes = sizeValues.length > 0;
+  const hasRequiredColors = colorValues.length > 0;
 
   /**
    * Той самий пошук ТОЧНОГО variant_id за обраною комбінацією розмір+колір,
@@ -61,9 +73,6 @@ export function VariantSelectionModal({
     if (!hasRequiredSizes && !hasRequiredColors) {
       return variants.find((v) => v.is_available && v.quantity > 0) ?? variants[0];
     }
-
-    const sizeOption = options?.find((o) => /розмір|size/i.test(o.name));
-    const colorOption = options?.find((o) => /колір|цвет|color/i.test(o.name));
 
     const sizeValueId = hasRequiredSizes ? sizeOption?.values.find((v) => v.value === selectedSize)?.id : undefined;
     const colorValueId = hasRequiredColors ? colorOption?.values.find((v) => v.value === selectedColor)?.id : undefined;
@@ -81,7 +90,7 @@ export function VariantSelectionModal({
       if (hasRequiredColors && !ids.includes(colorValueId as number)) return false;
       return true;
     });
-  }, [variants, options, hasRequiredSizes, hasRequiredColors, selectedSize, selectedColor]);
+  }, [variants, sizeOption, colorOption, hasRequiredSizes, hasRequiredColors, selectedSize, selectedColor]);
 
   // Чи взагалі бекенд віддав variants для цього товару. Якщо ні (старі
   // дані без варіантів) — не блокуємо кнопку через відсутність variantId,
@@ -90,11 +99,29 @@ export function VariantSelectionModal({
   const isVariantResolved = !variantsProvided || Boolean(selectedVariant);
   const isVariantAvailable = !selectedVariant || (selectedVariant.is_available && selectedVariant.quantity > 0);
 
+  // Максимум для лічильника кількості: залишок ОБРАНОГО варіанту, інакше —
+  // загальний залишок товару, інакше — 1 (щоб стрілка "+" не була завжди мертва).
+  const maxQuantity = Math.max(1, selectedVariant?.quantity ?? stockQuantity ?? 1);
+
+  // Якщо після зміни розміру/кольору залишок обраного варіанту менший за
+  // вже введену кількість — підрізаємо кількість автоматично.
+  useEffect(() => {
+    if (quantity > maxQuantity) {
+      setQuantity(maxQuantity);
+    }
+  }, [maxQuantity]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Кількість не може перевищувати залишок КОНКРЕТНОГО обраного варіанту.
+  const isQuantityWithinStock = variantsProvided
+    ? quantity <= (selectedVariant?.quantity || 0)
+    : quantity <= maxQuantity;
+
   const canAddToCart =
     (!hasRequiredSizes || Boolean(selectedSize)) &&
     (!hasRequiredColors || Boolean(selectedColor)) &&
     isVariantResolved &&
-    isVariantAvailable;
+    isVariantAvailable &&
+    isQuantityWithinStock;
 
   const handleAddToCart = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -116,6 +143,10 @@ export function VariantSelectionModal({
       toast.error("Обраної комбінації немає в наявності");
       return;
     }
+    if (!isQuantityWithinStock) {
+      toast.error(`В наявності лише ${selectedVariant?.quantity ?? maxQuantity} шт.`);
+      return;
+    }
 
     hapticImpact("medium");
     // Сам toast "додано до кошика" показує батьківський onAddToCart (той
@@ -124,12 +155,14 @@ export function VariantSelectionModal({
     onAddToCart(
       selectedSize || undefined,
       selectedColor || undefined,
-      selectedVariant ? String(selectedVariant.id) : undefined
+      selectedVariant ? String(selectedVariant.id) : undefined,
+      quantity
     );
 
     // Reset selections and close modal
     setSelectedSize(null);
     setSelectedColor(null);
+    setQuantity(1);
     onClose();
   };
 
@@ -155,6 +188,7 @@ export function VariantSelectionModal({
   const handleModalClose = () => {
     setSelectedSize(null);
     setSelectedColor(null);
+    setQuantity(1);
     onClose();
   };
 
@@ -191,7 +225,7 @@ export function VariantSelectionModal({
             <div onClick={(e) => e.stopPropagation()}>
               <ProductVariantSelector
                 label="Розмір"
-                options={sizes}
+                options={sizeValues}
                 selected={selectedSize}
                 onSelect={handleSizeSelect}
                 type="button"
@@ -204,7 +238,7 @@ export function VariantSelectionModal({
             <div onClick={(e) => e.stopPropagation()}>
               <ProductVariantSelector
                 label="Колір"
-                options={colors}
+                options={colorValues}
                 selected={selectedColor}
                 onSelect={handleColorSelect}
                 type="color"
@@ -221,8 +255,46 @@ export function VariantSelectionModal({
               {(!hasRequiredSizes || selectedSize) && (!hasRequiredColors || selectedColor) && !isVariantAvailable
                 ? "Немає в наявності для цієї комбінації"
                 : ""}
+              {(!hasRequiredSizes || selectedSize) &&
+              (!hasRequiredColors || selectedColor) &&
+              isVariantAvailable &&
+              !isQuantityWithinStock
+                ? `В наявності лише ${selectedVariant?.quantity ?? maxQuantity} шт.`
+                : ""}
             </p>
           )}
+
+          {/* Quantity */}
+          <div>
+            <p className="text-sm font-medium text-foreground mb-2">Кількість</p>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setQuantity((prev) => Math.max(1, prev - 1));
+                }}
+                disabled={quantity <= 1}
+                className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center hover:bg-muted/80 disabled:opacity-50 transition-all"
+              >
+                <Minus className="h-4 w-4" />
+              </button>
+              <span className="w-10 text-center font-semibold text-base">{quantity}</span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setQuantity((prev) => Math.min(prev + 1, maxQuantity));
+                }}
+                disabled={quantity >= maxQuantity}
+                className="w-9 h-9 rounded-lg bg-muted flex items-center justify-center hover:bg-muted/80 disabled:opacity-50 transition-all"
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
 
           {/* Actions */}
           <div className="flex flex-col gap-2 pt-2">

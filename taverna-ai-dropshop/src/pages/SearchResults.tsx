@@ -209,7 +209,13 @@ export default function SearchResults() {
     }
   };
 
-  const handleAddToCart = async (product: Product, size?: string, color?: string, variantId?: string) => {
+  const handleAddToCart = async (
+    product: Product,
+    size?: string,
+    color?: string,
+    variantId?: string,
+    quantity: number = 1
+  ) => {
     const success = await addItem(
       product.id,
       product.name,
@@ -217,7 +223,7 @@ export default function SearchResults() {
       product.images?.[0],
       size,
       color,
-      1,
+      quantity,
       variantId
     );
     if (success) toast.success(`${product.name} додано до кошика`);
@@ -588,7 +594,9 @@ export default function SearchResults() {
                 options={product.options}
                 isFavorite={isFavorite(product.id)}
                 onClick={() => navigate(`/product/${product.id}`)}
-                onAddToCart={(size, color, variantId) => handleAddToCart(product, size, color, variantId)}
+                onAddToCart={(size, color, variantId, quantity) =>
+                  handleAddToCart(product, size, color, variantId, quantity)
+                }
                 onToggleFavorite={() => handleToggleFavorite(product)}
               />
             ))}

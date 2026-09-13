@@ -210,18 +210,36 @@ async def load_and_parse_xml_data(supplier_key: str = "system_import", xml_url: 
                 product_id = (await session.execute(product_stmt)).scalar_one()
 
                 # Options
-                options_map = defaultdict(set)
+                # [НАДІЙНІСТЬ] Ключі/значення тут ЗАВЖДИ .strip(), інакше нижче
+                # (при лінкуванні варіанту до option_values) key = (name.strip(), value.strip())
+                # не знайде збігу в val_ids_map, якщо в XML є зайві пробіли навколо
+                # name="Размер " або тексту параметра " S " -> варіант лишиться
+                # без опцій, і кнопки розміру/кольору на фронтенді не з'являться.
+                options_map: Dict[str, Set[str]] = defaultdict(set)
                 name_options = set()
                 for offer in offer_list:
                     for param in offer.findall('param'):
-                        if param.attrib.get('name') and param.text: 
-                            options_map[param.attrib.get('name')].add(param.text)
+                        p_name = (param.attrib.get('name') or '').strip()
+                        p_value = (param.text or '').strip()
+                        if p_name and p_value:
+                            options_map[p_name].add(p_value)
                     name_el = offer.find('name')
-                    if name_el and name_el.text:
+                    if name_el is not None and name_el.text:
                         var_name = name_el.text.replace(base_name, "").strip()
-                        if var_name: name_options.add(var_name)
-                if len(name_options) > 1: options_map["Колір"] = name_options
-                
+                        if var_name:
+                            name_options.add(var_name)
+
+                # "Колір" з різниці в назвах offer'ів синтезуємо ЛИШЕ якщо
+                # постачальник не віддав реальний параметр кольору (<param
+                # name="Цвет"/"Колір"/"Color">) — інакше матимемо ДВІ окремі
+                # опції кольору (з param і синтетичну), і на картці/сторінці
+                # товару з'явиться дублюючий, зайвий селектор.
+                has_real_color_param = any(
+                    re.search(r"колір|цвет|color", name, re.IGNORECASE) for name in options_map
+                )
+                if len(name_options) > 1 and not has_real_color_param:
+                    options_map["Колір"] = name_options
+
                 val_ids_map = await _get_or_create_options(session, product_id, options_map)
 
                 # Variants
@@ -266,15 +284,16 @@ async def load_and_parse_xml_data(supplier_key: str = "system_import", xml_url: 
                     # Links
                     value_ids_to_link = []
                     for param in offer.findall('param'):
-                        key = (param.attrib.get('name', '').strip(), (param.text or "").strip())
+                        key = ((param.attrib.get('name') or '').strip(), (param.text or "").strip())
                         if key in val_ids_map:
                             value_ids_to_link.append(val_ids_map[key])
-                    if len(name_options) > 1:
+                    if len(name_options) > 1 and not has_real_color_param:
                         name_el = offer.find('name')
-                        if name_el and name_el.text:
+                        if name_el is not None and name_el.text:
                             name_variant = name_el.text.replace(base_name, "").strip()
                             key = ("Колір", name_variant)
-                            if key in val_ids_map: value_ids_to_link.append(val_ids_map[key])
+                            if key in val_ids_map:
+                                value_ids_to_link.append(val_ids_map[key])
                     
                     if value_ids_to_link:
                         await session.execute(

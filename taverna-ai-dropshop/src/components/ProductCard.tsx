@@ -35,7 +35,7 @@ interface ProductCardProps {
   supplierVerified?: boolean;
   aiTags?: string[];
   onClick?: () => void;
-  onAddToCart?: (size?: string, color?: string, variantId?: string) => void;
+  onAddToCart?: (size?: string, color?: string, variantId?: string, quantity?: number) => void;
   onToggleFavorite?: () => void;
 }
 
@@ -128,11 +128,16 @@ export const ProductCard = ({
       return;
     }
     // Опцій немає — одразу додаємо єдиний варіант товару з його variant_id.
-    onAddToCart?.(undefined, undefined, singleVariant ? String(singleVariant.id) : undefined);
+    onAddToCart?.(undefined, undefined, singleVariant ? String(singleVariant.id) : undefined, 1);
   };
 
-  const handleVariantAddToCart = (selectedSize?: string, selectedColor?: string, variantId?: string) => {
-    onAddToCart?.(selectedSize, selectedColor, variantId);
+  const handleVariantAddToCart = (
+    selectedSize?: string,
+    selectedColor?: string,
+    variantId?: string,
+    quantity?: number
+  ) => {
+    onAddToCart?.(selectedSize, selectedColor, variantId, quantity);
   };
 
   const handleToggleFavorite = (e: React.MouseEvent) => {
@@ -332,10 +337,9 @@ export const ProductCard = ({
         productName={name}
         productPrice={price}
         productImage={image}
-        sizes={sizes}
-        colors={colors}
         options={options}
         variants={variants}
+        stockQuantity={stockQuantity}
         onAddToCart={handleVariantAddToCart}
       />
     </div>

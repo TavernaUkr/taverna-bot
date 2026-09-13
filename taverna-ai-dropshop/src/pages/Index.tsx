@@ -124,7 +124,7 @@ const CatalogTab = ({
 }: { 
   onOpenAllCategories: () => void; 
   onProductClick: (id: string) => void;
-  onAddToCart: (product: any, size?: string, color?: string, variantId?: string) => void;
+  onAddToCart: (product: any, size?: string, color?: string, variantId?: string, quantity?: number) => void;
   onToggleFavorite: (product: any) => void;
   isFavorite: (id: string) => boolean;
   products: any[];
@@ -210,7 +210,9 @@ const CatalogTab = ({
                 viewsCount={product.views_count}
                 isFavorite={isFavorite(product.id)}
                 onClick={() => onProductClick(product.id)}
-                onAddToCart={(size?: string, color?: string, variantId?: string) => onAddToCart(product, size, color, variantId)}
+                onAddToCart={(size?: string, color?: string, variantId?: string, quantity?: number) =>
+                  onAddToCart(product, size, color, variantId, quantity)
+                }
                 onToggleFavorite={() => onToggleFavorite(product)}
               />
             ))}
@@ -330,7 +332,13 @@ const Index = () => {
     toast.success("Дякуємо за замовлення!");
   };
 
-  const handleAddToCart = async (product: any, size?: string, color?: string, variantId?: string) => {
+  const handleAddToCart = async (
+    product: any,
+    size?: string,
+    color?: string,
+    variantId?: string,
+    quantity: number = 1
+  ) => {
     const success = await addItem(
       product.id,
       product.name,
@@ -338,7 +346,7 @@ const Index = () => {
       product.images?.[0] || product.image,
       size,
       color,
-      1,
+      quantity,
       variantId
     );
     if (success) {

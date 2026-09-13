@@ -99,7 +99,7 @@ function mapBackendProductToDetail(bp: BackendProduct): Product {
   const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
 
   const options = bp.options ?? [];
-  const sizeOption = options.find((o) => /розмір|size/i.test(o.name));
+  const sizeOption = options.find((o) => /розмір|размер|size/i.test(o.name));
   const colorOption = options.find((o) => /колір|цвет|color/i.test(o.name));
 
   const categoryTag = bp.category?.trim() || undefined;
@@ -172,7 +172,7 @@ const ProductDetail = () => {
       return product.variants.find((v) => v.is_available && v.quantity > 0) ?? product.variants[0];
     }
 
-    const sizeOption = product.options?.find((o) => /розмір|size/i.test(o.name));
+    const sizeOption = product.options?.find((o) => /розмір|размер|size/i.test(o.name));
     const colorOption = product.options?.find((o) => /колір|цвет|color/i.test(o.name));
 
     const sizeValueId = hasSize ? sizeOption?.values.find((v) => v.value === selectedSize)?.id : undefined;
