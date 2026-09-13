@@ -17,8 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from database.db import get_db
-from database.models import Order, OrderItem, OrderStatus, PaymentStatus, ProductVariant
+from database.models import Order, OrderItem, OrderStatus, PaymentStatus, ProductVariant, Supplier
 from api_models import OrderCreate, OrderCreateResponse
+from services.mydrop_api import create_order_in_mydrop, MyDropAPIError
 
 logger = logging.getLogger(__name__)
 
@@ -121,9 +122,127 @@ async def create_order(payload: OrderCreate, db: AsyncSession = Depends(get_db))
 
     logger.info(f"Checkout: створено замовлення {order.order_uid} (ID={order.id}) на суму {order.total_price} грн")
 
+    # 4. Відправка замовлення в MyDrop (кабінет постачальника).
+    # [ВАЖЛИВО] Це НЕ повинно валити наш чекаут — замовлення в нашій БД вже
+    # збережено (комміт вище пройшов успішно). Якщо MyDrop лежить/ключ
+    # невалідний — просто логуємо помилку і повертаємо клієнту 201, як і при успіху.
+    await _sync_order_to_mydrop(order, order_items, db)
+
     return OrderCreateResponse(
         id=order.id,
         order_uid=order.order_uid,
         total_price=order.total_price,
         status=order.status,
     )
+
+
+async def _sync_order_to_mydrop(order: Order, order_items: List[OrderItem], db: AsyncSession) -> None:
+    """
+    Відправляє щойно створене замовлення в кабінет постачальника MyDrop
+    (`POST /vendor/api/orders`), одразу після успішного `db.commit()`.
+
+    [ПРИПУЩЕННЯ, за яким написана ця функція] Всі товари в кошику належать
+    ОДНОМУ постачальнику — тож достатньо взяти `supplier_id` першого товару,
+    у якого він відомий. Товари без `variant_id` (додані "вручну", без
+    прив'язки до нашої БД товарів) не мають `supplier_id` — вони просто не
+    потраплять у відправку в MyDrop.
+
+    [НАДІЙНІСТЬ] Ця функція НІКОЛИ не кидає виняток назовні — усі помилки
+    (мережа, невалідний ключ, відсутній ключ) ловляться і пишуться в
+    `logger.error`. Замовлення в нашій БД вже збережено ДО виклику цієї
+    функції, тож падіння MyDrop не впливає на відповідь клієнту (201 Created).
+
+    [ЧОГО БРАКУЄ] У `Order` є поля `city_ref`/`warehouse_ref` для точного
+    міста/відділення Нової Пошти, але поточна схема чекауту (`OrderCreate`
+    в `api_models.py`) їх не приймає — фронтенд шле лише вільний текст
+    `delivery_address`. Тож у MyDrop зараз летить `delivery_address` як
+    текст (MyDrop це підтримує для служб без повної інтеграції). Якщо
+    потрібна автогенерація ТТН у MyDrop для Нової Пошти — фронтенд має
+    почати передавати `delivery_city_ref`/`delivery_warehouse_ref` (як це
+    вже робить `SecureCreateOrderRequest` у `web_app.py`), а тоді тут
+    достатньо буде прокинути їх у `order_data["city"]`/`["warehouse_number"]`.
+    """
+    first_supplier_id = next((item.supplier_id for item in order_items if item.supplier_id), None)
+    if not first_supplier_id:
+        logger.info(
+            "MyDrop: замовлення %s не має товарів з відомим supplier_id — пропускаю відправку в MyDrop.",
+            order.order_uid,
+        )
+        return
+
+    try:
+        supplier = await db.get(Supplier, first_supplier_id)
+    except Exception as e:
+        logger.error(
+            "MyDrop: не вдалося завантажити постачальника #%s (замовлення %s): %s",
+            first_supplier_id, order.order_uid, e, exc_info=True,
+        )
+        return
+
+    if not supplier:
+        logger.warning(
+            "MyDrop: постачальника #%s (замовлення %s) не знайдено в БД — пропускаю відправку.",
+            first_supplier_id, order.order_uid,
+        )
+        return
+
+    if not supplier.mydrop_api_key:
+        logger.info(
+            "MyDrop: постачальник #%s (%s) не має mydrop_api_key — замовлення %s НЕ відправлено в MyDrop "
+            "(ймовірно, independent-постачальник без інтеграції).",
+            supplier.id, supplier.name, order.order_uid,
+        )
+        return
+
+    # Беремо ЛИШЕ товари цього постачальника (захист, навіть якщо в кошику
+    # випадково опинились товари іншого supplier_id — за поточним
+    # припущенням такого не буває, але зайва перевірка не завадить).
+    supplier_items = [item for item in order_items if item.supplier_id == supplier.id]
+    if not supplier_items:
+        logger.warning(
+            "MyDrop: у замовленні %s немає товарів з supplier_id=%s — пропускаю відправку.",
+            order.order_uid, supplier.id,
+        )
+        return
+
+    mydrop_items = [
+        {
+            "supplier_sku": item.sku,
+            "product_name": item.product_name,
+            "quantity": item.quantity,
+            "price": item.price_per_item,
+            "options_text": item.options_text,
+        }
+        for item in supplier_items
+    ]
+
+    try:
+        response = await create_order_in_mydrop(
+            api_key=supplier.mydrop_api_key,
+            order_data={
+                "customer_name": order.customer_name,
+                "customer_phone": order.customer_phone,
+                "delivery_service": order.delivery_service,
+                "delivery_address": order.delivery_address,
+                "note": order.note,
+                "order_source": "TavernaBot MiniApp",
+                "order_uid": order.order_uid,
+            },
+            order_items=mydrop_items,
+        )
+        logger.info(
+            "MyDrop: замовлення %s відправлено постачальнику #%s (%s). MyDrop order id=%s.",
+            order.order_uid, supplier.id, supplier.name, response.get("id"),
+        )
+    except MyDropAPIError as e:
+        # MyDrop лежить / ключ невалідний / інша помилка API — НЕ валимо
+        # чекаут, лише логуємо. Замовлення в нашій БД вже збережено.
+        logger.error(
+            "MyDrop: не вдалося відправити замовлення %s постачальнику #%s (%s): %s",
+            order.order_uid, supplier.id, supplier.name, e,
+        )
+    except Exception as e:
+        logger.error(
+            "MyDrop: неочікувана помилка при відправці замовлення %s постачальнику #%s: %s",
+            order.order_uid, supplier.id, e, exc_info=True,
+        )
