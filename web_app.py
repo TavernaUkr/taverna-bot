@@ -34,7 +34,7 @@ from api_models import (
 )
 
 from services import (
-    xml_parser, cart_service, order_service,
+    product_service, cart_service, order_service,
     payment_service, delivery_service,
     payout_service, publisher_service,
     omnichannel_service as ads_service # <-- ОНОВЛЕНО
@@ -306,7 +306,7 @@ async def api_get_warehouses(city_ref: str = Query(...)):
 async def api_search_products(query: str = Query(..., min_length=2, max_length=50)):
     # ... (код без змін) ...
     try:
-        products_db = await xml_parser.search_products(query) 
+        products_db = await product_service.search_products(query) 
         return products_db
     except Exception as e:
         logger.error(f"Помилка в API /search: {e}", exc_info=True)
@@ -319,7 +319,7 @@ async def api_search_products(query: str = Query(..., min_length=2, max_length=5
 async def api_get_product_by_sku(sku: str):
     # ... (код без змін) ...
     try:
-        product = await xml_parser.get_product_by_sku(sku)
+        product = await product_service.get_product_by_sku(sku)
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
         return product 

@@ -25,10 +25,9 @@ from database.models import (
 from services.mydrop_api import MyDropAPIClient, MyDropAPIError
 # Перевикористовуємо вже наявну (production) логіку націнки з PriceRule,
 # щоб товари з API і товари зі старого XML рахувались за ОДНАКОВИМИ
-# правилами. Це створює залежність mydrop_sync.py -> xml_parser.py:
-# якщо xml_parser.py видалятимуть повністю, `calculate_final_price`
-# треба спершу перенести в окремий модуль (напр. core/pricing_rules.py).
-from services.xml_parser import calculate_final_price
+# правилами. services/product_service.py не залежить від джерела даних
+# (XML чи MyDrop JSON) — це чистий DB-read/pricing модуль.
+from services.product_service import calculate_final_price
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +69,8 @@ async def _get_or_create_options(
     session: AsyncSession, product_id: int, options_map: Dict[str, Set[str]]
 ) -> Dict[Tuple[str, str], int]:
     """
-    Upsert ProductOption + ProductOptionValue (той самий підхід, що вже
-    використовується в services/xml_parser.py для XML-товарів).
+    Upsert ProductOption + ProductOptionValue (той самий підхід, що
+    раніше використовувався в services/xml_parser.py для XML-товарів).
     """
     value_ids: Dict[Tuple[str, str], int] = {}
     for option_name, values in options_map.items():

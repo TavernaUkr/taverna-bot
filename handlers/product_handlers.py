@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from urllib.parse import unquote
 
 # Наші нові імпорти
-from services import xml_parser, cart_service
+from services import product_service, cart_service
 from database.models import Product # Імпортуємо модель
 from fsm.order_states import OrderFSM
 from keyboards.inline_keyboards import (
@@ -26,7 +26,7 @@ async def _show_product_card(message: Message, sku: str, state: FSMContext, back
     """
     Універсальна функція для пошуку товару в БД та відображення картки.
     """
-    product: Optional[Product] = await xml_parser.get_product_by_sku(sku)
+    product: Optional[Product] = await product_service.get_product_by_sku(sku)
     
     if not product:
         await message.answer(f"На жаль, товар з артикулом <code>{sku}</code> не знайдено.")

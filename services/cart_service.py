@@ -8,7 +8,7 @@ from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
 from config_reader import config
-from services import xml_parser 
+from services import product_service
 from database.models import ProductVariant, ProductOptionValue, ProductOption
 from database.db import AsyncSessionLocal
 
@@ -41,7 +41,7 @@ async def add_item_to_cart(user_id: int, variant_offer_id: str, quantity: int) -
     key = _get_cart_key(user_id)
     
     # 1. Отримуємо актуальні дані про товар з БД (включаючи продукт та постачальника)
-    variant: Optional[ProductVariant] = await xml_parser.get_variant_by_offer_id(variant_offer_id)
+    variant: Optional[ProductVariant] = await product_service.get_variant_by_offer_id(variant_offer_id)
     
     if not variant or not variant.product or not variant.product.supplier:
         logger.warning(f"Не вдалося додати в кошик: варіант {variant_offer_id} не знайдено в БД.")
@@ -65,7 +65,7 @@ async def add_item_to_cart(user_id: int, variant_offer_id: str, quantity: int) -
         return False, {"message": f"Недостатньо товару (макс: {variant.quantity})"}
 
     # 3. Формуємо гнучкий опис опцій
-    full_variant: Optional[ProductVariant] = await xml_parser.get_variant_with_options(variant.id)
+    full_variant: Optional[ProductVariant] = await product_service.get_variant_with_options(variant.id)
     options_text = "N/A"
     if full_variant and full_variant.option_values:
         options_text = ", ".join(

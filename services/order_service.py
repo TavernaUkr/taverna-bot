@@ -16,7 +16,7 @@ from database.models import (
     Order, OrderItem, Channel, Supplier, ProductVariant,
     OrderStatus, PaymentStatus, PayoutMethod, OrderItemStatus
 )
-from services import mydrop_service, gdrive_service, notification_service, xml_parser, delivery_service
+from services import mydrop_service, gdrive_service, notification_service, delivery_service
 from config_reader import config
 
 logger = logging.getLogger(__name__)
