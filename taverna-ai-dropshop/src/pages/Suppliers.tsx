@@ -162,7 +162,7 @@ const Suppliers = () => {
         onFavoritesClick={() => setIsWishlistOpen(true)}
       />
       
-      <main className="px-4 py-4 pb-28">
+      <main className="px-4 pt-3 pb-28">
         <div className="flex items-center gap-2 mb-4">
           <Store className="h-5 w-5 text-primary" />
           <h1 className="text-xl font-bold text-foreground">Постачальники</h1>

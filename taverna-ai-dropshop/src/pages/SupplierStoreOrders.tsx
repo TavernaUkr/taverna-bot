@@ -1,20 +1,22 @@
 import { useState, useEffect } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, Package, MessageSquare, Bot, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { supabase } from "@/integrations/supabase/client";
 import { useTelegramAuth } from "@/hooks/useTelegramAuth";
 import { SupplierOrders } from "@/components/supplier/SupplierOrders";
+import { ManagerShopChats } from "@/components/manager/ManagerShopChats";
 import { hapticSelection } from "@/lib/haptics";
 
 export default function SupplierStoreOrders() {
   const navigate = useNavigate();
   const { supplierId: paramSupplierId } = useParams<{ supplierId?: string }>();
   const { profile } = useTelegramAuth();
+  const [searchParams] = useSearchParams();
   const [supplierId, setSupplierId] = useState<string | null>(paramSupplierId || null);
   const [isLoading, setIsLoading] = useState(!paramSupplierId);
-  const [activeTab, setActiveTab] = useState("orders");
+  const [activeTab, setActiveTab] = useState(searchParams.get("tab") === "chat" ? "chat" : "orders");
 
   useEffect(() => {
     if (paramSupplierId) {
@@ -100,25 +102,7 @@ export default function SupplierStoreOrders() {
           </TabsContent>
 
           <TabsContent value="chat" className="mt-4">
-            <div className="text-center py-8 space-y-4">
-              <div className="w-16 h-16 rounded-full bg-emerald-500/10 flex items-center justify-center mx-auto">
-                <Bot className="h-8 w-8 text-emerald-500" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-foreground">AI-асистент Taverna</h3>
-                <p className="text-sm text-muted-foreground mt-1">
-                  Чат-бот на базі Gemini AI допомагає вам спілкуватись з клієнтами через анонімний Міст.
-                  Клієнти пишуть через бота — ви відповідаєте тут або в Telegram.
-                </p>
-              </div>
-              <Button 
-                onClick={() => { hapticSelection(); navigate("/support"); }}
-                className="bg-emerald-500 hover:bg-emerald-600"
-              >
-                <MessageSquare className="h-4 w-4 mr-2" />
-                Відкрити чати підтримки
-              </Button>
-            </div>
+            <ManagerShopChats lockedSupplierId={effectiveSupplierId === "demo" ? undefined : effectiveSupplierId} />
           </TabsContent>
         </Tabs>
       </div>

@@ -77,7 +77,7 @@ export const DevRoleSwitcher = ({ currentRole, onRoleChange }: DevRoleSwitcherPr
   }
 
   return (
-    <div className="fixed bottom-24 right-4 z-50 bg-card/95 backdrop-blur-sm rounded-xl shadow-xl border border-destructive/30 p-4 min-w-[240px]">
+    <div className="fixed bottom-24 right-4 z-[80] bg-card rounded-xl shadow-xl border border-destructive/30 p-4 min-w-[240px]">
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2">
           <Shield className="h-4 w-4 text-destructive" />
@@ -106,7 +106,7 @@ export const DevRoleSwitcher = ({ currentRole, onRoleChange }: DevRoleSwitcherPr
           <SelectTrigger className="w-full h-9 text-sm">
             <SelectValue placeholder="Обрати роль" />
           </SelectTrigger>
-          <SelectContent>
+          <SelectContent className="z-[120]">
             <SelectItem value="guest">
               <div className="flex flex-col">
                 <span>👤 Гість</span>

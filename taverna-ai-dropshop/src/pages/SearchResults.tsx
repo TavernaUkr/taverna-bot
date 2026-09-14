@@ -1,14 +1,30 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { 
   ArrowLeft, Search, SlidersHorizontal, X, ChevronDown, ChevronUp, 
-  Loader2, Package, Filter
+  Loader2, Package, Filter, Clapperboard
 } from "lucide-react";
 import { ProductCard } from "@/components/ProductCard";
+import { ProductFeedView } from "@/components/catalog/ProductFeedView";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 import { useCartContext } from "@/contexts/CartContext";
-import { fetchBackendProducts, BackendApiError, type BackendProductVariant, type BackendProductOption } from "@/lib/backendApi";
+import { fetchBackendProducts, fetchBackendCategories, fetchBackendFilters, BackendApiError, type BackendProductVariant, type BackendProductOption, type BackendFilterAttribute, type BackendCategorySub } from "@/lib/backendApi";
 import { mapBackendProductToUi, buildCategoriesFromProducts } from "@/hooks/useProducts";
+import {
+  PimFilterPills,
+  FALLBACK_SEASONS,
+  FALLBACK_NICHES,
+  mergeUniqueLabels,
+} from "@/components/catalog/PimFilterPills";
+import {
+  displayNameForSubcategories,
+  encodeSubCategoryParam,
+  groupSubcategories,
+  isGroupSelected,
+  matchSmartGroup,
+  readSubCategoryParams,
+  type SmartSubcategoryGroup,
+} from "@/utils/categoryParser";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -37,6 +53,12 @@ interface Product {
   original_price?: number;
   images?: string[];
   category?: { id: string; name: string; slug: string } | null;
+  sub_category?: string;
+  season?: string;
+  target_niche?: string;
+  gender?: string;
+  supplier_name?: string;
+  attributes?: Record<string, string>;
   brand?: string;
   model?: string;
   sizes?: string[];
@@ -60,6 +82,11 @@ interface Category {
 
 interface FilterState {
   categories: string[];
+  subCategories: string[];
+  niches: string[];
+  seasons: string[];
+  genders: string[];
+  attributes: Record<string, string[]>;
   minPrice: number;
   maxPrice: number;
   colors: string[];
@@ -71,6 +98,11 @@ interface FilterState {
 
 const defaultFilters: FilterState = {
   categories: [],
+  subCategories: [],
+  niches: [],
+  seasons: [],
+  genders: [],
+  attributes: {},
   minPrice: 0,
   maxPrice: 50000,
   colors: [],
@@ -85,6 +117,27 @@ export default function SearchResults() {
   const [searchParams, setSearchParams] = useSearchParams();
   const query = searchParams.get("q") || "";
   const showAll = searchParams.get("all") === "true";
+  const urlCategory = searchParams.get("category") || "";
+  const searchString = searchParams.toString();
+  const urlSubCategories = useMemo(
+    () => readSubCategoryParams(new URLSearchParams(searchString)),
+    [searchString]
+  );
+  const urlSubCategoryLabel = useMemo(
+    () => displayNameForSubcategories(urlSubCategories),
+    [urlSubCategories]
+  );
+  const nicheParam = searchParams.get("target_niche") || searchParams.get("niche") || "";
+  const seasonParam = searchParams.get("season") || "";
+  const urlNiches = useMemo(
+    () => nicheParam.split(",").map((item) => item.trim()).filter(Boolean),
+    [nicheParam]
+  );
+  const urlSeasons = useMemo(
+    () => seasonParam.split(",").map((item) => item.trim()).filter(Boolean),
+    [seasonParam]
+  );
+  const urlGender = searchParams.get("gender") || "";
   
   const [searchInput, setSearchInput] = useState(query);
   // Повний немодифікований каталог з FastAPI-бекенду (без фільтрів/пошуку).
@@ -92,14 +145,36 @@ export default function SearchResults() {
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [filters, setFilters] = useState<FilterState>(defaultFilters);
+  const [filters, setFilters] = useState<FilterState>(() => ({
+    ...defaultFilters,
+    niches: urlNiches,
+    seasons: urlSeasons,
+    subCategories: urlSubCategories,
+  }));
   const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const [isFeedOpen, setIsFeedOpen] = useState(false);
+
+  const urlSubKey = urlSubCategories.join("|");
+  useEffect(() => {
+    setFilters((prev) => {
+      const same =
+        prev.subCategories.length === urlSubCategories.length &&
+        prev.subCategories.every((name, index) => name === urlSubCategories[index]);
+      if (same) return prev;
+      return { ...prev, subCategories: urlSubCategories };
+    });
+  }, [urlSubKey]);
   
   // Available filter options extracted from products
   const [availableColors, setAvailableColors] = useState<string[]>([]);
   const [availableSizes, setAvailableSizes] = useState<string[]>([]);
   const [availableBrands, setAvailableBrands] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [availableNiches, setAvailableNiches] = useState<string[]>(FALLBACK_NICHES);
+  const [availableSeasons, setAvailableSeasons] = useState<string[]>(FALLBACK_SEASONS);
+  const [availableGenders, setAvailableGenders] = useState<string[]>([]);
+  const [availableAttributes, setAvailableAttributes] = useState<BackendFilterAttribute[]>([]);
+  const [availableSubCategories, setAvailableSubCategories] = useState<BackendCategorySub[]>([]);
   const [priceRange, setPriceRange] = useState({ min: 0, max: 50000 });
   
   const { isFavorite, toggleFavorite } = useFavoritesContext();
@@ -118,7 +193,23 @@ export default function SearchResults() {
           .filter((p) => p.in_stock);
 
         setAllProducts(mapped);
-        setCategories(buildCategoriesFromProducts(mapped));
+        try {
+          const backendCategories = await fetchBackendCategories();
+          if (backendCategories.length > 0) {
+            setCategories(
+              backendCategories.map((cat) => ({
+                id: cat.name,
+                name: cat.name,
+                slug: cat.name,
+                product_count: cat.count,
+              }))
+            );
+          } else {
+            setCategories(buildCategoriesFromProducts(mapped));
+          }
+        } catch {
+          setCategories(buildCategoriesFromProducts(mapped));
+        }
 
         // Діапазон цін по всьому каталогу (до фільтрів)
         let minP = Infinity, maxP = 0;
@@ -141,6 +232,49 @@ export default function SearchResults() {
     loadCatalog();
   }, []);
 
+  // Динамічні лічильники підкатегорій з бекенду під вибрані фільтри.
+  useEffect(() => {
+    const loadPimFilters = async () => {
+      try {
+        const mainCategory = Array.from(
+          new Set([urlCategory, ...filters.categories].filter(Boolean))
+        );
+        const niches = Array.from(
+          new Set([...urlNiches, ...filters.niches].filter(Boolean))
+        );
+        const seasons = Array.from(
+          new Set([...urlSeasons, ...filters.seasons].filter(Boolean))
+        );
+        const genders = Array.from(
+          new Set([urlGender, ...filters.genders].filter(Boolean))
+        );
+        const pimFilters = await fetchBackendFilters({
+          main_category: mainCategory,
+          niche: niches,
+          season: seasons,
+          gender: genders,
+        });
+        setAvailableNiches(mergeUniqueLabels(pimFilters.target_niche || [], FALLBACK_NICHES));
+        setAvailableSeasons(mergeUniqueLabels(pimFilters.season || [], FALLBACK_SEASONS));
+        if (pimFilters.gender?.length) setAvailableGenders(pimFilters.gender);
+        if (pimFilters.attributes?.length) setAvailableAttributes(pimFilters.attributes);
+        setAvailableSubCategories(pimFilters.sub_categories || []);
+      } catch {
+        // fallback нижче з товарів
+      }
+    };
+    loadPimFilters();
+  }, [
+    urlCategory,
+    urlNiches,
+    urlSeasons,
+    urlGender,
+    filters.categories,
+    filters.niches,
+    filters.seasons,
+    filters.genders,
+  ]);
+
   // Клієнтська фільтрація/пошук по вже завантаженому каталогу
   useEffect(() => {
     let filtered = allProducts;
@@ -154,9 +288,48 @@ export default function SearchResults() {
       );
     }
 
-    // Категорії
+    // Категорії з URL (AI текстові назви) + чекбокси фільтрів
+    if (urlCategory) {
+      filtered = filtered.filter(
+        (p) => p.category?.id === urlCategory || p.category?.name === urlCategory
+      );
+    }
+    const selectedSubs = Array.from(
+      new Set(
+        [...urlSubCategories, ...filters.subCategories]
+          .map((name) => name.trim())
+          .filter(Boolean)
+      )
+    );
+    if (selectedSubs.length > 0) {
+      const selectedKeys = new Set(selectedSubs.map((name) => name.toLowerCase()));
+      filtered = filtered.filter(
+        (p) => p.sub_category && selectedKeys.has(p.sub_category.toLowerCase())
+      );
+    }
+    if (urlGender) {
+      filtered = filtered.filter((p) => p.gender === urlGender);
+    }
     if (filters.categories.length > 0) {
       filtered = filtered.filter((p) => p.category && filters.categories.includes(p.category.id));
+    }
+    if (filters.niches.length > 0) {
+      filtered = filtered.filter((p) => p.target_niche && filters.niches.includes(p.target_niche));
+    }
+    if (filters.seasons.length > 0) {
+      filtered = filtered.filter((p) => p.season && filters.seasons.includes(p.season));
+    }
+    if (filters.genders.length > 0) {
+      filtered = filtered.filter((p) => p.gender && filters.genders.includes(p.gender));
+    }
+    const attrEntries = Object.entries(filters.attributes).filter(([, values]) => values.length > 0);
+    if (attrEntries.length > 0) {
+      filtered = filtered.filter((p) =>
+        attrEntries.every(([key, values]) => {
+          const productValue = p.attributes?.[key];
+          return !!productValue && values.includes(productValue);
+        })
+      );
     }
 
     // Ціна
@@ -200,7 +373,39 @@ export default function SearchResults() {
     setAvailableSizes(Array.from(allSizes).sort());
     setAvailableBrands(Array.from(allBrands).sort());
     setAvailableModels(Array.from(allModels).sort());
-  }, [allProducts, query, showAll, filters, priceRange.max]);
+
+    if (availableNiches.length === 0) {
+      const niches = new Set<string>();
+      allProducts.forEach((p) => { if (p.target_niche) niches.add(p.target_niche); });
+      setAvailableNiches(Array.from(niches).sort());
+    }
+    if (availableSeasons.length === 0) {
+      const seasons = new Set<string>();
+      allProducts.forEach((p) => { if (p.season) seasons.add(p.season); });
+      setAvailableSeasons(Array.from(seasons).sort());
+    }
+    if (availableGenders.length === 0) {
+      const genders = new Set<string>();
+      allProducts.forEach((p) => { if (p.gender) genders.add(p.gender); });
+      setAvailableGenders(Array.from(genders).sort());
+    }
+    if (availableAttributes.length === 0) {
+      const attrMap = new Map<string, Set<string>>();
+      allProducts.forEach((p) => {
+        Object.entries(p.attributes || {}).forEach(([key, value]) => {
+          if (!key || !value) return;
+          if (!attrMap.has(key)) attrMap.set(key, new Set());
+          attrMap.get(key)!.add(value);
+        });
+      });
+      setAvailableAttributes(
+        Array.from(attrMap.entries()).map(([name, values]) => ({
+          name,
+          values: Array.from(values).sort(),
+        }))
+      );
+    }
+  }, [allProducts, query, showAll, filters, priceRange.max, urlCategory, urlSubCategories, urlGender, availableNiches.length, availableSeasons.length, availableGenders.length, availableAttributes.length]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -238,6 +443,64 @@ export default function SearchResults() {
     );
   };
 
+  const groupedSubCategories = useMemo(() => {
+    if (availableSubCategories.length > 0) {
+      return groupSubcategories(availableSubCategories);
+    }
+    const counts = new Map<string, number>();
+    allProducts.forEach((product) => {
+      const name = product.sub_category?.trim();
+      if (!name) return;
+      if (urlCategory && product.category?.id !== urlCategory && product.category?.name !== urlCategory) {
+        return;
+      }
+      counts.set(name, (counts.get(name) || 0) + 1);
+    });
+    return groupSubcategories(
+      Array.from(counts.entries()).map(([name, count]) => ({ name, count }))
+    );
+  }, [availableSubCategories, allProducts, urlCategory]);
+
+  const selectedSubGroups = useMemo(
+    () => groupSubcategories(filters.subCategories.map((name) => ({ name, count: 1 }))),
+    [filters.subCategories]
+  );
+
+  const setSubCategoryFilter = (originals: string[]) => {
+    setFilters((prev) => ({ ...prev, subCategories: originals }));
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (originals.length > 0) next.set("sub_category", encodeSubCategoryParam(originals));
+      else next.delete("sub_category");
+      return next;
+    }, { replace: true });
+  };
+
+  const toggleSubcategoryGroup = (group: SmartSubcategoryGroup) => {
+    const selected = filters.subCategories;
+    const allOn = isGroupSelected(group, selected);
+    if (allOn) {
+      setSubCategoryFilter(
+        selected.filter((name) => {
+          if (group.id.startsWith("raw:")) {
+            return name.toLowerCase() !== group.name.toLowerCase();
+          }
+          return matchSmartGroup(name)?.id !== group.id;
+        })
+      );
+    } else {
+      const seen = new Set(selected.map((name) => name.toLowerCase()));
+      const merged = [...selected];
+      for (const name of group.originals) {
+        if (!seen.has(name.toLowerCase())) {
+          seen.add(name.toLowerCase());
+          merged.push(name);
+        }
+      }
+      setSubCategoryFilter(merged);
+    }
+  };
+
   const toggleFilter = (key: keyof FilterState, value: string) => {
     setFilters((prev) => {
       const arr = prev[key] as string[];
@@ -248,12 +511,43 @@ export default function SearchResults() {
     });
   };
 
-  const clearFilters = () => {
-    setFilters({ ...defaultFilters, maxPrice: priceRange.max });
+  const toggleAttribute = (key: string, value: string) => {
+    setFilters((prev) => {
+      const current = prev.attributes[key] || [];
+      const next = current.includes(value)
+        ? current.filter((item) => item !== value)
+        : [...current, value];
+      const attributes = { ...prev.attributes };
+      if (next.length === 0) {
+        delete attributes[key];
+      } else {
+        attributes[key] = next;
+      }
+      return { ...prev, attributes };
+    });
   };
 
+  const clearFilters = () => {
+    setFilters({ ...defaultFilters, maxPrice: priceRange.max });
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.delete("sub_category");
+      return next;
+    }, { replace: true });
+  };
+
+  const attributeFiltersCount = Object.values(filters.attributes).reduce(
+    (sum, values) => sum + values.length,
+    0
+  );
+
   const activeFiltersCount = 
-    filters.categories.length + 
+    filters.categories.length +
+    selectedSubGroups.length +
+    filters.niches.length +
+    filters.seasons.length +
+    filters.genders.length +
+    attributeFiltersCount +
     filters.colors.length + 
     filters.sizes.length + 
     filters.brands.length + 
@@ -282,7 +576,134 @@ export default function SearchResults() {
         </div>
       </div>
 
-      <Accordion type="multiple" defaultValue={["categories"]} className="w-full">
+      <Accordion type="multiple" defaultValue={["niches", "subcategories", "categories"]} className="w-full">
+        {availableNiches.length > 0 && (
+          <AccordionItem value="niches">
+            <AccordionTrigger className="text-sm font-medium">
+              Ніша ({availableNiches.length})
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="flex flex-wrap gap-2">
+                {availableNiches.map((niche) => (
+                  <button
+                    key={niche}
+                    onClick={() => toggleFilter("niches", niche)}
+                    className={cn(
+                      "px-3 py-1.5 rounded-full text-xs border transition-colors",
+                      filters.niches.includes(niche)
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "bg-muted border-border hover:border-primary"
+                    )}
+                  >
+                    {niche}
+                  </button>
+                ))}
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+        )}
+
+        {availableSeasons.length > 0 && (
+          <AccordionItem value="seasons">
+            <AccordionTrigger className="text-sm font-medium">
+              Сезон ({availableSeasons.length})
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="flex flex-wrap gap-2">
+                {availableSeasons.map((season) => (
+                  <button
+                    key={season}
+                    onClick={() => toggleFilter("seasons", season)}
+                    className={cn(
+                      "px-3 py-1.5 rounded-full text-xs border transition-colors",
+                      filters.seasons.includes(season)
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "bg-muted border-border hover:border-primary"
+                    )}
+                  >
+                    {season}
+                  </button>
+                ))}
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+        )}
+
+        {availableGenders.length > 0 && (
+          <AccordionItem value="genders">
+            <AccordionTrigger className="text-sm font-medium">
+              Стать ({availableGenders.length})
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="flex flex-wrap gap-2">
+                {availableGenders.map((gender) => (
+                  <button
+                    key={gender}
+                    onClick={() => toggleFilter("genders", gender)}
+                    className={cn(
+                      "px-3 py-1.5 rounded-full text-xs border transition-colors",
+                      filters.genders.includes(gender)
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "bg-muted border-border hover:border-primary"
+                    )}
+                  >
+                    {gender}
+                  </button>
+                ))}
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+        )}
+
+        {groupedSubCategories.length > 0 && (
+          <AccordionItem value="subcategories">
+            <AccordionTrigger className="text-sm font-medium">
+              Підкатегорії ({groupedSubCategories.length})
+            </AccordionTrigger>
+            <AccordionContent>
+              <ScrollArea className="h-48">
+                <div className="space-y-2 pr-4">
+                  {groupedSubCategories.map((group) => (
+                    <label key={group.id} className="flex items-center gap-2 cursor-pointer">
+                      <Checkbox
+                        checked={isGroupSelected(group, filters.subCategories)}
+                        onCheckedChange={() => toggleSubcategoryGroup(group)}
+                      />
+                      <span className="text-sm">{group.name}</span>
+                      <span className="text-xs text-muted-foreground ml-auto">
+                        ({group.count})
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </ScrollArea>
+            </AccordionContent>
+          </AccordionItem>
+        )}
+
+        {availableAttributes.map((attr) => (
+          <AccordionItem key={attr.name} value={`attr-${attr.name}`}>
+            <AccordionTrigger className="text-sm font-medium">
+              {attr.name} ({attr.values.length})
+            </AccordionTrigger>
+            <AccordionContent>
+              <ScrollArea className="h-40">
+                <div className="space-y-2 pr-4">
+                  {attr.values.map((value) => (
+                    <label key={value} className="flex items-center gap-2 cursor-pointer">
+                      <Checkbox
+                        checked={(filters.attributes[attr.name] || []).includes(value)}
+                        onCheckedChange={() => toggleAttribute(attr.name, value)}
+                      />
+                      <span className="text-sm">{value}</span>
+                    </label>
+                  ))}
+                </div>
+              </ScrollArea>
+            </AccordionContent>
+          </AccordionItem>
+        ))}
+
         {/* Categories */}
         {categories.length > 0 && (
           <AccordionItem value="categories">
@@ -422,19 +843,19 @@ export default function SearchResults() {
   );
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background w-full max-w-[100vw] overflow-x-hidden">
       {/* Header */}
-      <div className="sticky top-0 z-40 bg-card border-b border-border">
-        <form onSubmit={handleSearch} className="flex items-center gap-3 p-4">
+      <div className="sticky top-0 z-40 bg-card border-b border-border w-full max-w-[100vw] overflow-x-hidden">
+        <form onSubmit={handleSearch} className="flex items-center gap-2 p-3 min-w-0">
           <button
             type="button"
             onClick={() => navigate(-1)}
-            className="w-10 h-10 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+            className="w-10 h-10 shrink-0 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
           >
             <ArrowLeft className="h-5 w-5" />
           </button>
 
-          <div className="relative flex-1">
+          <div className="relative flex-1 min-w-0">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
             <input
               type="text"
@@ -460,13 +881,34 @@ export default function SearchResults() {
             )}
           </div>
 
+          <button
+            type="button"
+            onClick={() => {
+              if (products.length === 0) {
+                toast.error("Немає товарів для стрічки");
+                return;
+              }
+              setIsFeedOpen(true);
+            }}
+            className={cn(
+              "w-10 h-10 rounded-xl flex items-center justify-center transition-all shrink-0",
+              products.length > 0
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-muted"
+            )}
+            title="Стрічка товарів"
+            aria-label="Стрічка товарів"
+          >
+            <Clapperboard className="h-5 w-5" />
+          </button>
+
           {/* Mobile Filter Button */}
           <Sheet open={isFilterOpen} onOpenChange={setIsFilterOpen}>
             <SheetTrigger asChild>
               <button
                 type="button"
                 className={cn(
-                  "relative w-10 h-10 rounded-xl flex items-center justify-center transition-all",
+                  "relative w-10 h-10 shrink-0 rounded-xl flex items-center justify-center transition-all",
                   activeFiltersCount > 0
                     ? "bg-primary text-primary-foreground"
                     : "text-muted-foreground hover:text-foreground hover:bg-muted"
@@ -497,6 +939,42 @@ export default function SearchResults() {
         {/* Active filters chips */}
         {activeFiltersCount > 0 && (
           <div className="flex flex-wrap gap-2 px-4 pb-3">
+            {[...filters.niches, ...filters.seasons, ...filters.genders].map((value) => (
+              <button
+                key={value}
+                onClick={() => {
+                  if (filters.niches.includes(value)) toggleFilter("niches", value);
+                  else if (filters.seasons.includes(value)) toggleFilter("seasons", value);
+                  else toggleFilter("genders", value);
+                }}
+                className="flex items-center gap-1 px-2 py-1 bg-primary/10 text-primary rounded-full text-xs"
+              >
+                {value}
+                <X className="h-3 w-3" />
+              </button>
+            ))}
+            {Object.entries(filters.attributes).flatMap(([key, values]) =>
+              values.map((value) => (
+                <button
+                  key={`${key}:${value}`}
+                  onClick={() => toggleAttribute(key, value)}
+                  className="flex items-center gap-1 px-2 py-1 bg-primary/10 text-primary rounded-full text-xs"
+                >
+                  {key}: {value}
+                  <X className="h-3 w-3" />
+                </button>
+              ))
+            )}
+            {selectedSubGroups.map((group) => (
+                <button
+                  key={group.id}
+                  onClick={() => toggleSubcategoryGroup(group)}
+                  className="flex items-center gap-1 px-2 py-1 bg-primary/10 text-primary rounded-full text-xs"
+                >
+                  {group.name}
+                  <X className="h-3 w-3" />
+                </button>
+              ))}
             {filters.categories.map((catId) => {
               const cat = categories.find((c) => c.id === catId);
               return cat ? (
@@ -546,15 +1024,58 @@ export default function SearchResults() {
 
       {/* Results */}
       <div className="p-4">
-        <p className="text-sm text-muted-foreground mb-4">
-          {showAll ? (
-            <>Всі товари: {products.length}</>
-          ) : query ? (
-            <>Результати для "{query}": {products.length} товарів</>
-          ) : (
-            <>Товарів: {products.length}</>
-          )}
-        </p>
+        {(urlCategory || urlNiches.length > 0 || urlSubCategories.length > 0) && (
+          <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground mb-3">
+            {urlCategory && <span className="px-2 py-1 rounded-full bg-muted">{urlCategory}</span>}
+            {urlNiches.map((niche) => (
+              <span key={niche} className="px-2 py-1 rounded-full bg-muted">{niche}</span>
+            ))}
+            {urlSubCategoryLabel && (
+              <span className="px-2 py-1 rounded-full bg-primary/10 text-primary">{urlSubCategoryLabel}</span>
+            )}
+          </div>
+        )}
+
+        <div className="mb-4">
+          <PimFilterPills
+            seasons={availableSeasons}
+            niches={availableNiches}
+            selectedSeasons={filters.seasons}
+            selectedNiches={filters.niches}
+            onToggleSeason={(value) => toggleFilter("seasons", value)}
+            onToggleNiche={(value) => toggleFilter("niches", value)}
+            subcategories={availableSubCategories}
+            selectedSubcategories={filters.subCategories}
+            onToggleSubcategoryGroup={toggleSubcategoryGroup}
+          />
+        </div>
+
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <p className="text-sm text-muted-foreground">
+            {showAll ? (
+              <>Всі товари: {products.length}</>
+            ) : query ? (
+              <>Результати для "{query}": {products.length} товарів</>
+            ) : (
+              <>Товарів: {products.length}</>
+            )}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              if (products.length === 0) {
+                toast.error("Немає товарів для стрічки");
+                return;
+              }
+              setIsFeedOpen(true);
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-primary text-primary-foreground disabled:opacity-50"
+            disabled={products.length === 0}
+          >
+            <Clapperboard className="h-3.5 w-3.5" />
+            Стрічка товарів
+          </button>
+        </div>
 
         {isLoading ? (
           <div className="flex items-center justify-center py-20">
@@ -592,6 +1113,7 @@ export default function SearchResults() {
                 colors={product.colors}
                 variants={product.variants}
                 options={product.options}
+                supplierName={product.supplier_name}
                 isFavorite={isFavorite(product.id)}
                 onClick={() => navigate(`/product/${product.id}`)}
                 onAddToCart={(size, color, variantId, quantity) =>
@@ -603,6 +1125,19 @@ export default function SearchResults() {
           </div>
         )}
       </div>
+
+      <ProductFeedView
+        isOpen={isFeedOpen}
+        products={products}
+        isFavorite={isFavorite}
+        onClose={() => setIsFeedOpen(false)}
+        onProductClick={(id) => {
+          setIsFeedOpen(false);
+          navigate(`/product/${id}`);
+        }}
+        onAddToCart={handleAddToCart}
+        onToggleFavorite={handleToggleFavorite}
+      />
     </div>
   );
 }

@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { ShoppingCart, Plus, ArrowRight } from "lucide-react";
+import { Check, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { CloudArrow } from "@/components/header/HintChip";
 
 interface CartBadgeCloudProps {
   cartCount?: number;
@@ -9,62 +9,42 @@ interface CartBadgeCloudProps {
   className?: string;
 }
 
-/**
- * Floating cart cloud under the header cart icon.
- * Mirrors WalletBadgeCloud glassmorphism and animation.
- */
+/** Хмаринка кошика — «+» якщо порожній, галочка якщо товар уже в кошику. */
 export function CartBadgeCloud({
   cartCount = 0,
   onAdd,
   onCheckout,
   className,
 }: CartBadgeCloudProps) {
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    const t = setTimeout(() => setVisible(true), 600);
-    return () => clearTimeout(t);
-  }, []);
-
-  if (!visible) return null;
-
   const isEmpty = cartCount === 0;
-  const label = isEmpty ? "Додати" : "Оформити";
-  const Icon = isEmpty ? Plus : ArrowRight;
+  const label = isEmpty ? "Додати" : "У кошику";
   const tone = isEmpty ? "primary" : "success";
-
   const toneClass = {
-    primary: "bg-primary text-primary-foreground",
-    success: "border border-success/40 bg-card text-success",
+    primary: "bg-primary text-primary-foreground border-primary/40",
+    success: "border-success/40 bg-card text-success",
+  }[tone];
+  const tailClass = {
+    primary: "bg-primary border-primary/40",
+    success: "bg-card border-success/40",
   }[tone];
 
   return (
-    <div
-      className={cn(
-        "absolute top-full right-0 mt-1.5 z-30 flex flex-col items-end animate-cloud-float",
-        className,
-      )}
+    <button
+      type="button"
+      onClick={isEmpty ? onAdd : onCheckout}
+      aria-label={label}
+      className={cn("relative inline-flex items-start justify-center min-h-8 w-8 shrink-0", className)}
     >
-      <button
-        type="button"
-        onClick={isEmpty ? onAdd : onCheckout}
-        aria-label={label}
-        className="relative"
+      <CloudArrow className={tailClass} />
+      <span
+        className={cn(
+          "relative flex items-center justify-center rounded-full border w-8 h-8",
+          "shadow-[0_4px_14px_-6px_hsl(var(--primary)/0.6)] active:scale-95 transition-transform",
+          toneClass,
+        )}
       >
-        {/* Tail pointing up to the cart icon */}
-        <span className="absolute -top-1 right-3 w-3 h-3 rotate-45 rounded-[3px] bg-card/90 border-l border-t border-primary/40" />
-
-        <span
-          className={cn(
-            "relative flex items-center gap-1 rounded-full border border-primary/40 bg-card/90 backdrop-blur px-2.5 py-1 shadow-[0_4px_14px_-6px_hsl(var(--primary)/0.6)] active:scale-95 transition-transform",
-            toneClass,
-          )}
-        >
-          <ShoppingCart className="h-2.5 w-2.5" />
-          <span className="text-[10px] font-bold whitespace-nowrap">{label}</span>
-          <Icon className="h-2.5 w-2.5" />
-        </span>
-      </button>
-    </div>
+        {isEmpty ? <Plus className="h-3.5 w-3.5" strokeWidth={2.5} /> : <Check className="h-3.5 w-3.5" strokeWidth={2.5} />}
+      </span>
+    </button>
   );
 }

@@ -48,6 +48,9 @@ from handlers import (
 )
 from api.products import router as products_router  # Import products router
 from api.orders import router as orders_router  # Checkout з Mini App (POST /api/v1/orders/)
+from api.auth import router as twa_auth_router
+from api.suppliers import router as twa_suppliers_router
+from api.admin_suppliers import router as admin_suppliers_router
 from services.auth_service import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -303,10 +306,28 @@ async def api_get_warehouses(city_ref: str = Query(...)):
     response_model=List[ProductAPI],
     response_model_by_alias=False,  # MiniApp очікує `sku`, а не `supplier_sku`
 )
-async def api_search_products(query: str = Query(..., min_length=2, max_length=50)):
+async def api_search_products(
+    query: str = Query(..., min_length=2, max_length=50),
+    category: Optional[List[str]] = Query(None, description="AI головна категорія"),
+    main_category: Optional[List[str]] = Query(None, description="Аліас category"),
+    sub_category: Optional[List[str]] = Query(None, description="AI підкатегорія"),
+    season: Optional[List[str]] = Query(None, description="Сезон"),
+    target_niche: Optional[List[str]] = Query(None, description="Ніша"),
+    niche: Optional[List[str]] = Query(None, description="Аліас target_niche"),
+    gender: Optional[List[str]] = Query(None, description="Стать"),
+):
     # ... (код без змін) ...
     try:
-        products_db = await product_service.search_products(query) 
+        categories = [*(main_category or []), *(category or [])]
+        niches = [*(niche or []), *(target_niche or [])]
+        products_db = await product_service.search_products(
+            query,
+            category=categories or None,
+            sub_category=sub_category,
+            season=season,
+            target_niche=niches or None,
+            gender=gender,
+        )
         return products_db
     except Exception as e:
         logger.error(f"Помилка в API /search: {e}", exc_info=True)
@@ -424,6 +445,9 @@ async def api_create_cod_order(
 # --- Підключення роутерів (Реєстрація) ---
 app.include_router(payment_router)
 app.include_router(delivery_router)
+app.include_router(twa_auth_router)  # POST /api/v1/auth/telegram
+app.include_router(twa_suppliers_router)  # POST /api/v1/suppliers/register (Mini App)
+app.include_router(admin_suppliers_router)  # GET /api/v1/admin/suppliers/pending
 app.include_router(auth_handlers.router)
 app.include_router(supplier_handlers.router)
 app.include_router(admin_handlers.router)

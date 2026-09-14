@@ -1,8 +1,14 @@
 # services/mydrop_sync.py
 """
-"Smart Sync" — розкладання JSON-каталогу постачальника (MyDrop REST API)
-у наші SQLAlchemy моделі: Product, ProductVariant, ProductOption,
-ProductOptionValue.
+"Smart Sync" — розкладання каталогу постачальника (публічна YML/Prom-
+вигрузка MyDrop, `MyDropAPIClient.get_products`) у наші SQLAlchemy моделі:
+Product, ProductVariant, ProductOption, ProductOptionValue.
+
+[13.09.2026] `MyDropAPIClient.get_products()` тепер читає ПУБЛІЧНУ
+YML-вигрузку постачальника (`Supplier.mydrop_api_key` = публічний ключ
+вигрузки, БЕЗ авторизації), а не приватний JSON-ендпоінт. Формат словників,
+які повертає `get_products()`, залишився ТИМ САМИМ (product dict з
+`sizes[]`) — тож увесь код нижче (групування опцій/варіантів) не змінився.
 
 Тут НЕМАЄ AI-логіки (дублі/категорії тощо) — лише чисте, стійке до помилок
 підключення до API + запис у БД. AI-аналіз буде окремим кроком пізніше.
@@ -12,7 +18,7 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, List, Set, Tuple
 
-from sqlalchemy import select, delete, insert
+from sqlalchemy import case, select, delete, insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,7 +33,7 @@ from services.mydrop_api import MyDropAPIClient, MyDropAPIError
 # щоб товари з API і товари зі старого XML рахувались за ОДНАКОВИМИ
 # правилами. services/product_service.py не залежить від джерела даних
 # (XML чи MyDrop JSON) — це чистий DB-read/pricing модуль.
-from services.product_service import calculate_final_price
+from services.product_service import _load_price_rules, calculate_final_price
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +122,9 @@ async def sync_supplier_products(
     """
     Синхронізує весь каталог постачальника з MyDrop REST API у нашу БД.
 
-    1. Тягне JSON через MyDropAPIClient.get_products(api_key).
+    1. Тягне каталог через MyDropAPIClient.get_products(api_key) — тепер це
+       публічна YML-вигрузка постачальника (`api_key` = публічний ключ
+       вигрузки з `Supplier.mydrop_api_key`, НЕ приватний X-API-KEY).
     2. Кожен товар з MyDrop уже сам містить свої варіації в `sizes[]`
        (на відміну від XML, де варіації доводилось групувати по
        group_id/vendorCode вручну) — тому товар -> Product одразу,
@@ -160,7 +168,18 @@ async def sync_supplier_products(
         )
         return stats
 
-    # --- Крок 2-3: Запис у БД (товар за товаром, стійко до помилок) ---
+    # Один SELECT правил цін у ЦІЙ ЖЕ сесії, ДО будь-якого запису.
+    # Далі calculate_final_price бере правила з кешу (5 хв) — без
+    # другого конекта і без 1149 зайвих SELECT у price_rules.
+    await _load_price_rules(db_session)
+
+    # --- Крок 2-3: Запис у БД (СТРОГО послідовно, товар за товаром).
+    # SQLite не вміє конкурентний запис — жодного asyncio.gather тут немає
+    # і не повинно з'явитись. commit — пакетами по _COMMIT_EVERY товарів,
+    # щоб не тримати write-lock на весь каталог і не смикати диск на кожному.
+    _COMMIT_EVERY = 100
+    pending_in_batch = 0
+
     for raw_product in products:
         try:
             if not isinstance(raw_product, dict):
@@ -202,10 +221,21 @@ async def sync_supplier_products(
                 .on_conflict_do_update(
                     index_elements=["supplier_id", "supplier_sku"],
                     set_={
-                        "name": title,
-                        "description": description,
+                        # Якщо товар уже пройшов Gemini — не затираємо SEO-назву,
+                        # опис і смарт-категорію сирим імпортом з MyDrop.
+                        "name": case(
+                            (Product.is_ai_processed.is_(True), Product.name),
+                            else_=title,
+                        ),
+                        "description": case(
+                            (Product.is_ai_processed.is_(True), Product.description),
+                            else_=description,
+                        ),
                         "pictures": pictures,
-                        "category": category_tag,
+                        "category": case(
+                            (Product.is_ai_processed.is_(True), Product.category),
+                            else_=category_tag,
+                        ),
                         "updated_at": func.now(),
                     },
                 )
@@ -253,7 +283,9 @@ async def sync_supplier_products(
                 except (TypeError, ValueError):
                     base_price = 0.0
 
-                final_price = await calculate_final_price(str(base_price), category_tag, supplier_id)
+                final_price = await calculate_final_price(
+                    str(base_price), category_tag, supplier_id, db=db_session
+                )
 
                 try:
                     qty = int(size.get("amount", 0) or 0)
@@ -317,6 +349,15 @@ async def sync_supplier_products(
                         )
                     )
 
+            pending_in_batch += 1
+            if pending_in_batch >= _COMMIT_EVERY:
+                await db_session.commit()
+                logger.info(
+                    "sync_supplier_products: проміжний commit (supplier #%s) — %s товарів записано.",
+                    supplier_id, stats["products"],
+                )
+                pending_in_batch = 0
+
         except Exception as e:
             stats["errors"] += 1
             logger.error(
@@ -326,9 +367,10 @@ async def sync_supplier_products(
             )
             continue
 
-    # --- Крок 5: Commit (одна транзакція на весь каталог постачальника) ---
+    # --- Крок 5: Фінальний commit хвоста пакета (менше 100 товарів) ---
     try:
-        await db_session.commit()
+        if pending_in_batch:
+            await db_session.commit()
         logger.info(
             "sync_supplier_products: постачальник #%s синхронізовано. products=%s, variants=%s, errors=%s",
             supplier_id, stats["products"], stats["variants"], stats["errors"],

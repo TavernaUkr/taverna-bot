@@ -44,6 +44,7 @@ export function SystemKillSwitch() {
       )}
 
       <Card
+        id="danger-zone"
         className={cn(
           "border-destructive/40 bg-destructive/5 backdrop-blur-md transition-colors",
           maintenance && "border-destructive bg-destructive/10",

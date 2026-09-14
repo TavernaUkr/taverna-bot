@@ -36,7 +36,7 @@ export const CategoryCard = ({
         <div className="w-9 h-9 rounded-lg bg-white/20 flex items-center justify-center mb-2">
           <Icon className="h-4.5 w-4.5" />
         </div>
-        <h3 className="font-semibold text-sm">{name}</h3>
+        <h3 className="font-semibold text-sm truncate">{name}</h3>
         {count !== undefined && (
           <p className="text-[11px] opacity-75 mt-0.5">{count} товарів</p>
         )}

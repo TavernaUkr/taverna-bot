@@ -4,8 +4,8 @@ import { DevRoleSwitcher } from "@/components/profile/DevRoleSwitcher";
 type TestRole = "guest" | "customer" | "supplier" | "shop_manager" | "moderator" | "admin";
 
 /**
- * Floating "Жук" button available on every preview/dev page.
- * Completely disabled in production builds.
+ * Floating "Жук" — біля пункту «Профіль» у нижньому меню, на кожному екрані.
+ * У production-збірці вимкнений.
  */
 export const FloatingDevRoleSwitcher = () => {
   if (import.meta.env.PROD) return null;
@@ -16,12 +16,16 @@ export const FloatingDevRoleSwitcher = () => {
   if (!canUseDevRoleSwitcher) return null;
 
   return (
-    <div className="fixed top-16 right-3 z-[60] scale-90 origin-top-right opacity-70 hover:opacity-100 focus-within:opacity-100 active:opacity-100 transition-opacity">
-      <DevRoleSwitcher
-        currentRole={effectiveRole as TestRole}
-        onRoleChange={(r) => setDevRoleOverride(r as TestRole)}
-        profileId={realProfile?.id}
-      />
+    <div className="pointer-events-none fixed inset-x-0 bottom-[calc(4.15rem+env(safe-area-inset-bottom,0px))] z-[56]">
+      <div className="relative mx-auto w-full max-w-md">
+        <div className="pointer-events-auto absolute right-0.5 bottom-0">
+          <DevRoleSwitcher
+            currentRole={effectiveRole as TestRole}
+            onRoleChange={(r) => setDevRoleOverride(r as TestRole)}
+            profileId={realProfile?.id}
+          />
+        </div>
+      </div>
     </div>
   );
 };

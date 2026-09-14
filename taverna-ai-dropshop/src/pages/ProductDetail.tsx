@@ -103,6 +103,7 @@ function mapBackendProductToDetail(bp: BackendProduct): Product {
   const colorOption = options.find((o) => /колір|цвет|color/i.test(o.name));
 
   const categoryTag = bp.category?.trim() || undefined;
+  const subCategory = bp.sub_category?.trim() || undefined;
 
   return {
     id: String(bp.id),
@@ -115,7 +116,16 @@ function mapBackendProductToDetail(bp: BackendProduct): Product {
     vendor_code: bp.sku,
     in_stock: availableVariants.length > 0,
     stock_quantity: totalStock,
-    category: categoryTag ? { id: categoryTag, name: categoryTag, slug: categoryTag } : undefined,
+    category: categoryTag
+      ? {
+          id: subCategory || categoryTag,
+          name: subCategory || categoryTag,
+          slug: subCategory || categoryTag,
+          parent: subCategory
+            ? { id: categoryTag, name: categoryTag, slug: categoryTag }
+            : undefined,
+        }
+      : undefined,
     variants,
     options,
   };

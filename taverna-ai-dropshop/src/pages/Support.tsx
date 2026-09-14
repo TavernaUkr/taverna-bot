@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useEffect } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { 
   HelpCircle, 
   MessageCircle, 
@@ -113,6 +113,7 @@ type ModalView = "main" | "complaints" | "ratings";
 
 const Support = () => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { isAuthenticated } = useTelegramAuthContext();
   const { getOrCreateTicket, isLoading: ticketLoading } = useSupportTickets();
   const [activeTab, setActiveTab] = useState("support");
@@ -122,6 +123,15 @@ const Support = () => {
   const [isSupportModalOpen, setIsSupportModalOpen] = useState(false);
   const [modalView, setModalView] = useState<ModalView>("main");
   const [isAppRatingOpen, setIsAppRatingOpen] = useState(false);
+
+  useEffect(() => {
+    if (searchParams.get("contact") !== "1") return;
+    setModalView("main");
+    setIsSupportModalOpen(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete("contact");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
   
   const { items: cartItems, totalItems, updateQuantity, removeItem } = useCartContext();
   const { totalFavorites } = useFavoritesContext();
@@ -203,7 +213,7 @@ const Support = () => {
         onPromoClick={() => navigate("/promos")}
       />
       
-      <main className="px-4 py-4 pb-28">
+      <main className="px-4 pt-3 pb-28">
         <div className="flex items-center gap-2 mb-4">
           <HelpCircle className="h-5 w-5 text-primary" />
           <h1 className="text-xl font-bold text-foreground">Підтримка</h1>

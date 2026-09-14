@@ -56,7 +56,8 @@ from handlers import (
     # cart_handlers,    # <-- ВИМКНЕНО (Логіка в `user_commands`)
     feedback_handler,
     # admin_handlers, # (Не потрібен для bot.py)
-    supplier_actions_handler 
+    supplier_actions_handler,
+    partner_moderation_handler,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,7 @@ async def main():
     # dp.include_router(cart_handlers.router)    # <-- ВИМКНЕНО
     dp.include_router(feedback_handler.router)
     dp.include_router(supplier_actions_handler.router)
+    dp.include_router(partner_moderation_handler.router)
 
     # Встановлюємо команди та кнопку меню
     await set_main_menu(bot)
@@ -106,6 +108,7 @@ async def main():
     asyncio.create_task(scheduler_service.start_scheduler(bot))
 
     try:
+        await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     finally:
         await dp.fsm.storage.close()

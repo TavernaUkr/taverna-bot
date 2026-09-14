@@ -1,4 +1,4 @@
-import { ShoppingCart, Heart, Package, Star, TrendingUp, Sparkles } from "lucide-react";
+import { ShoppingCart, Heart, Package, Star, TrendingUp, Store } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { LowStockBadge } from "./product/LowStockBadge";
 import { VerifiedBadge } from "./ui/verified-badge";
@@ -31,6 +31,7 @@ interface ProductCardProps {
   isFavorite?: boolean;
   isBoosted?: boolean;
   viewsCount?: number;
+  supplierName?: string;
   supplierRating?: number;
   supplierVerified?: boolean;
   aiTags?: string[];
@@ -90,6 +91,7 @@ export const ProductCard = ({
   isFavorite = false,
   isBoosted = false,
   viewsCount,
+  supplierName,
   supplierRating,
   supplierVerified = false,
   aiTags,
@@ -250,9 +252,35 @@ export const ProductCard = ({
 
       {/* Info */}
       <div className="p-3">
+        {supplierName && (
+          <p className="flex items-center gap-1 text-[10px] text-muted-foreground mb-1 truncate">
+            <Store className="h-3 w-3 shrink-0" />
+            <span className="truncate">{supplierName}</span>
+          </p>
+        )}
+
         <h3 className="text-[13px] font-medium text-card-foreground line-clamp-2 min-h-[36px] leading-snug">
           {name}
         </h3>
+
+        <div className="mt-1.5 flex items-center gap-1 flex-wrap">
+          <span
+            className={cn(
+              "inline-flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded-full",
+              inStock
+                ? "bg-emerald-500/15 text-emerald-600"
+                : "bg-muted text-muted-foreground"
+            )}
+          >
+            <Package className="h-2.5 w-2.5" />
+            {inStock ? "В наявності" : "Немає"}
+          </span>
+          {inStock && stockQuantity !== undefined && stockQuantity > 0 && stockQuantity <= 5 && (
+            <span className="text-[9px] font-medium text-live">
+              {stockQuantity === 1 ? "Останній" : `${stockQuantity} шт`}
+            </span>
+          )}
+        </div>
 
         {/* Rating */}
         {rating !== undefined && rating > 0 && (
@@ -274,24 +302,9 @@ export const ProductCard = ({
           </div>
         )}
 
-        {/* Price row */}
-        <div className="mt-2 flex items-end justify-between gap-1">
-          <div>
-            <span className="text-lg font-bold text-primary">{price.toLocaleString()} ₴</span>
-            {inStock && (
-              <span className="block text-[10px] text-muted-foreground line-through">
-                {marketingOldPrice.toLocaleString()} ₴
-              </span>
-            )}
-          </div>
-
-          {/* Variants compact */}
-          <div className="flex flex-col items-end gap-0.5">
-            {inStock && stockQuantity !== undefined && stockQuantity > 0 && (
-              <span className="text-[9px] text-muted-foreground flex items-center gap-0.5">
-                <Package className="h-2.5 w-2.5" /> {stockQuantity > 99 ? "99+" : stockQuantity}
-              </span>
-            )}
+        {/* Variants left, price right */}
+        <div className="mt-2 flex items-end justify-between gap-2">
+          <div className="flex flex-col gap-0.5 min-w-0">
             {displayColors.length > 0 && (
               <div className="flex items-center gap-0.5">
                 {displayColors.map((color, idx) => {
@@ -309,12 +322,23 @@ export const ProductCard = ({
               </div>
             )}
             {displaySizes.length > 0 && (
-              <div className="flex items-center gap-0.5">
+              <div className="flex items-center gap-0.5 flex-wrap">
                 {displaySizes.map((size, idx) => (
                   <span key={idx} className="text-[8px] bg-muted px-1 py-0.5 rounded font-medium">{size}</span>
                 ))}
                 {hasMoreSizes && <span className="text-[8px] text-muted-foreground">+{sizes!.length - 4}</span>}
               </div>
+            )}
+          </div>
+
+          <div className="text-right shrink-0">
+            <span className="block text-lg font-bold text-primary leading-none">
+              {price.toLocaleString()} ₴
+            </span>
+            {inStock && (
+              <span className="block text-[10px] text-muted-foreground line-through">
+                {marketingOldPrice.toLocaleString()} ₴
+              </span>
             )}
           </div>
         </div>

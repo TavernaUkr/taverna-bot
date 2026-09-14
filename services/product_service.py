@@ -18,9 +18,10 @@ ProductOption / ProductOptionValue) з нашої БД + розрахунок ф
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_UP, Decimal, InvalidOperation
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Sequence, Union
 
 from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
 from database.db import AsyncSessionLocal
@@ -42,37 +43,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # --- Кеш активних правил націнки (PriceRule) ---
-_price_rules_cache: List[PriceRule] = []
-_rules_cache_updated_at: Optional[datetime] = None
-_RULES_CACHE_TTL = timedelta(minutes=1)
+# [ФІКС SQLite locked] Раніше `_load_price_rules()` на КОЖЕН товар
+# відкривала НОВУ сесію (`AsyncSessionLocal()`) і робила SELECT у
+# `price_rules` — під час відкритої транзакції запису в `mydrop_sync`.
+# SQLite не вміє тримати другий конект на читання, коли перший тримає
+# write-lock → `database is locked` на ~тисячі товарів.
+# Тепер: 1 SELECT на 5 хвилин, бажано в ТІЙ САМІЙ сесії (`db=`).
+_cached_price_rules: List[PriceRule] = []
+_rules_last_fetched: Optional[datetime] = None
+_RULES_CACHE_TTL = timedelta(minutes=5)
 
 
-async def _load_price_rules() -> List[PriceRule]:
-    """Повертає активні PriceRule (сортовані за priority), кешовані на _RULES_CACHE_TTL."""
-    global _price_rules_cache, _rules_cache_updated_at
+async def _load_price_rules(db: Optional[AsyncSession] = None) -> List[PriceRule]:
+    """
+    Повертає активні PriceRule (сортовані за priority).
 
-    if (
-        _price_rules_cache
-        and _rules_cache_updated_at
-        and (datetime.now(timezone.utc) - _rules_cache_updated_at < _RULES_CACHE_TTL)
-    ):
-        return _price_rules_cache
+    Якщо кеш молодший за `_RULES_CACHE_TTL` (5 хв) — БД не чіпаємо.
+    Інакше один SELECT: у передану сесію `db` (без другого конекта —
+    обов'язково під час масового імпорту) або, якщо `db` немає, у
+    коротку окрему сесію (звичайні одиночні виклики з кошика/пошуку).
+    Порожній список теж кешується (немає правил ≠ "кеш порожній").
+    """
+    global _cached_price_rules, _rules_last_fetched
 
-    async with AsyncSessionLocal() as db:
-        try:
-            stmt = (
-                select(PriceRule)
-                .where(PriceRule.is_active == True)  # noqa: E712 (SQLAlchemy-стиль)
-                .order_by(PriceRule.priority.asc())
-            )
-            result = await db.execute(stmt)
-            _price_rules_cache = list(result.scalars().all())
-            _rules_cache_updated_at = datetime.now(timezone.utc)
-        except Exception as e:
-            logger.error("Не вдалося завантажити PriceRule: %s", e, exc_info=True)
-            _price_rules_cache = []
+    now = datetime.now(timezone.utc)
+    if _rules_last_fetched is not None and (now - _rules_last_fetched < _RULES_CACHE_TTL):
+        return _cached_price_rules
 
-    return _price_rules_cache
+    async def _fetch(session: AsyncSession) -> None:
+        global _cached_price_rules, _rules_last_fetched
+        stmt = (
+            select(PriceRule)
+            .where(PriceRule.is_active == True)  # noqa: E712 (SQLAlchemy-стиль)
+            .order_by(PriceRule.priority.asc())
+        )
+        result = await session.execute(stmt)
+        _cached_price_rules = list(result.scalars().all())
+        _rules_last_fetched = datetime.now(timezone.utc)
+
+    try:
+        if db is not None:
+            await _fetch(db)
+        else:
+            async with AsyncSessionLocal() as session:
+                await _fetch(session)
+    except Exception as e:
+        logger.error("Не вдалося завантажити PriceRule: %s", e, exc_info=True)
+        if _rules_last_fetched is None:
+            _cached_price_rules = []
+
+    return _cached_price_rules
 
 
 def _aggressive_rounding(price: Decimal) -> int:
@@ -94,6 +114,7 @@ async def calculate_final_price(
     base_price_str: Optional[str],
     category_tag: Optional[str] = None,
     supplier_id: Optional[int] = None,
+    db: Optional[AsyncSession] = None,
 ) -> int:
     """
     Розраховує фінальну (клієнтську) ціну з дроп-ціни постачальника за
@@ -102,6 +123,8 @@ async def calculate_final_price(
 
     `base_price_str` — рядок (сумісність зі старим викликом з XML-парсера
     і з новим викликом з mydrop_sync.py, де ціна теж передається як str).
+    `db` — сесія поточного імпорту (передавай під час sync, щоб SELECT
+    правил не відкривав другий конект до SQLite).
     """
     if base_price_str is None:
         return 0
@@ -113,7 +136,7 @@ async def calculate_final_price(
         if base_price_decimal <= 0:
             return 0
 
-        rules = await _load_price_rules()
+        rules = await _load_price_rules(db)
         final_price: Optional[Decimal] = None
         base_price_kopecks = int(base_price_decimal * 100)
 
@@ -178,7 +201,37 @@ async def get_product_by_sku(sku: str) -> Optional[Product]:
             return None
 
 
-async def search_products(query: str, limit: int = 50) -> List["ProductAPI"]:
+def _normalize_filter_values(value: Optional[Union[str, Sequence[str]]]) -> List[str]:
+    """Один рядок, CSV або список → унікальні значення для WHERE IN."""
+    if value is None:
+        return []
+    chunks = [value] if isinstance(value, str) else list(value)
+    items: List[str] = []
+    seen = set()
+    for chunk in chunks:
+        if chunk is None:
+            continue
+        for part in str(chunk).split(","):
+            cleaned = part.strip()
+            if not cleaned:
+                continue
+            key = cleaned.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(cleaned)
+    return items
+
+
+async def search_products(
+    query: str,
+    limit: int = 50,
+    category: Optional[Union[str, Sequence[str]]] = None,
+    sub_category: Optional[Union[str, Sequence[str]]] = None,
+    season: Optional[Union[str, Sequence[str]]] = None,
+    target_niche: Optional[Union[str, Sequence[str]]] = None,
+    gender: Optional[Union[str, Sequence[str]]] = None,
+) -> List["ProductAPI"]:
     """
     Пошук товарів для GET /api/v1/search.
     Критично: валідуємо в Pydantic (ProductAPI) ПОКИ сесія БД ще жива і
@@ -195,6 +248,7 @@ async def search_products(query: str, limit: int = 50) -> List["ProductAPI"]:
         stmt = (
             select(Product)
             .options(
+                selectinload(Product.supplier),
                 selectinload(Product.variants).selectinload(ProductVariant.option_values),
                 selectinload(Product.options).selectinload(ProductOption.values),
             )
@@ -203,21 +257,51 @@ async def search_products(query: str, limit: int = 50) -> List["ProductAPI"]:
                     Product.name.ilike(f"%{q}%"),
                     Product.description.ilike(f"%{q}%"),
                     Product.category.ilike(f"%{q}%"),
+                    Product.sub_category.ilike(f"%{q}%"),
+                    Product.season.ilike(f"%{q}%"),
+                    Product.target_niche.ilike(f"%{q}%"),
+                    Product.gender.ilike(f"%{q}%"),
                 )
             )
             .limit(limit)
         )
+        categories = _normalize_filter_values(category)
+        sub_categories = _normalize_filter_values(sub_category)
+        seasons = _normalize_filter_values(season)
+        niches = _normalize_filter_values(target_niche)
+        genders = _normalize_filter_values(gender)
+        if categories:
+            stmt = stmt.where(Product.category.in_(categories))
+        if sub_categories:
+            stmt = stmt.where(Product.sub_category.in_(sub_categories))
+        if seasons:
+            stmt = stmt.where(Product.season.in_(seasons))
+        if niches:
+            stmt = stmt.where(Product.target_niche.in_(niches))
+        if genders:
+            stmt = stmt.where(Product.gender.in_(genders))
 
         res = await db.execute(stmt)
         products = res.scalars().unique().all()
 
         # `option_value_ids` на ProductVariant — не колонка, а relationship,
         # тож model_validate() не заповнить його автоматично.
+        result_api: List[ProductAPI] = []
         for p in products:
             for v in p.variants:
                 v.option_value_ids = [ov.id for ov in (v.option_values or [])]
+            item = ProductAPI.model_validate(p)
+            item.supplier_name = p.supplier.name if getattr(p, "supplier", None) else None
+            if not getattr(p, "is_ai_processed", False):
+                item.category = None
+                item.sub_category = None
+                item.season = None
+                item.target_niche = None
+                item.gender = None
+                item.attributes = None
+            result_api.append(item)
 
-        return [ProductAPI.model_validate(p) for p in products]
+        return result_api
 
 
 async def get_variant_by_offer_id(offer_id: str) -> Optional[ProductVariant]:

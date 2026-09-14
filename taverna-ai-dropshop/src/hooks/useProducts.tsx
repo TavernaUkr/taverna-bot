@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   fetchBackendProducts,
+  fetchBackendCategories,
   fetchProductById as fetchBackendProductById,
   searchBackendProducts,
   BackendApiError,
@@ -28,7 +29,6 @@ export interface Product {
   images?: string[];
   in_stock: boolean;
   stock_quantity?: number;
-  attributes?: any;
   ai_category?: string;
   ai_tags?: string[];
   source_url?: string;
@@ -37,6 +37,12 @@ export interface Product {
   is_boosted?: boolean;
   created_at?: string;
   updated_at?: string;
+  sub_category?: string;
+  season?: string;
+  target_niche?: string;
+  gender?: string;
+  supplier_name?: string;
+  attributes?: Record<string, string>;
   category?: {
     id: string;
     name: string;
@@ -86,6 +92,18 @@ export function mapBackendProductToUi(bp: BackendProduct): Product {
   const colorOption = options.find((o) => /колір|цвет|color/i.test(o.name));
 
   const categoryTag = bp.category?.trim() || undefined;
+  const subCategory = bp.sub_category?.trim() || undefined;
+  const season = bp.season?.trim() || undefined;
+  const targetNiche = bp.target_niche?.trim() || undefined;
+  const gender = bp.gender?.trim() || undefined;
+  const attributes =
+    bp.attributes && typeof bp.attributes === "object" && !Array.isArray(bp.attributes)
+      ? Object.fromEntries(
+          Object.entries(bp.attributes).filter(
+            ([key, value]) => key && value != null && String(value).trim()
+          ).map(([key, value]) => [key, String(value)])
+        )
+      : undefined;
 
   return {
     id: String(bp.id),
@@ -100,6 +118,12 @@ export function mapBackendProductToUi(bp: BackendProduct): Product {
     stock_quantity: totalStock,
     sizes: sizeOption?.values.map((v) => v.value),
     colors: colorOption?.values.map((v) => v.value),
+    sub_category: subCategory,
+    season,
+    target_niche: targetNiche,
+    gender,
+    supplier_name: bp.supplier_name?.trim() || undefined,
+    attributes,
     category: categoryTag
       ? { id: categoryTag, name: categoryTag, slug: categoryTag, parent_id: null }
       : null,
@@ -148,7 +172,9 @@ export function useProducts() {
     try {
       setIsLoading(true);
 
-      const backendProducts = await fetchBackendProducts();
+      const backendProducts = await fetchBackendProducts({
+        category: filters?.categoryId,
+      });
       let mapped = backendProducts.map(mapBackendProductToUi);
 
       // --- Клієнтська фільтрація (наш бекенд ще не приймає query-параметри) ---
@@ -159,7 +185,11 @@ export function useProducts() {
       }
 
       if (filters?.categoryId) {
-        mapped = mapped.filter((p) => p.category?.id === filters.categoryId);
+        mapped = mapped.filter(
+          (p) =>
+            p.category?.id === filters.categoryId ||
+            p.category?.name === filters.categoryId
+        );
       }
 
       if (filters?.search) {
@@ -220,6 +250,26 @@ export function useProducts() {
 
   const fetchCategories = useCallback(async () => {
     try {
+      const backendCategories = await fetchBackendCategories();
+      if (backendCategories.length > 0) {
+        setCategories(
+          backendCategories.map((cat) => ({
+            id: cat.name,
+            name: cat.name,
+            slug: cat.name,
+            product_count: cat.count,
+            is_active: true,
+            subcategories: (cat.subcategories || []).map((sub) => ({
+              id: sub.name,
+              name: sub.name,
+              slug: sub.name,
+              product_count: sub.count,
+              is_active: true,
+            })),
+          }))
+        );
+        return;
+      }
       const backendProducts = await fetchBackendProducts();
       const mapped = backendProducts.map(mapBackendProductToUi);
       setCategories(buildCategoriesFromProducts(mapped));

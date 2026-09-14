@@ -5,8 +5,8 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { ArrowLeft, Building, User, Mail, Phone, FileText, Globe, ChevronRight, Send, Loader2, CheckCircle, AlertCircle, LogIn, Landmark } from "lucide-react";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
 import { useTelegramAuth } from "@/hooks/useTelegramAuth";
+import { registerPartner } from "@/lib/backendApi";
 import { Button } from "@/components/ui/button";
 
 type SupplierType = "individual" | "company";
@@ -35,6 +35,7 @@ const supplierSchema = z.object({
   xmlUrl: z.string().url("Невірний формат URL").optional().or(z.literal('')),
   telegramChannel: z.string().optional(),
   telegram: z.string().optional(),
+  managerTelegram: z.string().optional(),
   description: z.string().max(1000, "Опис не може перевищувати 1000 символів").optional(),
   paymentIban: z.string()
     .min(1, "IBAN обов'язковий для отримання виплат")
@@ -51,13 +52,13 @@ type SupplierFormData = z.infer<typeof supplierSchema>;
 
 const SupplierRegistration = () => {
   const navigate = useNavigate();
-  const { isAuthenticated, isLoading: authLoading, profile, sessionToken, authenticate } = useTelegramAuth();
+  const { isAuthenticated, isLoading: authLoading, profile, authenticate } = useTelegramAuth();
   const [step, setStep] = useState(1);
   const [supplierType, setSupplierType] = useState<SupplierType | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<'idle' | 'success' | 'error'>('idle');
   
-  const { register, handleSubmit, trigger, formState: { errors }, setValue, getValues } = useForm<SupplierFormData>({
+  const { register, handleSubmit, trigger, formState: { errors }, setValue } = useForm<SupplierFormData>({
     resolver: zodResolver(supplierSchema),
     mode: "onBlur",
     defaultValues: {
@@ -83,54 +84,49 @@ const SupplierRegistration = () => {
     setSubmitStatus('idle');
     
     try {
-      // Get Telegram user data if available
-      const telegramId = profile?.telegram_id || 
-        (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+      if (!supplierType) {
+        throw new Error("Оберіть тип партнера (ФОП або бізнес).");
+      }
 
-      const managerTelegram = (getValues as any)('managerTelegram') || '';
-      const applicationData = {
-        supplier_type: supplierType,
+      const tg = (window as any).Telegram?.WebApp;
+      const initData: string = tg?.initData || "";
+      const telegramId = profile?.telegram_id || tg?.initDataUnsafe?.user?.id;
+
+      const formData = {
+        supplier_type: supplierType === "company" ? "business" : "individual",
         full_name: data.fullName,
-        company_name: data.companyName,
+        company_name: data.companyName || null,
+        edrpou_ipn: data.taxId,
         tax_id: data.taxId,
         email: data.email,
         phone: data.phone,
-        telegram_username: data.telegram,
+        telegram_username: data.telegram || null,
+        manager_telegram: data.managerTelegram || null,
+        name: data.shopName,
+        store_name: data.shopName,
         shop_name: data.shopName,
-        xml_url: data.xmlUrl,
-        telegram_channel: data.telegramChannel,
-        description: data.description,
-        telegram_id: telegramId,
-        manager_telegram: managerTelegram,
+        yml_link: data.xmlUrl || null,
+        xml_url: data.xmlUrl || null,
+        channel_link: data.telegramChannel || null,
+        telegram_channel: data.telegramChannel || null,
+        description: data.description || null,
+        store_description: data.description || null,
+        iban: data.paymentIban,
         payment_iban: data.paymentIban,
-        payment_card_holder: data.paymentCardHolder,
+        bank_name: data.paymentBankName || null,
         payment_bank_name: data.paymentBankName || null,
+        telegram_id: telegramId ? Number(telegramId) : undefined,
       };
 
-      const { data: result, error } = await supabase.functions.invoke('process-supplier-application', {
-        body: {
-          action: 'submit',
-          application: applicationData,
-          session_token: sessionToken,
-        },
-      });
-
-      if (error) {
-        throw new Error(error.message || 'Помилка при відправці заявки');
-      }
-
-      if (!result?.success) {
-        throw new Error(result?.error || 'Не вдалось відправити заявку');
-      }
+      await registerPartner(formData, initData);
 
       setSubmitStatus('success');
-      toast.success('Заявку успішно надіслано!', {
-        description: 'Ми перевіримо вашу заявку та зв\'яжемось з вами найближчим часом.',
+      toast.success('Ваша заявка прийнята!', {
+        description: 'AI проводить первинний аналіз, очікуйте рішення адміністратора.',
       });
 
-      // Redirect after delay
       setTimeout(() => {
-        navigate('/');
+        navigate('/?tab=account');
       }, 3000);
 
     } catch (error) {
@@ -152,12 +148,12 @@ const SupplierRegistration = () => {
           <div className="w-20 h-20 mx-auto rounded-full bg-success/20 flex items-center justify-center">
             <CheckCircle className="h-10 w-10 text-success" />
           </div>
-          <h2 className="text-xl font-bold text-foreground">Заявку надіслано!</h2>
+          <h2 className="text-xl font-bold text-foreground">Ваша заявка прийнята!</h2>
           <p className="text-muted-foreground max-w-xs mx-auto">
-            Наш менеджер перевірить вашу заявку та зв'яжеться з вами через Telegram.
+            AI проводить первинний аналіз, очікуйте рішення адміністратора.
           </p>
           <p className="text-xs text-muted-foreground">
-            Ви отримаєте сповіщення про статус заявки
+            Ви отримаєте сповіщення про статус заявки в Telegram
           </p>
           <button
             onClick={() => navigate('/')}
@@ -467,7 +463,7 @@ const SupplierRegistration = () => {
               <div className="space-y-2">
                 <label className="text-sm font-medium text-foreground">Telegram менеджера магазину</label>
                 <input
-                  {...register("managerTelegram" as any)}
+                    {...register("managerTelegram")}
                   type="text"
                   placeholder="@manager_username"
                   className="w-full px-4 py-3 bg-muted border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"

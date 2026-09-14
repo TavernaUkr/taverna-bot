@@ -3,7 +3,7 @@ import hmac
 import hashlib
 import json
 import logging
-from urllib.parse import unquote
+from urllib.parse import parse_qsl
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
@@ -64,47 +64,53 @@ def decode_access_token(token: str) -> Optional[dict]:
 
 def validate_init_data(init_data: str) -> Optional[Dict[str, Any]]:
     """
-    Перевіряє хеш initData, отриманий від Telegram MiniApp.
-    """
-    try:
-        bot_token = config.bot_token.get_secret_value()
-        
-        parsed_data = {}
-        for field in init_data.split('&'):
-            key, value = field.split('=', 1)
-            parsed_data[key] = unquote(value)
+    Перевіряє хеш initData Mini App за офіційним алгоритмом Telegram:
+    https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
 
-        if "hash" not in parsed_data:
+    1) secret_key = HMAC_SHA256(key="WebAppData", msg=BOT_TOKEN)
+    2) data_check_string = відсортовані key=value без hash, розділені \\n
+    3) hex(HMAC_SHA256(secret_key, data_check_string)) == hash
+    """
+    from urllib.parse import parse_qsl
+
+    try:
+        if not init_data or not str(init_data).strip():
+            logger.warning("Invalid initData: empty payload")
+            return None
+
+        bot_token = config.BOT_TOKEN
+        parsed_data = dict(parse_qsl(init_data, keep_blank_values=True))
+
+        hash_to_check = parsed_data.pop("hash", None)
+        if not hash_to_check:
             logger.warning("Invalid initData: 'hash' field is missing")
             return None
 
-        hash_to_check = parsed_data.pop("hash")
-        
-        auth_date_ts = int(parsed_data.get("auth_date", 0))
+        auth_date_ts = int(parsed_data.get("auth_date", 0) or 0)
         auth_date = datetime.fromtimestamp(auth_date_ts, timezone.utc)
         if datetime.now(timezone.utc) - auth_date > timedelta(hours=1):
-             logger.warning("Invalid initData: Data is older than 1 hour")
-             return None
+            logger.warning("Invalid initData: Data is older than 1 hour")
+            return None
 
         data_check_string = "\n".join(
             f"{k}={v}" for k, v in sorted(parsed_data.items())
         )
-        
+
         secret_key = hmac.new(
-            "WebAppData".encode(), bot_token.encode(), hashlib.sha256
+            b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256
         ).digest()
-        
+
         calculated_hash = hmac.new(
-            secret_key, data_check_string.encode(), hashlib.sha256
+            secret_key, data_check_string.encode("utf-8"), hashlib.sha256
         ).hexdigest()
-        
-        if calculated_hash == hash_to_check:
-            if "user" in parsed_data:
-                return json.loads(parsed_data["user"])
-            return {}
-        else:
-            logger.error(f"CRITICAL: Invalid initData hash. Possible attack.")
+
+        if not hmac.compare_digest(calculated_hash, hash_to_check):
+            logger.error("CRITICAL: Invalid initData hash. Possible attack.")
             return None
+
+        if "user" in parsed_data:
+            return json.loads(parsed_data["user"])
+        return {}
 
     except Exception as e:
         logger.error(f"Помилка валідації initData: {e}", exc_info=True)

@@ -24,8 +24,8 @@ const navItems: NavItem[] = [
 
 export const BottomNavigation = ({ activeTab, onTabChange }: BottomNavigationProps) => {
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-50 bg-card border-t border-border">
-      <div className="flex items-center justify-around h-16 pb-safe">
+    <nav className="fixed bottom-0 left-0 right-0 w-full max-w-md mx-auto z-50 bg-card border-t border-border">
+      <div className="flex items-center justify-around h-16 pb-safe w-full min-w-0 px-1">
         {navItems.map((item) => {
           const isActive = activeTab === item.id;
 
@@ -34,7 +34,7 @@ export const BottomNavigation = ({ activeTab, onTabChange }: BottomNavigationPro
               <button
                 key={item.id}
                 onClick={() => onTabChange(item.id)}
-                className="relative flex flex-col items-center gap-0.5"
+                className="relative flex flex-col items-center gap-0.5 min-w-0 flex-1 px-0.5"
               >
                 <div
                   className={cn(
@@ -51,7 +51,7 @@ export const BottomNavigation = ({ activeTab, onTabChange }: BottomNavigationPro
                 </div>
                 <span
                   className={cn(
-                    "text-[10px] font-brand italic mt-0.5 tracking-[0.08em] text-live-royal",
+                    "text-[10px] font-brand italic mt-0.5 tracking-[0.08em] text-live-royal truncate max-w-full",
                     isActive ? "opacity-100" : "opacity-80"
                   )}
                 >
@@ -66,14 +66,14 @@ export const BottomNavigation = ({ activeTab, onTabChange }: BottomNavigationPro
               key={item.id}
               onClick={() => onTabChange(item.id)}
               className={cn(
-                "flex flex-col items-center gap-0.5 py-1.5 px-3 transition-colors",
+                "flex flex-col items-center gap-0.5 py-1.5 px-0.5 min-w-0 flex-1 transition-colors",
                 isActive
                   ? "text-primary"
                   : "text-muted-foreground"
               )}
             >
               {item.icon}
-              <span className="text-[10px] font-medium">{item.label}</span>
+              <span className="text-[10px] font-medium truncate max-w-full">{item.label}</span>
             </button>
           );
         })}

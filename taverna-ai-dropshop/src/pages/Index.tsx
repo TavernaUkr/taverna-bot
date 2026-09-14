@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate, Link, useLocation } from "react-router-dom";
-import { Shield, Shirt, Watch, Footprints, ChevronRight, LogOut, Loader2 } from "lucide-react";
-import { AIChatAssistant } from "@/components/AIChatAssistant";
+import { Shield, Shirt, Watch, Footprints, Backpack, Target, ChevronRight, LogOut, Loader2 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { BottomNavigation } from "@/components/BottomNavigation";
 import { ProductCard } from "@/components/ProductCard";
@@ -18,11 +17,11 @@ import { WishlistModal } from "@/components/WishlistModal";
 import { OrdersHistory } from "@/components/OrdersHistory";
 import { ProfileDashboard } from "@/components/profile/ProfileDashboard";
 import { LiveActivityFeed } from "@/components/LiveActivityFeed";
-import { RatingsTab } from "@/components/RatingsTab";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { useCartContext } from "@/contexts/CartContext";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 import { useProducts } from "@/hooks/useProducts";
+import { useRegisterBack } from "@/hooks/useAppBack";
 import { toast } from "sonner";
 import { getCategoryGradient } from "@/lib/categoryColors";
 import { ProductGridSkeleton } from "@/components/ui/product-skeleton";
@@ -39,6 +38,9 @@ const categoryIcons: Record<string, React.ElementType> = {
   "Одяг": Shirt,
   "Аксесуари": Watch,
   "Взуття": Footprints,
+  "Спорядження": Target,
+  "Головні убори": Shield,
+  "Рюкзаки та сумки": Backpack,
 };
 
 // Fallback mock products
@@ -132,6 +134,7 @@ const CatalogTab = ({
   isLoading: boolean;
   onViewAllProducts: () => void;
 }) => {
+  const navigate = useNavigate();
   const displayProducts = products.length > 0 ? products : fallbackProducts;
   
   return (
@@ -166,7 +169,7 @@ const CatalogTab = ({
               icon={IconComponent}
               count={cat.product_count || 0}
               gradient={dynamicGradient}
-              onClick={() => toast.info(`Категорія: ${cat.name}`)}
+              onClick={() => navigate(`/search?category=${encodeURIComponent(cat.name)}`)}
             />
           );})}
         </div>
@@ -204,6 +207,7 @@ const CatalogTab = ({
                 colors={product.colors}
                 variants={product.variants}
                 options={product.options}
+                supplierName={product.supplier_name}
                 rating={product.rating}
                 reviewCount={product.review_count}
                 isBoosted={product.is_boosted}
@@ -251,7 +255,7 @@ const Index = () => {
 
   const getTabFromSearch = (search: string) => {
     const tab = new URLSearchParams(search).get("tab");
-    return ["catalog", "live", "ratings", "account"].includes(tab || "") ? tab! : "catalog";
+    return ["catalog", "live", "account"].includes(tab || "") ? tab! : "catalog";
   };
 
   const [activeTab, setActiveTab] = useState(() => getTabFromSearch(location.search));
@@ -285,11 +289,21 @@ const Index = () => {
   }, [error]);
 
   useEffect(() => {
+    if (new URLSearchParams(location.search).get("tab") === "ratings") {
+      navigate("/ratings", { replace: true });
+      return;
+    }
     const tabFromUrl = getTabFromSearch(location.search);
     if (tabFromUrl !== activeTab) {
       setActiveTab(tabFromUrl);
     }
-  }, [location.search, activeTab]);
+  }, [location.search, activeTab, navigate]);
+
+  useRegisterBack(isAllCategoriesOpen, () => setIsAllCategoriesOpen(false));
+  useRegisterBack(isCheckoutOpen, () => setIsCheckoutOpen(false));
+  useRegisterBack(isCartOpen, () => setIsCartOpen(false));
+  useRegisterBack(isWishlistOpen, () => setIsWishlistOpen(false));
+  useRegisterBack(isSearchOpen, () => setIsSearchOpen(false));
 
   const setMainTab = (tab: string) => {
     setActiveTab(tab);
@@ -367,13 +381,19 @@ const Index = () => {
     navigate(`/product/${id}`);
   };
 
-  const handleSelectCategory = (categoryId: string, subcategoryId?: string) => {
+  const handleSelectCategory = (
+    categoryId: string,
+    subcategoryId?: string,
+    niche?: string,
+    season?: string
+  ) => {
     setIsAllCategoriesOpen(false);
-    if (subcategoryId) {
-      toast.info(`Підкатегорія: ${subcategoryId}`);
-    } else {
-      toast.info(`Категорія: ${categoryId}`);
-    }
+    const params = new URLSearchParams();
+    params.set("category", categoryId);
+    if (niche) params.set("target_niche", niche);
+    if (season) params.set("season", season);
+    if (subcategoryId) params.set("sub_category", subcategoryId);
+    navigate(`/search?${params.toString()}`);
   };
 
   const handleTabChange = (tab: string) => {
@@ -408,8 +428,6 @@ const Index = () => {
         );
       case "live":
         return <LiveTab />;
-      case "ratings":
-        return <RatingsTab />;
       case "account":
         return <AccountTab />;
       default:
@@ -430,7 +448,7 @@ const Index = () => {
   };
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background w-full max-w-[100vw]">
       <Header 
         cartCount={totalItems}
         favoritesCount={totalFavorites}
@@ -439,10 +457,10 @@ const Index = () => {
         onNotificationsClick={() => toast.info("Сповіщення")}
         onFavoritesClick={() => setIsWishlistOpen(true)}
         onPromoClick={() => navigate("/promos")}
-        onRatingsClick={() => setMainTab("ratings")}
+        onRatingsClick={() => navigate("/ratings")}
       />
       
-      <main className="px-4 py-4">
+      <main className="relative z-0 px-3 pt-3 pb-4 w-full max-w-md mx-auto min-w-0">
         {renderTabContent()}
       </main>
 
@@ -489,8 +507,6 @@ const Index = () => {
         }}
       />
 
-      {/* AI Chat Assistant - Floating Button */}
-      <AIChatAssistant />
     </div>
   );
 };

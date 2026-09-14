@@ -51,7 +51,7 @@ async def get_or_create_topic(
 
 # --- API Endpoints ---
 
-@router.post("/register", response_model=SupplierResponse)
+@router.post("/register-full", response_model=SupplierResponse)
 async def register_supplier(
     request_data: SupplierRegisterRequest,
     db: AsyncSession = Depends(get_db),

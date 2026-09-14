@@ -14,6 +14,12 @@ class SupplierType(str, enum.Enum):
     mydrop = "mydrop"
     independent = "independent"
 
+
+class SupplierLegalType(str, enum.Enum):
+    """Тип партнера з форми Mini App «Стати постачальником»."""
+    individual = "individual"  # ФОП / фіз. особа
+    business = "business"      # ТОВ / юр. особа
+
 class SupplierStatus(str, enum.Enum):
     pending_ai_analysis = "pending_ai_analysis"
     ai_in_progress = "ai_in_progress"
@@ -42,6 +48,7 @@ class PaymentStatus(str, enum.Enum):
 
 class UserRole(str, enum.Enum):
     user = "user"
+    client = "client"
     admin = "admin"
     supplier = "supplier"
 
@@ -93,14 +100,16 @@ class User(Base):
     username = Column(String(100), nullable=True, index=True)
     first_name = Column(String(255), nullable=True)
     last_name = Column(String(255), nullable=True)
+    full_name = Column(String(255), nullable=True)
     email = Column(String(255), unique=True, index=True, nullable=True)
     password_hash = Column(String(255), nullable=True)
-    role = Column(Enum(UserRole), default=UserRole.user, nullable=False)
+    role = Column(Enum(UserRole), default=UserRole.client, nullable=False)
     loyalty_points = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     orders = relationship("Order", back_populates="user")
     bonus_history = relationship("BonusHistory", back_populates="user")
+    suppliers = relationship("Supplier", back_populates="user")
 
 class Channel(Base):
     __tablename__ = 'channels'
@@ -138,6 +147,22 @@ class Supplier(Base):
     supplier_address = Column(Text, nullable=True)
     telegram_channel = Column(String(100), nullable=True)
 
+    # --- Mini App «Стати партнером» ---
+    supplier_type = Column(Enum(SupplierLegalType, native_enum=False, length=32), nullable=True)
+    yml_link = Column(Text, nullable=True)
+    channel_link = Column(String(255), nullable=True)
+    is_verified = Column(Boolean, nullable=False, default=False)
+    edrpou_ipn = Column(String(32), nullable=True, index=True)
+    email = Column(String(255), nullable=True)
+    phone = Column(String(32), nullable=True)
+    manager_telegram = Column(String(100), nullable=True)
+    store_name = Column(String(255), nullable=True)
+    store_description = Column(Text, nullable=True)
+    iban = Column(String(64), nullable=True)
+    bank_name = Column(String(255), nullable=True)
+    trial_ends_at = Column(DateTime(timezone=True), nullable=True)
+    ai_score_report = Column(Text, nullable=True)
+
     payout_method = Column(Enum(PayoutMethod), nullable=True, default=PayoutMethod.iban)
     payout_iban = Column(String(100), nullable=True)
     payout_card_token = Column(String(255), nullable=True)
@@ -151,7 +176,7 @@ class Supplier(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    user = relationship("User")
+    user = relationship("User", back_populates="suppliers")
     
     channels = relationship("Channel", secondary=supplier_channels, back_populates="suppliers")
     products = relationship("Product", back_populates="supplier", cascade="all, delete-orphan")
@@ -169,9 +194,15 @@ class Product(Base):
     name = Column(String(512), nullable=False)
     description = Column(Text, nullable=True)
     category = Column(String(100), index=True)
+    sub_category = Column(String(150), nullable=True, index=True)
+    season = Column(String(50), nullable=True, index=True)
+    target_niche = Column(String(100), nullable=True, index=True)
+    gender = Column(String(50), nullable=True, index=True)
+    attributes = Column(JSON, nullable=True)
     brand = Column(String(255), nullable=True)
     model = Column(String(255), nullable=True)
     ai_category = Column(String(255), nullable=True, index=True)
+    is_ai_processed = Column(Boolean, nullable=False, default=False, index=True)
     status = Column(Enum(ProductStatus), default=ProductStatus.active) # 'active', 'inactive'
     pictures = Column(JSON, nullable=True) # Зберігаємо як JSON список URL
     

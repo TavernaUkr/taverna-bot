@@ -15,7 +15,10 @@ function safeNext(raw: string | null): string {
 export default function Login() {
   const [params] = useSearchParams();
   const next = safeNext(params.get("next"));
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const reason = params.get("reason");
+  const [mode, setMode] = useState<"signin" | "signup">(
+    params.get("mode") === "signup" ? "signup" : "signin",
+  );
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -52,7 +55,11 @@ export default function Login() {
           {mode === "signin" ? "Вхід" : "Реєстрація"} до Taverna Group
         </h1>
         <p className="text-sm text-muted-foreground">
-          Увійдіть, щоб надати доступ підключеному застосунку.
+          {reason === "support"
+            ? "Зареєструйтесь, щоб отримати зв'язок з підтримкою."
+            : params.get("mode") === "signup" || mode === "signup"
+              ? "Створіть акаунт, щоб користуватися всіма функціями Mini App."
+              : "Увійдіть, щоб надати доступ підключеному застосунку."}
         </p>
         <form onSubmit={submit} className="space-y-3">
           <div className="space-y-1">

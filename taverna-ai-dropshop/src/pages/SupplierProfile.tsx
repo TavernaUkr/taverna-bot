@@ -304,13 +304,14 @@ const SupplierProfile = () => {
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background w-full max-w-[100vw]">
       {/* Header */}
       <div className="sticky top-0 z-40 bg-background/95 backdrop-blur border-b border-border">
-        <div className="flex items-center gap-3 p-4">
+        <div className="flex items-center gap-3 p-4 max-w-md mx-auto w-full min-w-0">
           <Button
             variant="ghost"
             size="icon"
+            className="h-11 w-11 rounded-xl shrink-0"
             onClick={() => navigate(-1)}
           >
             <ArrowLeft className="h-5 w-5" />
@@ -328,54 +329,48 @@ const SupplierProfile = () => {
       </div>
 
       {/* Supplier Hero */}
-      <div className="relative">
-        {/* Cover image */}
-        <div className="h-24 bg-gradient-to-r from-primary/20 via-primary/10 to-accent/20 overflow-hidden relative">
+      <div className="relative max-w-md mx-auto w-full">
+        <div className="h-36 bg-gradient-to-r from-primary/20 via-primary/10 to-accent/20 overflow-hidden relative">
           {supplier.cover_image_url && (
-            <img src={supplier.cover_image_url} alt="Cover" className="w-full h-full object-cover" />
+            <img src={supplier.cover_image_url} alt="" className="w-full h-full object-cover" />
           )}
-          {/* Rating button on cover */}
           <button
             onClick={() => setIsRatingOpen(true)}
-            className="absolute top-2 right-2 flex items-center gap-1 px-2.5 py-1 rounded-full bg-background/80 backdrop-blur-sm text-xs font-medium text-foreground hover:bg-background/95 transition-all shadow-sm"
+            className="absolute top-2 right-2 z-10 flex items-center gap-1 px-2.5 py-1 rounded-full bg-background/80 backdrop-blur-sm text-xs font-medium text-foreground hover:bg-background/95 transition-all shadow-sm"
           >
             <Star className="h-3.5 w-3.5 text-warning fill-warning" />
             Оцінити
           </button>
         </div>
-        
-        {/* Profile section */}
-        <div className="px-4 -mt-8">
-          <div className="flex items-end gap-4 mb-4">
-            <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-primary/30 to-primary/10 flex items-center justify-center border-4 border-background shadow-lg overflow-hidden">
-              {supplier.logo_url ? (
-                <img src={supplier.logo_url} alt={supplier.shop_name} className="w-full h-full object-cover" />
-              ) : (
-                <Store className="h-10 w-10 text-primary" />
-              )}
-            </div>
-            <div className="flex-1 pb-2">
-              <div className="flex items-center gap-3 text-sm mb-1">
-                <span className="flex items-center gap-1 text-foreground">
-                  <Star className="h-4 w-4 text-warning fill-warning" />
-                  <strong>{averageRating.toFixed(1)}</strong>
-                </span>
-                <span className="text-muted-foreground">
-                  ({reviewCount} відгуків)
-                </span>
-              </div>
-              <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                <Package className="h-4 w-4" />
-                <span>{productCount} товарів</span>
-              </div>
+
+        <div className="px-4 pb-3">
+          <div className="w-20 h-20 -mt-10 relative z-10 rounded-2xl bg-gradient-to-br from-primary/30 to-primary/10 flex items-center justify-center border-4 border-background shadow-lg overflow-hidden">
+            {supplier.logo_url ? (
+              <img src={supplier.logo_url} alt={supplier.shop_name} className="w-full h-full object-cover" />
+            ) : (
+              <Store className="h-10 w-10 text-primary" />
+            )}
+          </div>
+          <div className="mt-3 min-w-0">
+            <h2 className="font-bold text-lg text-foreground truncate">{supplier.shop_name}</h2>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm mt-1 min-w-0">
+              <span className="flex items-center gap-1 text-foreground">
+                <Star className="h-4 w-4 text-warning fill-warning shrink-0" />
+                <strong>{averageRating.toFixed(1)}</strong>
+                <span className="text-muted-foreground">({reviewCount} відгуків)</span>
+              </span>
+              <span className="flex items-center gap-1 text-muted-foreground">
+                <Package className="h-4 w-4 shrink-0" />
+                {productCount} товарів
+              </span>
             </div>
           </div>
         </div>
       </div>
 
       {/* Tabs */}
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1">
-        <TabsList className="w-full grid grid-cols-3 mx-4 mt-2" style={{ width: "calc(100% - 2rem)" }}>
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 max-w-md mx-auto w-full min-w-0">
+        <TabsList className="grid grid-cols-3 w-[calc(100%-2rem)] mx-4 mt-2">
           <TabsTrigger value="products" className="flex items-center gap-1.5">
             <Package className="h-4 w-4" />
             Товари

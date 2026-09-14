@@ -46,6 +46,12 @@ const categorySlugColors: Record<string, { gradient: string; bgColor: string }> 
   'home': { gradient: "from-[#4a5a3a] to-[#3a4a2a]", bgColor: "bg-[#4a5a3a]" },
   'electronics': { gradient: "from-[#3a4a5a] to-[#2a3a4a]", bgColor: "bg-[#3a4a5a]" },
   'kids': { gradient: "from-[#5a4a6a] to-[#4a3a5a]", bgColor: "bg-[#5a4a6a]" },
+  'одяг': { gradient: "from-primary to-primary/70", bgColor: "bg-primary" },
+  'взуття': { gradient: "from-[#5a4a3a] to-[#4a3a2a]", bgColor: "bg-[#5a4a3a]" },
+  'спорядження': { gradient: "from-[#2a3a2a] to-[#1a2a1a]", bgColor: "bg-[#2a3a2a]" },
+  'аксесуари': { gradient: "from-accent to-accent/70", bgColor: "bg-accent" },
+  'головні убори': { gradient: "from-[#4a5d23] to-[#3d4d1c]", bgColor: "bg-[#4a5d23]" },
+  'рюкзаки та сумки': { gradient: "from-[#3a4a5a] to-[#2a3a4a]", bgColor: "bg-[#3a4a5a]" },
 };
 
 /**

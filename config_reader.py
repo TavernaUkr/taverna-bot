@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     bot_token: SecretStr
     bot_username: str = "taverna_ukr_bot"
     admin_id: int
+    # Додаткові адміни через кому в .env (ADMIN_IDS=123,456). admin_id завжди входить у список.
+    admin_ids: str = ""
     
     # --- Канали (ОНОВЛЕНО - План 17.1 / 20.1) ---
     test_channel: int      # Тестовий канал адміна
@@ -40,7 +42,9 @@ class Settings(BaseSettings):
     redis_url: AnyUrl
     
     # --- AI та Сервіси ---
-    gemini_api_key: SecretStr
+    groq_api_key: Optional[SecretStr] = None
+    openrouter_api_key: Optional[SecretStr] = None
+    gemini_api_key: Optional[SecretStr] = None
     
     # --- Google Drive ---
     service_account_json: Optional[str] = None
@@ -95,6 +99,39 @@ class Settings(BaseSettings):
         else: p = Path("data/posted_ids.txt")
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
+
+    @field_validator('admin_ids', mode='before')
+    def parse_admin_ids_field(cls, v):
+        if v is None:
+            return ""
+        return str(v).strip()
+
+    @property
+    def MINI_APP_URL(self) -> str:
+        """HTTPS-адреса Mini App для WebApp-кнопок у Telegram."""
+        if self.webapp_url:
+            return str(self.webapp_url).rstrip("/")
+        return ""
+
+    @property
+    def BOT_TOKEN(self) -> str:
+        """Токен бота рядком — для HMAC-перевірки Mini App initData."""
+        return self.bot_token.get_secret_value()
+
+    @property
+    def ADMIN_IDS(self) -> list[int]:
+        """Усі Telegram ID адмінів: admin_id + додаткові з ADMIN_IDS."""
+        ids: list[int] = []
+        if self.admin_id:
+            ids.append(int(self.admin_id))
+        extra = (self.admin_ids or "").replace(";", ",")
+        for part in extra.split(","):
+            part = part.strip()
+            if part.isdigit():
+                uid = int(part)
+                if uid not in ids:
+                    ids.append(uid)
+        return ids
 
 try:
     config = Settings()

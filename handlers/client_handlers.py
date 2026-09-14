@@ -38,6 +38,13 @@ async def get_news_feed(db: AsyncSession = Depends(get_db)):
     for p in products:
         try:
             p_api = ProductAPI.model_validate(p) # Базова валідація
+            if not getattr(p, "is_ai_processed", False):
+                p_api.category = None
+                p_api.sub_category = None
+                p_api.season = None
+                p_api.target_niche = None
+                p_api.gender = None
+                p_api.attributes = None
             
             # Ручне завантаження варіантів (це вирішує MissingGreenlet)
             variants_api = []
@@ -57,12 +64,24 @@ async def get_news_feed(db: AsyncSession = Depends(get_db)):
 # --- 2. Вкладка "КАТАЛОГ" ---
 @router.get("/catalog", response_model=List[ProductAPI])
 async def get_catalog(
-    category: str = None, 
+    category: str = None,
+    sub_category: str = None,
+    season: str = None,
+    target_niche: str = None,
+    gender: str = None,
     db: AsyncSession = Depends(get_db)
 ):
     stmt = select(Product).where(Product.status == 'active')
     if category:
         stmt = stmt.where(Product.category == category)
+    if sub_category:
+        stmt = stmt.where(Product.sub_category == sub_category)
+    if season:
+        stmt = stmt.where(Product.season == season)
+    if target_niche:
+        stmt = stmt.where(Product.target_niche == target_niche)
+    if gender:
+        stmt = stmt.where(Product.gender == gender)
         
     stmt = stmt.limit(50).options(
         # --- [ВИПРАВЛЕННЯ 3 (Eager Loading)] ---
@@ -78,6 +97,13 @@ async def get_catalog(
     for p in products:
         try:
             p_api = ProductAPI.model_validate(p)
+            if not getattr(p, "is_ai_processed", False):
+                p_api.category = None
+                p_api.sub_category = None
+                p_api.season = None
+                p_api.target_niche = None
+                p_api.gender = None
+                p_api.attributes = None
             variants_api = []
             for v in p.variants:
                 v_api = ProductVariantAPI.model_validate(v)

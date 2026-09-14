@@ -4,7 +4,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from database.models import (
     SupplierType, SupplierStatus, OrderStatus, UserRole, PayoutMethod,
-    PriceRuleType
+    PriceRuleType, SupplierLegalType
 )
 
 # --- МОДЕЛІ З `web_app.py` ---
@@ -41,9 +41,49 @@ class ProductAPI(BaseModel):
     description: Optional[str] = None
     pictures: Optional[List[str]] = None
     category: Optional[str] = Field(alias='category')
+    sub_category: Optional[str] = None
+    season: Optional[str] = None
+    target_niche: Optional[str] = None
+    gender: Optional[str] = None
+    attributes: Optional[Dict[str, Any]] = None
+    supplier_name: Optional[str] = None
     
     options: List[ProductOptionAPI] = []
     variants: List[ProductVariantAPI] = []
+
+
+class CategorySubAPI(BaseModel):
+    name: str
+    count: int
+
+
+class CategoryNicheAPI(BaseModel):
+    name: str
+    count: int
+    subcategories: List[CategorySubAPI] = []
+
+
+class CategoryAPI(BaseModel):
+    """Головна AI-категорія для меню MiniApp (без MyDrop ID)."""
+    name: str
+    count: int
+    subcategories: List[CategorySubAPI] = []
+    niches: List[CategoryNicheAPI] = []
+
+
+class FilterAttributeAPI(BaseModel):
+    name: str
+    values: List[str] = []
+
+
+class ProductFiltersAPI(BaseModel):
+    """Унікальні PIM-значення для динамічної панелі фільтрів MiniApp."""
+    target_niche: List[str] = []
+    season: List[str] = []
+    gender: List[str] = []
+    attributes: List[FilterAttributeAPI] = []
+    sub_categories: List[CategorySubAPI] = []
+    total: int = 0
 
 # --- МОДЕЛІ З `auth_handlers.py` ---
 class UserResponse(BaseModel):
@@ -68,7 +108,144 @@ class LoginRequest(BaseModel):
     password: str
 
 class TelegramLoginRequest(BaseModel):
-    initData: str
+    initData: Optional[str] = None
+    init_data: Optional[str] = None
+
+    def resolved_init_data(self) -> str:
+        return (self.initData or self.init_data or "").strip()
+
+
+TelegramAuthRequest = TelegramLoginRequest
+
+
+class TelegramAuthUserResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    telegram_id: int
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    role: str
+    created_at: Optional[datetime] = None
+
+
+class TelegramAuthResponse(BaseModel):
+    user: TelegramAuthUserResponse
+    role: str
+    is_guest: bool = False
+
+
+class PartnerRegisterRequest(BaseModel):
+    """Форма Mini App «Стати постачальником» — усі поля з React."""
+    supplier_type: str = Field(min_length=1)
+    name: Optional[str] = None
+    shop_name: Optional[str] = None
+    store_name: Optional[str] = None
+    yml_link: Optional[str] = None
+    xml_url: Optional[str] = None
+    channel_link: Optional[str] = None
+    telegram_channel: Optional[str] = None
+    telegram_id: Optional[int] = None
+    full_name: Optional[str] = None
+    company_name: Optional[str] = None
+    tax_id: Optional[str] = None
+    edrpou_ipn: Optional[str] = None
+    edrpou: Optional[str] = None
+    ipn: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    telegram_username: Optional[str] = None
+    manager_telegram: Optional[str] = None
+    description: Optional[str] = None
+    store_description: Optional[str] = None
+    payment_iban: Optional[str] = None
+    iban: Optional[str] = None
+    payment_card_holder: Optional[str] = None
+    payment_bank_name: Optional[str] = None
+    bank_name: Optional[str] = None
+
+    def resolved_name(self) -> str:
+        value = (self.store_name or self.shop_name or self.name or self.company_name or "").strip()
+        if not value:
+            raise ValueError("name is required")
+        return value
+
+    def resolved_yml(self) -> Optional[str]:
+        value = (self.yml_link or self.xml_url or "").strip()
+        return value or None
+
+    def resolved_channel(self) -> Optional[str]:
+        value = (self.channel_link or self.telegram_channel or "").strip()
+        return value or None
+
+    def resolved_edrpou_ipn(self) -> Optional[str]:
+        value = (self.edrpou_ipn or self.tax_id or self.edrpou or self.ipn or "").strip()
+        return value or None
+
+    def resolved_iban(self) -> Optional[str]:
+        value = (self.iban or self.payment_iban or "").strip()
+        return value or None
+
+    def resolved_bank(self) -> Optional[str]:
+        value = (self.bank_name or self.payment_bank_name or "").strip()
+        return value or None
+
+    def resolved_description(self) -> Optional[str]:
+        value = (self.store_description or self.description or "").strip()
+        return value or None
+
+    def resolved_legal_type(self) -> SupplierLegalType:
+        raw = (self.supplier_type or "").strip().lower()
+        if raw in ("business", "company"):
+            return SupplierLegalType.business
+        if raw in ("individual", "fop", "person"):
+            return SupplierLegalType.individual
+        raise ValueError("supplier_type must be 'individual' or 'business'")
+
+
+class PartnerRegisterResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: Optional[int] = None
+    name: str
+    supplier_type: Optional[str] = None
+    yml_link: Optional[str] = None
+    channel_link: Optional[str] = None
+    is_verified: bool = False
+    status: Optional[str] = None
+    has_duplicates: bool = False
+    trial_ends_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+
+class PendingSupplierApplicationResponse(BaseModel):
+    """Заявка для React-адмінки, включно з AI-звітом."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    shop_name: str
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    company_name: Optional[str] = None
+    supplier_type: Optional[str] = None
+    tax_id: Optional[str] = None
+    description: Optional[str] = None
+    xml_url: Optional[str] = None
+    yml_link: Optional[str] = None
+    channel_link: Optional[str] = None
+    manager_telegram: Optional[str] = None
+    iban: Optional[str] = None
+    bank_name: Optional[str] = None
+    status: str
+    is_verified: bool = False
+    telegram_id: Optional[int] = None
+    ai_score_report: Optional[str] = None
+    trial_ends_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
     
 # --- МОДЕЛІ З `admin_handlers.py` ---
 class SupplierAdminResponse(BaseModel):

@@ -17,9 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from database.db import get_db
-from database.models import Order, OrderItem, OrderStatus, PaymentStatus, ProductVariant, Supplier
+from database.models import Order, OrderItem, OrderStatus, PaymentStatus, ProductVariant, Supplier, SupplierType
 from api_models import OrderCreate, OrderCreateResponse
 from services.mydrop_api import create_order_in_mydrop, MyDropAPIError
+from config_reader import config
 
 logger = logging.getLogger(__name__)
 
@@ -138,8 +139,22 @@ async def create_order(payload: OrderCreate, db: AsyncSession = Depends(get_db))
 
 async def _sync_order_to_mydrop(order: Order, order_items: List[OrderItem], db: AsyncSession) -> None:
     """
-    Відправляє щойно створене замовлення в кабінет постачальника MyDrop
-    (`POST /vendor/api/orders`), одразу після успішного `db.commit()`.
+    Відправляє щойно створене замовлення в НАШ кабінет ДРОПШИПЕРА MyDrop
+    (`POST /dropshipper/api/orders`), одразу після успішного `db.commit()`.
+
+    [АРХІТЕКТУРА — ВИПРАВЛЕНО 13.09.2026, було 401] Ми НЕ постачальник
+    (Vendor) у MyDrop — ми ОДИН дропшипер, що працює з каталогами кількох
+    вендорів. Тож:
+    - Авторизація іде НАШИМ майстер-ключем дропшипера (`config.mydrop_api_key`
+      з `.env`), а НЕ `supplier.mydrop_api_key` (те поле — це ПУБЛІЧНИЙ ключ
+      YML-вигрузки постачальника, використовується лише для синхронізації
+      каталогу в `services/mydrop_sync.py`, не для замовлень!).
+    - У кожному товарі замовлення MyDrop вимагає `vendor_name` — назву
+      постачальника В КАБІНЕТІ MYDROP, щоб CRM прив'язала позицію до
+      потрібного вендора. Беремо `supplier.name` з нашої БД.
+    - Відправляємо лише для постачальників типу `SupplierType.mydrop`
+      (independent-постачальники не існують у MyDrop як вендори — для них
+      відправка не має сенсу).
 
     [ПРИПУЩЕННЯ, за яким написана ця функція] Всі товари в кошику належать
     ОДНОМУ постачальнику — тож достатньо взяти `supplier_id` першого товару,
@@ -155,12 +170,14 @@ async def _sync_order_to_mydrop(order: Order, order_items: List[OrderItem], db: 
     [ЧОГО БРАКУЄ] У `Order` є поля `city_ref`/`warehouse_ref` для точного
     міста/відділення Нової Пошти, але поточна схема чекауту (`OrderCreate`
     в `api_models.py`) їх не приймає — фронтенд шле лише вільний текст
-    `delivery_address`. Тож у MyDrop зараз летить `delivery_address` як
-    текст (MyDrop це підтримує для служб без повної інтеграції). Якщо
-    потрібна автогенерація ТТН у MyDrop для Нової Пошти — фронтенд має
-    почати передавати `delivery_city_ref`/`delivery_warehouse_ref` (як це
-    вже робить `SecureCreateOrderRequest` у `web_app.py`), а тоді тут
-    достатньо буде прокинути їх у `order_data["city"]`/`["warehouse_number"]`.
+    `delivery_address`. При цьому у Dropshipper API MyDrop взагалі НЕМАЄ
+    поля для тексту адреси (лише `city`+`warehouse_number` для служб з
+    повною інтеграцією) — тож текст адреси йде в `description`, щоб не
+    загубити інформацію (`MyDropAPIClient.create_order` це вже обробляє).
+    Якщо потрібна автогенерація ТТН — фронтенд має почати передавати
+    `delivery_city_ref`/`delivery_warehouse_ref` (як це вже робить
+    `SecureCreateOrderRequest` у `web_app.py`), а тоді тут достатньо буде
+    прокинути їх у `order_data["city"]`/`["warehouse_number"]`.
     """
     first_supplier_id = next((item.supplier_id for item in order_items if item.supplier_id), None)
     if not first_supplier_id:
@@ -186,11 +203,20 @@ async def _sync_order_to_mydrop(order: Order, order_items: List[OrderItem], db: 
         )
         return
 
-    if not supplier.mydrop_api_key:
+    if supplier.type != SupplierType.mydrop:
         logger.info(
-            "MyDrop: постачальник #%s (%s) не має mydrop_api_key — замовлення %s НЕ відправлено в MyDrop "
-            "(ймовірно, independent-постачальник без інтеграції).",
-            supplier.id, supplier.name, order.order_uid,
+            "MyDrop: постачальник #%s (%s) має тип '%s' (не MyDrop-вендор) — замовлення %s "
+            "НЕ відправляється в MyDrop Dropshipper API.",
+            supplier.id, supplier.name, supplier.type.value, order.order_uid,
+        )
+        return
+
+    master_api_key = config.mydrop_api_key.get_secret_value() if config.mydrop_api_key else ""
+    if not master_api_key:
+        logger.error(
+            "MyDrop: не налаштовано mydrop_api_key (майстер-ключ НАШОГО кабінету дропшипера) "
+            "в конфігурації — замовлення %s НЕ відправлено в MyDrop.",
+            order.order_uid,
         )
         return
 
@@ -218,10 +244,11 @@ async def _sync_order_to_mydrop(order: Order, order_items: List[OrderItem], db: 
 
     try:
         response = await create_order_in_mydrop(
-            api_key=supplier.mydrop_api_key,
+            api_key=master_api_key,
             order_data={
                 "customer_name": order.customer_name,
                 "customer_phone": order.customer_phone,
+                "vendor_name": supplier.name,
                 "delivery_service": order.delivery_service,
                 "delivery_address": order.delivery_address,
                 "note": order.note,
@@ -231,18 +258,18 @@ async def _sync_order_to_mydrop(order: Order, order_items: List[OrderItem], db: 
             order_items=mydrop_items,
         )
         logger.info(
-            "MyDrop: замовлення %s відправлено постачальнику #%s (%s). MyDrop order id=%s.",
-            order.order_uid, supplier.id, supplier.name, response.get("id"),
+            "MyDrop (Dropshipper API): замовлення %s відправлено (вендор %s). MyDrop order id=%s.",
+            order.order_uid, supplier.name, response.get("id"),
         )
     except MyDropAPIError as e:
         # MyDrop лежить / ключ невалідний / інша помилка API — НЕ валимо
         # чекаут, лише логуємо. Замовлення в нашій БД вже збережено.
         logger.error(
-            "MyDrop: не вдалося відправити замовлення %s постачальнику #%s (%s): %s",
-            order.order_uid, supplier.id, supplier.name, e,
+            "MyDrop: не вдалося відправити замовлення %s (вендор %s): %s",
+            order.order_uid, supplier.name, e,
         )
     except Exception as e:
         logger.error(
-            "MyDrop: неочікувана помилка при відправці замовлення %s постачальнику #%s: %s",
-            order.order_uid, supplier.id, e, exc_info=True,
+            "MyDrop: неочікувана помилка при відправці замовлення %s: %s",
+            order.order_uid, e, exc_info=True,
         )

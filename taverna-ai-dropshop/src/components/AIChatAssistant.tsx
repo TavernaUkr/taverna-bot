@@ -7,6 +7,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { useNavigate } from "react-router-dom";
 import { hapticImpact } from "@/lib/haptics";
+import { useFloatingToolsOptional } from "@/components/floating/FloatingToolsContext";
 
 interface Message {
   id: string;
@@ -55,6 +56,8 @@ export function openAIChatWithContext(ctx: OrderContext) {
 export const AIChatAssistant = () => {
   const navigate = useNavigate();
   const { sessionToken, profile } = useTelegramAuthContext();
+  const floating = useFloatingToolsOptional();
+  const setChatOpen = floating?.setChatOpen;
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -74,11 +77,15 @@ export const AIChatAssistant = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    setChatOpen?.(isOpen);
+  }, [isOpen, setChatOpen]);
+
   // Register global callback for opening with context
   useEffect(() => {
     openWithContextCallback = (ctx: OrderContext) => {
-      setOrderContext(ctx);
       setIsOpen(true);
+      setOrderContext(ctx);
       
       // Add context message
       const contextMsg: Message = {
@@ -207,9 +214,11 @@ export const AIChatAssistant = () => {
     <>
       {/* Floating Action Button */}
       <button
+        type="button"
+        aria-label="Taverna AI"
         onClick={() => setIsOpen(true)}
         className={cn(
-          "fixed bottom-24 right-4 z-40",
+          "fixed right-4 z-[55]",
           "w-14 h-14 rounded-full",
           "bg-gradient-to-br from-primary to-accent",
           "text-primary-foreground shadow-lg",
@@ -217,6 +226,9 @@ export const AIChatAssistant = () => {
           "hover:scale-110 active:scale-95",
           "transition-all duration-200",
           "animate-pulse-slow",
+          floating?.feedOpen
+            ? "bottom-[calc(25rem+env(safe-area-inset-bottom,0px))] right-3"
+            : "bottom-[calc(11.25rem+env(safe-area-inset-bottom,0px))]",
           isOpen && "hidden"
         )}
       >
@@ -227,7 +239,7 @@ export const AIChatAssistant = () => {
       {/* Chat Window */}
       {isOpen && (
         <div className={cn(
-          "fixed inset-x-4 bottom-24 z-50",
+          "fixed inset-x-4 bottom-24 z-[70]",
           "max-w-md mx-auto",
           "bg-card border border-border rounded-2xl",
           "shadow-2xl overflow-hidden",

@@ -959,13 +959,14 @@ const TopSellersSection = () => {
   );
 };
 
-export const RatingsTab = () => {
+export const RatingsTab = ({ hideChrome = false }: { hideChrome?: boolean }) => {
   const navigate = useNavigate();
   const [rulesOpen, setRulesOpen] = useState(false);
 
 
   return (
-    <div className="space-y-4 pb-28 animate-fade-in">
+    <div className={hideChrome ? "space-y-4 pb-4 animate-fade-in" : "space-y-4 pb-28 animate-fade-in"}>
+      {!hideChrome && (
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Trophy className="h-5 w-5 text-rating" />
@@ -992,6 +993,7 @@ export const RatingsTab = () => {
           </button>
         </div>
       </div>
+      )}
 
       <Tabs defaultValue="my" className="w-full">
         <TabsList className="grid grid-cols-2 w-full">
@@ -1013,7 +1015,7 @@ export const RatingsTab = () => {
         </TabsContent>
       </Tabs>
 
-      <RatingRulesSheet open={rulesOpen} onOpenChange={setRulesOpen} />
+      {!hideChrome && <RatingRulesSheet open={rulesOpen} onOpenChange={setRulesOpen} />}
     </div>
   );
 };

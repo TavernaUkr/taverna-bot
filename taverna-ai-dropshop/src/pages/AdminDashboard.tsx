@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Users, Check, X, Loader2, DollarSign, ShoppingCart, Package,
   Eye, ChevronDown, ChevronUp, Shield, UserCog, AlertTriangle, RefreshCw,
@@ -34,6 +34,11 @@ import { CommandCenter } from '@/components/admin/CommandCenter';
 import { PaymentsManager } from '@/components/admin/PaymentsManager';
 import { ShopBalancesPanel } from '@/components/admin/ShopBalancesPanel';
 import { TavernaGroupPanel } from '@/components/admin/TavernaGroupPanel';
+import {
+  fetchPendingSupplierApplications,
+  approveSupplierApplication,
+  rejectSupplierApplication,
+} from '@/lib/backendApi';
 
 interface SupplierApplication {
   id: string;
@@ -53,6 +58,7 @@ interface SupplierApplication {
   suggested_categories: string[] | null;
   profile_id: string | null;
   telegram_id: number | null;
+  ai_score_report?: string | null;
 }
 
 interface OrderStats {
@@ -66,7 +72,8 @@ interface OrderStats {
 
 export default function AdminDashboard() {
   const navigate = useNavigate();
-  const { isLoading: authLoading, rolesLoading, isAuthenticated, effectiveRole, sessionToken } = useTelegramAuthContext();
+  const [searchParams] = useSearchParams();
+  const { isLoading: authLoading, rolesLoading, isAuthenticated, effectiveRole, profile } = useTelegramAuthContext();
   const [activeTab, setActiveTab] = useState('overview');
   const [applications, setApplications] = useState<SupplierApplication[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -87,24 +94,68 @@ export default function AdminDashboard() {
   const isAdmin = isAuthenticated && effectiveRole === 'admin';
 
   useEffect(() => {
+    const tab = searchParams.get("tab");
+    const zone = searchParams.get("zone");
+    if (tab) setActiveTab(tab);
+    if (zone === "danger") {
+      setActiveTab("overview");
+      const tryScroll = (attempt = 0) => {
+        const el = document.getElementById("danger-zone");
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          return;
+        }
+        if (attempt < 20) window.setTimeout(() => tryScroll(attempt + 1), 150);
+      };
+      window.setTimeout(() => tryScroll(), 80);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
     if (isAdmin) {
       fetchApplications();
       fetchOrderStats();
     }
   }, [isAdmin]);
 
+  const adminTelegramId =
+    profile?.telegram_id ||
+    (typeof window !== "undefined"
+      ? (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id
+      : null);
+
   const fetchApplications = async () => {
     setIsLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('supplier_applications')
-        .select('*')
-        .eq('status', 'pending')
-        .order('created_at', { ascending: false });
-      if (error) throw error;
-      setApplications(data || []);
+      const rows = await fetchPendingSupplierApplications(
+        adminTelegramId ? Number(adminTelegramId) : undefined
+      );
+      setApplications(
+        rows.map((r) => ({
+          id: String(r.id),
+          shop_name: r.shop_name,
+          full_name: r.full_name || "",
+          email: r.email || "",
+          phone: r.phone || "",
+          company_name: r.company_name,
+          supplier_type: r.supplier_type || "individual",
+          tax_id: r.tax_id || "",
+          description: r.description,
+          xml_url: r.xml_url,
+          status: r.status,
+          created_at: r.created_at || new Date().toISOString(),
+          reseller_probability: null,
+          plagiarism_score: null,
+          suggested_categories: null,
+          profile_id: null,
+          telegram_id: r.telegram_id ?? null,
+          ai_score_report: r.ai_score_report,
+        }))
+      );
+      const focusId = searchParams.get("supplier");
+      if (focusId) setExpandedId(focusId);
     } catch (err) {
-      console.error('Error fetching applications:', err);
+      console.error("Error fetching applications:", err);
     } finally {
       setIsLoading(false);
     }
@@ -136,11 +187,7 @@ export default function AdminDashboard() {
   const handleApprove = async (app: SupplierApplication, assignRole: string = 'supplier') => {
     setProcessingId(app.id);
     try {
-      const markup = customMarkup[app.id] || 33;
-      const { error } = await supabase.functions.invoke('process-supplier-application', {
-        body: { application_id: app.id, action: 'approve', markup_percentage: markup, session_token: sessionToken, assign_role: assignRole },
-      });
-      if (error) throw error;
+      await approveSupplierApplication(Number(app.id), adminTelegramId ? Number(adminTelegramId) : undefined);
       toast.success(`"${app.shop_name}" схвалено!`);
       setApplications(prev => prev.filter(a => a.id !== app.id));
       fetchOrderStats();
@@ -155,11 +202,7 @@ export default function AdminDashboard() {
     if (!rejectionReason.trim()) { toast.error('Вкажіть причину'); return; }
     setProcessingId(app.id);
     try {
-      const { error } = await supabase
-        .from('supplier_applications')
-        .update({ status: 'rejected', rejection_reason: rejectionReason, reviewed_at: new Date().toISOString() })
-        .eq('id', app.id);
-      if (error) throw error;
+      await rejectSupplierApplication(Number(app.id), adminTelegramId ? Number(adminTelegramId) : undefined);
       toast.success('Заявку відхилено');
       setApplications(prev => prev.filter(a => a.id !== app.id));
       setRejectionReason('');
@@ -438,6 +481,19 @@ export default function AdminDashboard() {
                               </Badge>
                             )}
                           </div>
+                        )}
+
+                        {app.ai_score_report && (
+                          <div className="p-3 rounded-lg bg-muted/60 border border-border space-y-1">
+                            <p className="text-xs font-medium text-foreground flex items-center gap-1">
+                              <Brain className="h-3.5 w-3.5" />
+                              AI-звіт для CEO
+                            </p>
+                            <p className="text-xs text-muted-foreground whitespace-pre-wrap">{app.ai_score_report}</p>
+                          </div>
+                        )}
+                        {!app.ai_score_report && (
+                          <p className="text-xs text-muted-foreground">AI-звіт ще готується…</p>
                         )}
 
                         {app.description && (

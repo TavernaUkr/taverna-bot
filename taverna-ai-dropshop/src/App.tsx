@@ -2,7 +2,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route, useLocation, Navigate, useParams } from "react-router-dom";
+import { BrowserRouter, Routes, Route, useLocation, Navigate, useParams, useNavigate } from "react-router-dom";
 import { TelegramAuthProvider } from "@/components/TelegramAuthProvider";
 import { CartProvider } from "@/contexts/CartContext";
 import { FavoritesProvider } from "@/components/FavoritesContext";
@@ -26,13 +26,18 @@ import SupplierStoreOrders from "./pages/SupplierStoreOrders";
 import OrdersHistoryPage from "./pages/OrdersHistoryPage";
 import SupplierStoreOrdersHistory from "./pages/SupplierStoreOrdersHistory";
 import MyShops from "./pages/MyShops";
+import ManagerChats from "./pages/ManagerChats";
 import WalletAccount from "./pages/WalletAccount";
 import SupportChat from "./components/SupportChat";
 import NotFound from "./pages/NotFound";
 import OAuthConsent from "./pages/OAuthConsent";
 import Login from "./pages/Login";
+import { AppBackProvider } from "@/hooks/useAppBack";
+import Ratings from "./pages/Ratings";
 import { FloatingDevRoleSwitcher } from "@/components/dev/FloatingDevRoleSwitcher";
 import { FloatingBonusWidget } from "@/components/promos/FloatingBonusWidget";
+import { FloatingToolsProvider } from "@/components/floating/FloatingToolsContext";
+import { AIChatAssistant } from "@/components/AIChatAssistant";
 
 const queryClient = new QueryClient();
 
@@ -55,45 +60,34 @@ const pageTransition = {
   duration: 0.2,
 };
 
-// Telegram BackButton handler
-function TelegramBackButton() {
+function TelegramStartParamRouter() {
+  const navigate = useNavigate();
   const location = useLocation();
 
   useEffect(() => {
-    // Access Telegram WebApp without strict typing
-    const telegram = (window as any).Telegram;
-    const tg = telegram?.WebApp;
-    const backButton = tg?.BackButton;
-    
-    if (!backButton) return;
-
-    // Main tabs where back button should be hidden
-    const mainRoutes = ['/', '/search', '/promos', '/support'];
-    const isMainRoute = mainRoutes.includes(location.pathname);
-
-    if (isMainRoute) {
-      backButton.hide?.();
-    } else {
-      backButton.show?.();
-      const handleBack = () => window.history.back();
-      backButton.onClick?.(handleBack);
-      
-      return () => {
-        backButton.offClick?.(handleBack);
-      };
+    const tg = (window as any).Telegram?.WebApp;
+    const fromTg = tg?.initDataUnsafe?.start_param as string | undefined;
+    const params = new URLSearchParams(location.search);
+    const fromQuery = params.get("startapp") || params.get("supplier");
+    const raw = String(fromTg || fromQuery || "");
+    const match = raw.match(/admin_supplier_(\d+)/);
+    if (!match) return;
+    const id = match[1];
+    const target = `/admin-dashboard?supplier=${id}`;
+    if (location.pathname !== "/admin-dashboard" || params.get("supplier") !== id) {
+      navigate(target, { replace: true });
     }
-  }, [location.pathname]);
+  }, [navigate, location.pathname, location.search]);
 
   return null;
 }
 
-// Animated Routes wrapper
 function AnimatedRoutes() {
   const location = useLocation();
 
   return (
-    <>
-      <TelegramBackButton />
+    <AppBackProvider>
+      <TelegramStartParamRouter />
       <AnimatePresence mode="wait">
         <motion.div
           key={location.pathname}
@@ -102,10 +96,11 @@ function AnimatedRoutes() {
           exit="exit"
           variants={pageVariants}
           transition={pageTransition}
-          className="min-h-screen pb-safe"
+          className="min-h-screen pb-safe w-full max-w-[100vw]"
         >
           <Routes location={location}>
             <Route path="/" element={<Index />} />
+            <Route path="/ratings" element={<Ratings />} />
             <Route path="/partner" element={<SupplierRegistration />} />
             <Route path="/supplier" element={<SupplierDashboard />} />
             <Route path="/product/:id" element={<ProductDetail />} />
@@ -128,6 +123,7 @@ function AnimatedRoutes() {
             <Route path="/store-orders" element={<SupplierStoreOrders />} />
             <Route path="/store-orders/:supplierId" element={<SupplierStoreOrders />} />
             <Route path="/my-shops" element={<MyShops />} />
+            <Route path="/manager-chats" element={<ManagerChats />} />
             <Route path="/supplier-balance" element={<Navigate to="/wallet" replace />} />
             <Route path="/supplier-balance/:supplierId" element={<ShopWalletRedirect />} />
             <Route path="/orders-history" element={<OrdersHistoryPage />} />
@@ -140,7 +136,7 @@ function AnimatedRoutes() {
           </Routes>
         </motion.div>
       </AnimatePresence>
-    </>
+    </AppBackProvider>
   );
 }
 
@@ -153,9 +149,12 @@ const App = () => (
             <Toaster />
             <Sonner />
             <BrowserRouter>
-              <AnimatedRoutes />
-              <FloatingBonusWidget />
-              <FloatingDevRoleSwitcher />
+              <FloatingToolsProvider>
+                <AnimatedRoutes />
+                <AIChatAssistant />
+                <FloatingBonusWidget />
+                <FloatingDevRoleSwitcher />
+              </FloatingToolsProvider>
             </BrowserRouter>
 
           </FavoritesProvider>
