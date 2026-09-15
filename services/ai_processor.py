@@ -13,9 +13,16 @@ import aiohttp
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config_reader import config
-from database.models import Product
+from database.models import Product, ProductAIStatus
 
 logger = logging.getLogger(__name__)
+
+class GeminiCapacityError(Exception):
+    """Gemini 429 / 503 — товар треба повернути в чергу, не падати."""
+
+    def __init__(self, status: int, message: str = ""):
+        super().__init__(message or f"Gemini capacity error {status}")
+        self.status = status
 
 GEMINI_MODEL = "gemini-2.0-flash"
 GEMINI_FALLBACK_MODEL = "gemini-1.5-flash-latest"
@@ -367,8 +374,12 @@ class ProductAIProcessor:
 
         async with aiohttp.ClientSession() as session:
             async with session.post(api_url, headers=headers, json=payload) as resp:
-                if resp.status == 429:
-                    raise Exception("429 Rate Limit")
+                if resp.status in (429, 503):
+                    body_preview = (await resp.text())[:300]
+                    raise GeminiCapacityError(
+                        resp.status,
+                        f"Gemini {resp.status}: {body_preview}",
+                    )
                 if resp.status != 200:
                     error_text = await resp.text()
                     raise Exception(f"Gemini API Error {resp.status}: {error_text}")
@@ -402,25 +413,7 @@ class ProductAIProcessor:
 
         for attempt, model_name in enumerate(models_to_try):
             try:
-                content = None
-                for retry_attempt in range(3):
-                    try:
-                        content = await self._complete(model_name, prompt)
-                        break
-                    except Exception as e:
-                        if "429" in str(e):
-                            wait_time = 20
-                            logger.warning(
-                                "⏳ Gemini Rate Limit. Чекаємо %s сек (спроба %s/3)...",
-                                wait_time,
-                                retry_attempt + 1,
-                            )
-                            await asyncio.sleep(wait_time)
-                        else:
-                            raise e
-
-                if not content:
-                    raise Exception("Вичерпано спроби через Rate Limit")
+                content = await self._complete(model_name, prompt)
 
                 cleaned_content = content.replace("```json", "").replace("```", "").strip()
                 start_idx = cleaned_content.find("{")
@@ -458,6 +451,7 @@ class ProductAIProcessor:
                 )
                 product.description = fields["description"]
                 product.is_ai_processed = True
+                product.ai_status = ProductAIStatus.completed
 
                 await db_session.flush()
                 logger.info(
@@ -473,6 +467,8 @@ class ProductAIProcessor:
                 )
                 return True
 
+            except GeminiCapacityError:
+                raise
             except Exception as e:
                 logger.error(
                     "❌ Gemini помилка для товару #%s (%s): %s",

@@ -221,6 +221,14 @@ class PartnerRegisterResponse(BaseModel):
     created_at: Optional[datetime] = None
 
 
+class SupplierImportProgressResponse(BaseModel):
+    """Прогрес AI-категоризації товарів поточного постачальника."""
+    total: int = 0
+    completed: int = 0
+    estimated_minutes: int = 0
+    is_importing: bool = False
+
+
 class PendingSupplierApplicationResponse(BaseModel):
     """Заявка для React-адмінки, включно з AI-звітом."""
     model_config = ConfigDict(from_attributes=True)
@@ -246,7 +254,73 @@ class PendingSupplierApplicationResponse(BaseModel):
     ai_score_report: Optional[str] = None
     trial_ends_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
-    
+    import_started: bool = False
+
+
+class AdminSupplierDeleteResponse(BaseModel):
+    ok: bool = True
+    supplier_id: int
+    user_reverted: bool = False
+    detail: str = "Постачальника та його товари видалено."
+
+
+class AdminDirectCreateSupplierRequest(BaseModel):
+    """Швидке створення магазину адміном (без обов'язкового ІПН/ЄДРПОУ)."""
+    shop_name: Optional[str] = None
+    name: Optional[str] = None
+    store_name: Optional[str] = None
+    yml_link: Optional[str] = None
+    xml_url: Optional[str] = None
+    description: Optional[str] = None
+    store_description: Optional[str] = None
+    edrpou_ipn: Optional[str] = None
+    tax_id: Optional[str] = None
+    iban: Optional[str] = None
+    payment_iban: Optional[str] = None
+    bank_name: Optional[str] = None
+    payment_bank_name: Optional[str] = None
+    manager_telegram: Optional[str] = None
+    channel_link: Optional[str] = None
+    telegram_channel_url: Optional[str] = None
+    legal_name: Optional[str] = None
+    payment_card_holder: Optional[str] = None
+    supplier_type: Optional[str] = None
+
+    def resolved_name(self) -> str:
+        value = (self.shop_name or self.store_name or self.name or "").strip()
+        if not value:
+            raise ValueError("shop_name is required")
+        return value
+
+    def resolved_yml(self) -> Optional[str]:
+        value = (self.yml_link or self.xml_url or "").strip()
+        return value or None
+
+    def resolved_description(self) -> Optional[str]:
+        value = (self.store_description or self.description or "").strip()
+        return value or None
+
+    def resolved_edrpou_ipn(self) -> Optional[str]:
+        value = (self.edrpou_ipn or self.tax_id or "").strip()
+        return value or None
+
+    def resolved_iban(self) -> Optional[str]:
+        value = (self.iban or self.payment_iban or "").strip()
+        return value or None
+
+    def resolved_bank(self) -> Optional[str]:
+        value = (self.bank_name or self.payment_bank_name or "").strip()
+        return value or None
+
+    def resolved_channel(self) -> Optional[str]:
+        value = (self.channel_link or self.telegram_channel_url or "").strip()
+        return value or None
+
+    def resolved_legal_name(self) -> Optional[str]:
+        value = (self.legal_name or self.payment_card_holder or "").strip()
+        return value or None
+
+
 # --- МОДЕЛІ З `admin_handlers.py` ---
 class SupplierAdminResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

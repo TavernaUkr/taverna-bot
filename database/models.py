@@ -61,6 +61,12 @@ class ProductStatus(str, enum.Enum):
     inactive = 'inactive'
     archived = 'archived'
 
+class ProductAIStatus(str, enum.Enum):
+    pending = "pending"
+    processing = "processing"
+    completed = "completed"
+    failed = "failed"
+
 class OrderItemStatus(str, enum.Enum):
     pending = "pending"
     confirmed = "confirmed"
@@ -203,6 +209,12 @@ class Product(Base):
     model = Column(String(255), nullable=True)
     ai_category = Column(String(255), nullable=True, index=True)
     is_ai_processed = Column(Boolean, nullable=False, default=False, index=True)
+    ai_status = Column(
+        Enum(ProductAIStatus, native_enum=False, length=32),
+        nullable=False,
+        default=ProductAIStatus.pending,
+        index=True,
+    )
     status = Column(Enum(ProductStatus), default=ProductStatus.active) # 'active', 'inactive'
     pictures = Column(JSON, nullable=True) # Зберігаємо як JSON список URL
     

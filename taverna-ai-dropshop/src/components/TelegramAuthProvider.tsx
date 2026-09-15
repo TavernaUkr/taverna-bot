@@ -49,9 +49,11 @@ interface TelegramAuthContextType {
   roles: AppRole[];
   realRoles: AppRole[];
   effectiveRole: TestRole;
+  realRole: TestRole;
   devRoleOverride: TestRole | null;
   canUseDevRoleSwitcher: boolean;
   setDevRoleOverride: (role: TestRole | null) => void;
+  authenticate: (options?: { forceTelegram?: boolean }) => Promise<any>;
   logout: () => Promise<void>;
   updateProfile: (updates: any) => Promise<any>;
   addAddress: (address: any) => Promise<any>;
@@ -80,9 +82,11 @@ export function useTelegramAuthContext() {
       roles: [] as AppRole[],
       realRoles: [] as AppRole[],
       effectiveRole: 'guest' as TestRole,
+      realRole: 'guest' as TestRole,
       devRoleOverride: null,
       canUseDevRoleSwitcher: false,
       setDevRoleOverride: () => {},
+      authenticate: async () => null,
       logout: async () => {},
       updateProfile: async () => null,
       addAddress: async () => null,
@@ -119,6 +123,21 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
         return;
       }
 
+      const fromProfile = ((auth.profile?.roles || []) as string[])
+        .map((role) => (role === 'client' || role === 'user' ? 'customer' : role))
+        .filter((role): role is AppRole =>
+          role === 'admin' ||
+          role === 'moderator' ||
+          role === 'supplier' ||
+          role === 'shop_manager' ||
+          role === 'customer'
+        );
+
+      if (/(?:^|&)hash=/.test(String(auth.sessionToken))) {
+        setRealRoles(fromProfile);
+        return;
+      }
+
       setRolesLoading(true);
       try {
         const { data, error } = await supabase.functions.invoke('manage-user-roles', {
@@ -127,24 +146,34 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
 
         if (error) throw error;
         if (data?.error) throw new Error(data.error);
-        setRealRoles((data?.roles || []) as AppRole[]);
+        const supabaseRoles = (data?.roles || []) as AppRole[];
+        setRealRoles(supabaseRoles.length > 0 ? supabaseRoles : fromProfile);
       } catch (err) {
         console.error('Error fetching user roles:', err);
-        setRealRoles([]);
+        setRealRoles(fromProfile);
       } finally {
         setRolesLoading(false);
       }
     };
 
     fetchRoles();
-  }, [auth.isAuthenticated, auth.profile?.id, auth.sessionToken]);
+  }, [auth.isAuthenticated, auth.profile?.id, auth.profile?.roles, auth.sessionToken]);
 
-  const isRealAdmin = realRoles.includes('admin');
+  const derivedRealRole: TestRole = useMemo(() => {
+    if (!auth.isAuthenticated) return 'guest';
+    const fromProfile = ((auth.profile?.roles || []) as string[]).map((role) =>
+      role === 'client' || role === 'user' ? 'customer' : role
+    );
+    const combined = [...realRoles, ...fromProfile];
+    if (combined.includes('admin')) return 'admin';
+    if (combined.includes('moderator')) return 'moderator';
+    if (combined.includes('supplier')) return 'supplier';
+    if (combined.includes('shop_manager')) return 'shop_manager';
+    return 'customer';
+  }, [auth.isAuthenticated, auth.profile?.roles, realRoles]);
 
-  // Visible for verified admins everywhere, plus in Lovable preview / localhost for UI development.
-  const canUseDevRoleSwitcher = useMemo(() => {
-    return isRealAdmin || isPreviewDevEnvironment();
-  }, [isRealAdmin]);
+  // Жук лише для реальної ролі admin з бекенду. guest/client/supplier — ніколи.
+  const canUseDevRoleSwitcher = derivedRealRole === 'admin';
 
   // Load stored override only when allowed
   useEffect(() => {
@@ -178,19 +207,8 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
     }
   }, [devRoleOverride, canUseDevRoleSwitcher]);
 
-  const derivedRealRole: TestRole = useMemo(() => {
-    if (!auth.isAuthenticated) return 'guest';
-    if (realRoles.includes('admin')) return 'admin';
-    if (realRoles.includes('moderator')) return 'moderator';
-    if (realRoles.includes('supplier')) return 'supplier';
-    if (realRoles.includes('shop_manager')) return 'shop_manager';
-    return 'customer';
-  }, [auth.isAuthenticated, realRoles]);
-
-  // IMPORTANT: override is honored ONLY for real admins in dev env
-  // OR in Lovable.dev environment for testing
-  const effectiveRole: TestRole = canUseDevRoleSwitcher && devRoleOverride 
-    ? devRoleOverride 
+  const effectiveRole: TestRole = canUseDevRoleSwitcher && devRoleOverride
+    ? devRoleOverride
     : derivedRealRole;
 
   const roles: AppRole[] = useMemo(() => {
@@ -199,7 +217,7 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
     return [effectiveRole] as AppRole[];
   }, [effectiveRole]);
 
-  const isAuthenticated = effectiveRole !== 'guest' && (canUseDevRoleSwitcher ? true : auth.isAuthenticated);
+  const isAuthenticated = effectiveRole !== 'guest';
   const previewRoleNames: Record<TestRole, string> = {
     guest: 'Гість',
     customer: 'Клієнт',
@@ -220,9 +238,27 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   } : null;
-  const profile = effectiveRole === 'guest'
-    ? null
-    : (canUseDevRoleSwitcher && devRoleOverride ? { ...(auth.profile || {}), ...previewProfile } : (auth.profile || previewProfile));
+  const profile = (() => {
+    if (effectiveRole === 'guest') return null;
+    const base = canUseDevRoleSwitcher && devRoleOverride
+      ? { ...(auth.profile || {}), ...previewProfile }
+      : (auth.profile || previewProfile);
+    if (!base) return null;
+    try {
+      const tgUser = (window as any).Telegram?.WebApp?.initDataUnsafe?.user;
+      if (!tgUser) return base;
+      return {
+        ...base,
+        first_name: base.first_name || tgUser.first_name || null,
+        last_name: base.last_name || tgUser.last_name || null,
+        telegram_username: base.telegram_username || tgUser.username || null,
+        avatar_url: base.avatar_url || tgUser.photo_url || null,
+        telegram_id: base.telegram_id || tgUser.id || null,
+      };
+    } catch {
+      return base;
+    }
+  })();
 
 
   // Provide test addresses in dev environment when real addresses are empty
@@ -259,42 +295,39 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
     const tg = (window as any).Telegram?.WebApp;
     
     if (tg?.initDataUnsafe?.user) {
-      // We have Telegram user data, store it
       setTelegramData(tg.initDataUnsafe.user);
-      
-      // If already authenticated, don't show dialog
-      if (!auth.isAuthenticated && !auth.isLoading) {
-        // Small delay to let the app render first
-        setTimeout(() => {
-          setShowConfirmDialog(true);
-        }, 500);
-      }
     }
     
-    // Expand Telegram WebApp to full height
     if (tg) {
-      tg.expand();
-      tg.ready();
+      try {
+        tg.ready?.();
+        tg.expand?.();
+      } catch {
+        // WebApp ще ініціалізується — додаток уже на екрані
+      }
     }
   }, [auth.isAuthenticated, auth.isLoading]);
 
   // Listen for manual auth request from profile
   useEffect(() => {
     const handleAuthRequest = () => {
+      if (auth.isAuthenticated) return;
       const tg = (window as any).Telegram?.WebApp;
-      if (tg?.initDataUnsafe?.user && !auth.isAuthenticated) {
+      if (tg?.initDataUnsafe?.user) {
         setTelegramData(tg.initDataUnsafe.user);
         setShowConfirmDialog(true);
+        return;
       }
+      auth.authenticate({ forceTelegram: true });
     };
 
     window.addEventListener('taverna:request-auth', handleAuthRequest);
     return () => window.removeEventListener('taverna:request-auth', handleAuthRequest);
-  }, [auth.isAuthenticated]);
+  }, [auth]);
 
   const handleConfirmAuth = async () => {
     setPendingAuth(true);
-    await auth.authenticate();
+    await auth.authenticate({ forceTelegram: true });
     setPendingAuth(false);
     setShowConfirmDialog(false);
   };
@@ -325,9 +358,11 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
       roles,
       realRoles,
       effectiveRole,
+      realRole: derivedRealRole,
       devRoleOverride: canUseDevRoleSwitcher ? devRoleOverride : null,
       canUseDevRoleSwitcher,
       setDevRoleOverride,
+      authenticate: auth.authenticate,
       logout: auth.logout,
       updateProfile: auth.updateProfile,
       addAddress: auth.addAddress,
@@ -404,16 +439,6 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      {/* Loading Overlay */}
-      {auth.isLoading && !showConfirmDialog && (
-        <div className="fixed inset-0 bg-background/80 backdrop-blur-sm z-50 flex items-center justify-center">
-          <div className="flex flex-col items-center gap-3">
-            <Loader2 className="h-8 w-8 animate-spin text-primary" />
-            <p className="text-sm text-muted-foreground">Завантаження...</p>
-          </div>
-        </div>
-      )}
     </TelegramAuthContext.Provider>
   );
 }

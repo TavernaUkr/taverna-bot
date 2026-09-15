@@ -20,9 +20,8 @@ interface DevRoleSwitcherProps {
 
 export const DevRoleSwitcher = ({ currentRole, onRoleChange }: DevRoleSwitcherProps) => {
   const [isOpen, setIsOpen] = useState(false);
-  const { canUseDevRoleSwitcher, setDevRoleOverride } = useTelegramAuthContext();
-  const isAdmin = canUseDevRoleSwitcher;
-  const isChecking = false;
+  const { canUseDevRoleSwitcher, setDevRoleOverride, realRole } = useTelegramAuthContext();
+  const isRealAdmin = canUseDevRoleSwitcher && realRole === "admin";
 
   const roleLabels: Record<TestRole, { label: string; color: string; description: string }> = {
 
@@ -58,8 +57,8 @@ export const DevRoleSwitcher = ({ currentRole, onRoleChange }: DevRoleSwitcherPr
     },
   };
 
-  // Only show to real admins (verified from database) or in DEV_MODE
-  if (isChecking || !isAdmin) {
+  // Тільки реальний admin з бекенду. guest / client / supplier — не рендеримо.
+  if (!isRealAdmin) {
     return null;
   }
 
@@ -147,7 +146,11 @@ export const DevRoleSwitcher = ({ currentRole, onRoleChange }: DevRoleSwitcherPr
         </Select>
 
         <button
-          onClick={() => setDevRoleOverride(null)}
+          onClick={() => {
+            setDevRoleOverride(null);
+            onRoleChange(realRole);
+            setIsOpen(false);
+          }}
           className="w-full flex items-center justify-center gap-2 h-8 rounded-lg border border-border text-xs text-muted-foreground hover:bg-muted transition-colors"
         >
           <RotateCcw className="h-3 w-3" />

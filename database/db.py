@@ -3,7 +3,7 @@ import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from config_reader import config
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,55 @@ async def init_db_pragmas() -> None:
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL;"))
         await conn.execute(text("PRAGMA synchronous=NORMAL;"))
+
+
+async def ensure_product_ai_status_column() -> None:
+    """
+    Live-режим: додає ai_status, якщо колонки ще немає (без обов'язкового alembic).
+    """
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        insp = inspect(sync_conn)
+        if "products" not in set(insp.get_table_names()):
+            return
+        cols = {col["name"] for col in insp.get_columns("products")}
+        if "ai_status" not in cols:
+            sync_conn.execute(text(
+                "ALTER TABLE products ADD COLUMN ai_status VARCHAR(32) DEFAULT 'pending' NOT NULL"
+            ))
+            logger.info("Додано колонку products.ai_status.")
+        indexes = {idx["name"] for idx in insp.get_indexes("products")}
+        if "ix_products_ai_status" not in indexes:
+            try:
+                sync_conn.execute(text(
+                    "CREATE INDEX ix_products_ai_status ON products (ai_status)"
+                ))
+            except Exception:
+                pass
+        dialect = sync_conn.dialect.name
+        if dialect == "sqlite":
+            sync_conn.execute(text(
+                "UPDATE products SET ai_status = 'completed' "
+                "WHERE is_ai_processed = 1 AND ai_status = 'pending'"
+            ))
+            sync_conn.execute(text(
+                "UPDATE products SET ai_status = 'pending' "
+                "WHERE is_ai_processed = 0 AND (ai_status IS NULL OR ai_status = '')"
+            ))
+        else:
+            sync_conn.execute(text(
+                "UPDATE products SET ai_status = 'completed' "
+                "WHERE is_ai_processed IS TRUE AND ai_status = 'pending'"
+            ))
+            sync_conn.execute(text(
+                "UPDATE products SET ai_status = 'pending' "
+                "WHERE is_ai_processed IS FALSE AND (ai_status IS NULL OR ai_status = '')"
+            ))
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
 
 
 async def get_db() -> AsyncSession:

@@ -38,6 +38,8 @@ import { FloatingDevRoleSwitcher } from "@/components/dev/FloatingDevRoleSwitche
 import { FloatingBonusWidget } from "@/components/promos/FloatingBonusWidget";
 import { FloatingToolsProvider } from "@/components/floating/FloatingToolsContext";
 import { AIChatAssistant } from "@/components/AIChatAssistant";
+import { FloatingSupportWidget } from "@/components/floating/FloatingSupportWidget";
+import { SupplierImportProgress } from "@/components/supplier/SupplierImportProgress";
 
 const queryClient = new QueryClient();
 
@@ -152,8 +154,10 @@ const App = () => (
               <FloatingToolsProvider>
                 <AnimatedRoutes />
                 <AIChatAssistant />
+                <FloatingSupportWidget />
                 <FloatingBonusWidget />
                 <FloatingDevRoleSwitcher />
+                <SupplierImportProgress />
               </FloatingToolsProvider>
             </BrowserRouter>
 

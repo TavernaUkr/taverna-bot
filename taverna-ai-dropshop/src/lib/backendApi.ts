@@ -6,7 +6,9 @@
  *
  * Бекенд піднімається локально командою:
  *   uvicorn web_app:app --reload --port 8000
- * і має бути доступний за адресою http://localhost:8000.
+ * Фронтенд завжди б'є у відносні шляхи `/api/...`.
+ * У dev Vite проксує `/api` на FastAPI (127.0.0.1:8000), тому телефон через
+ * ngrok ходить на той самий хост, що й Mini App, а не на себе.
  *
  * Якщо потрібно вказати іншу адресу (стейджинг/прод), додай у
  * taverna-ai-dropshop/.env:
@@ -15,7 +17,7 @@
 
 // --- Базова адреса бекенду -------------------------------------------------
 const RAW_BASE_URL =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined) || "http://localhost:8000";
+  (import.meta.env.VITE_API_BASE_URL as string | undefined) || "";
 
 export const API_BASE_URL = RAW_BASE_URL.replace(/\/+$/, "");
 
@@ -124,11 +126,13 @@ async function fetchWithTimeout(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    const extraHeaders = (init?.headers || {}) as Record<string, string>;
+    const { headers: _ignored, ...restInit } = init || {};
     return await fetch(url, {
       method: "GET",
-      headers: { Accept: "application/json" },
+      ...restInit,
+      headers: { Accept: "application/json", ...extraHeaders },
       signal: controller.signal,
-      ...init,
     });
   } finally {
     clearTimeout(timeoutId);
@@ -141,11 +145,18 @@ async function fetchWithTimeout(
  * та HTTP-помилку (4xx/5xx) — і в ЖОДНОМУ з цих випадків не "висне":
  * завжди або повертає дані, або кидає BackendApiError.
  */
-async function backendGet<T>(url: string): Promise<T> {
+async function backendGet<T>(
+  url: string,
+  extraHeaders?: Record<string, string>
+): Promise<T> {
   let response: Response;
 
   try {
-    response = await fetchWithTimeout(url);
+    response = await fetchWithTimeout(
+      url,
+      REQUEST_TIMEOUT_MS,
+      extraHeaders ? { headers: extraHeaders } : undefined
+    );
   } catch (networkError) {
     if (networkError instanceof DOMException && networkError.name === "AbortError") {
       throw new BackendApiError(
@@ -477,6 +488,45 @@ async function backendPost<T>(
   return (await response.json()) as T;
 }
 
+async function backendDelete<T>(
+  url: string,
+  errorPrefix: string,
+  extraHeaders?: Record<string, string>
+): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS, {
+      method: "DELETE",
+      headers: {
+        Accept: "application/json",
+        ...(extraHeaders || {}),
+      },
+    });
+  } catch (networkError) {
+    if (networkError instanceof DOMException && networkError.name === "AbortError") {
+      throw new BackendApiError(`${errorPrefix}: бекенд не відповів за ${REQUEST_TIMEOUT_MS / 1000}с.`);
+    }
+    throw new BackendApiError(
+      `${errorPrefix}: немає з'єднання з FastAPI на ${API_BASE_URL}.`
+    );
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const errJson = await response.json();
+      if (errJson?.detail) {
+        detail = typeof errJson.detail === "string" ? ` (${errJson.detail})` : ` (${JSON.stringify(errJson.detail)})`;
+      }
+    } catch {
+      // тіло відповіді не JSON
+    }
+    throw new BackendApiError(`${errorPrefix}: помилка ${response.status}${detail}`, response.status);
+  }
+
+  return (await response.json()) as T;
+}
+
 /** POST /api/v1/auth/telegram — валідація initData, Гость vs Клієнт. */
 export async function authTelegramMiniApp(
   initData: string
@@ -505,7 +555,16 @@ export async function registerPartner(
   );
 }
 
+export const SUPPLIERS_IMPORT_PROGRESS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/import-progress`;
 export const ADMIN_PENDING_SUPPLIERS_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/pending`;
+export const ADMIN_DIRECT_CREATE_SUPPLIER_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/direct-create`;
+
+export interface BackendSupplierImportProgress {
+  total: number;
+  completed: number;
+  estimated_minutes: number;
+  is_importing: boolean;
+}
 
 export interface BackendPendingSupplierApplication {
   id: number;
@@ -529,6 +588,27 @@ export interface BackendPendingSupplierApplication {
   ai_score_report?: string | null;
   trial_ends_at?: string | null;
   created_at?: string | null;
+  import_started?: boolean;
+}
+
+function adminTelegramHeaders(): Record<string, string> {
+  const initData =
+    typeof window !== "undefined"
+      ? String((window as any).Telegram?.WebApp?.initData || "")
+      : "";
+  const headers: Record<string, string> = {};
+  if (initData) {
+    headers.Authorization = `Bearer ${initData}`;
+  }
+  return headers;
+}
+
+/** GET /api/v1/suppliers/me/import-progress — прогрес AI-категоризації товарів. */
+export async function fetchSupplierImportProgress(): Promise<BackendSupplierImportProgress> {
+  return backendGet<BackendSupplierImportProgress>(
+    SUPPLIERS_IMPORT_PROGRESS_ENDPOINT,
+    adminTelegramHeaders()
+  );
 }
 
 export async function fetchPendingSupplierApplications(
@@ -536,7 +616,8 @@ export async function fetchPendingSupplierApplications(
 ): Promise<BackendPendingSupplierApplication[]> {
   const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
   return backendGet<BackendPendingSupplierApplication[]>(
-    `${ADMIN_PENDING_SUPPLIERS_ENDPOINT}${params}`
+    `${ADMIN_PENDING_SUPPLIERS_ENDPOINT}${params}`,
+    adminTelegramHeaders()
   );
 }
 
@@ -548,7 +629,8 @@ export async function approveSupplierApplication(
   return backendPost<BackendPendingSupplierApplication>(
     `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/approve${params}`,
     {},
-    "Не вдалося схвалити заявку"
+    "Не вдалося схвалити заявку",
+    adminTelegramHeaders()
   );
 }
 
@@ -560,6 +642,48 @@ export async function rejectSupplierApplication(
   return backendPost<BackendPendingSupplierApplication>(
     `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/reject${params}`,
     {},
-    "Не вдалося відхилити заявку"
+    "Не вдалося відхилити заявку",
+    adminTelegramHeaders()
+  );
+}
+
+export async function deleteSupplierAccount(
+  supplierId: number,
+  telegramId?: number | null
+): Promise<{ ok: boolean; supplier_id: number; user_reverted?: boolean; detail?: string }> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendDelete(
+    `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}${params}`,
+    "Не вдалося видалити постачальника",
+    adminTelegramHeaders()
+  );
+}
+
+export interface BackendDirectCreateSupplierPayload {
+  shop_name: string;
+  yml_link?: string | null;
+  xml_url?: string | null;
+  description?: string | null;
+  manager_telegram?: string | null;
+  channel_link?: string | null;
+  telegram_channel_url?: string | null;
+  iban?: string | null;
+  payment_iban?: string | null;
+  bank_name?: string | null;
+  payment_bank_name?: string | null;
+  payment_card_holder?: string | null;
+  legal_name?: string | null;
+}
+
+export async function directCreateSupplier(
+  payload: BackendDirectCreateSupplierPayload,
+  telegramId?: number | null
+): Promise<BackendPendingSupplierApplication> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendPost<BackendPendingSupplierApplication>(
+    `${ADMIN_DIRECT_CREATE_SUPPLIER_ENDPOINT}${params}`,
+    payload,
+    "Не вдалося створити магазин",
+    adminTelegramHeaders()
   );
 }

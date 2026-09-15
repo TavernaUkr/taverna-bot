@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import type { ReactNode, MouseEvent } from "react";
+import { useNavigate } from "react-router-dom";
 import { ChevronRight, LayoutGrid, Shirt, Layers, HardHat, Backpack, Footprints, Tag } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { SmartGroupIcon, SmartSubcategoryGroup } from "@/utils/categoryParser";
@@ -27,8 +28,10 @@ interface SmartSubcategoryListProps {
   groups: SmartSubcategoryGroup[];
   totalCount: number;
   isLoading?: boolean;
+  parentCategory?: string;
   onSelectAll: () => void;
   onSelectGroup: (group: SmartSubcategoryGroup) => void;
+  onCloseModal?: () => void;
   allIcon?: ReactNode;
 }
 
@@ -36,17 +39,32 @@ export function SmartSubcategoryList({
   groups,
   totalCount,
   isLoading = false,
+  parentCategory,
   onSelectAll,
   onSelectGroup,
+  onCloseModal,
   allIcon,
 }: SmartSubcategoryListProps) {
+  const navigate = useNavigate();
+
+  const handleSelectAll = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (parentCategory) {
+      navigate(`/search?category=${encodeURIComponent(parentCategory)}`);
+    } else {
+      onSelectAll();
+    }
+    onCloseModal?.();
+  };
+
   return (
     <div className="space-y-2.5">
       <button
         type="button"
-        onClick={onSelectAll}
+        onClick={handleSelectAll}
         className={cn(
-          "w-full p-3.5 rounded-2xl flex items-center justify-between gap-3 transition-all",
+          "relative z-10 w-full p-3.5 rounded-2xl flex items-center justify-between gap-3 transition-all touch-manipulation",
           "bg-primary/10 border border-primary/25 hover:border-primary/50 hover:bg-primary/15"
         )}
       >

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { ArrowLeft, User, Phone, Mail, Edit2, Save, X, Loader2 } from "lucide-react";
+import { useState, useEffect } from "react";
+import { ArrowLeft, User, Phone, Mail, Edit2, Save, X, Loader2, AtSign } from "lucide-react";
 import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,14 +23,44 @@ interface PersonalDataPageProps {
 }
 
 export function PersonalDataPage({ profile, onBack, onUpdateProfile }: PersonalDataPageProps) {
+  const telegramUser = (() => {
+    try {
+      return (window as any).Telegram?.WebApp?.initDataUnsafe?.user || null;
+    } catch {
+      return null;
+    }
+  })();
+
+  const defaultsFromTelegram = {
+    first_name: profile?.first_name || telegramUser?.first_name || "",
+    last_name: profile?.last_name || telegramUser?.last_name || "",
+    telegram_username: profile?.telegram_username || telegramUser?.username || "",
+    phone: profile?.phone || "",
+    email: profile?.email || "",
+  };
+
   const [isEditing, setIsEditing] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [editData, setEditData] = useState({
-    first_name: profile?.first_name || '',
-    last_name: profile?.last_name || '',
-    phone: profile?.phone || '',
-    email: profile?.email || '',
-  });
+  const [editData, setEditData] = useState(defaultsFromTelegram);
+
+  useEffect(() => {
+    setEditData({
+      first_name: profile?.first_name || telegramUser?.first_name || "",
+      last_name: profile?.last_name || telegramUser?.last_name || "",
+      telegram_username: profile?.telegram_username || telegramUser?.username || "",
+      phone: profile?.phone || "",
+      email: profile?.email || "",
+    });
+  }, [
+    profile?.first_name,
+    profile?.last_name,
+    profile?.telegram_username,
+    profile?.phone,
+    profile?.email,
+    telegramUser?.first_name,
+    telegramUser?.last_name,
+    telegramUser?.username,
+  ]);
 
   const handleSave = async () => {
     setIsLoading(true);
@@ -51,10 +81,11 @@ export function PersonalDataPage({ profile, onBack, onUpdateProfile }: PersonalD
 
   const handleCancel = () => {
     setEditData({
-      first_name: profile?.first_name || '',
-      last_name: profile?.last_name || '',
-      phone: profile?.phone || '',
-      email: profile?.email || '',
+      first_name: profile?.first_name || telegramUser?.first_name || "",
+      last_name: profile?.last_name || telegramUser?.last_name || "",
+      telegram_username: profile?.telegram_username || telegramUser?.username || "",
+      phone: profile?.phone || "",
+      email: profile?.email || "",
     });
     setIsEditing(false);
   };
@@ -94,11 +125,11 @@ export function PersonalDataPage({ profile, onBack, onUpdateProfile }: PersonalD
             </div>
             <div>
               <h3 className="font-semibold text-lg text-foreground">
-                {profile?.first_name} {profile?.last_name}
+                {editData.first_name} {editData.last_name}
               </h3>
-              {profile?.telegram_username && (
+              {editData.telegram_username && (
                 <p className="text-sm text-muted-foreground">
-                  @{profile.telegram_username}
+                  @{editData.telegram_username}
                 </p>
               )}
             </div>
@@ -131,6 +162,19 @@ export function PersonalDataPage({ profile, onBack, onUpdateProfile }: PersonalD
                   placeholder="Введіть прізвище"
                 />
               </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="telegram_username" className="flex items-center gap-2">
+                <AtSign className="h-4 w-4 text-muted-foreground" />
+                Username
+              </Label>
+              <Input
+                id="telegram_username"
+                value={editData.telegram_username ? `@${editData.telegram_username}` : ""}
+                disabled
+                placeholder="@username"
+              />
             </div>
 
             <div className="space-y-2">

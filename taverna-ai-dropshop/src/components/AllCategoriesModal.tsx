@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { ChevronRight, ArrowLeft, Loader2 } from "lucide-react";
 import { Shield, Shirt, Watch, Footprints, Backpack, Target, Car, Gamepad, Gift, Home, Smartphone, Baby } from "lucide-react";
+import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { fetchBackendCategories, fetchBackendFilters, BackendApiError, type BackendCategorySub } from "@/lib/backendApi";
@@ -328,9 +329,11 @@ export const AllCategoriesModal = ({ isOpen, onClose, onSelectCategory }: AllCat
                 groups={groupedSubs}
                 totalCount={totalCount}
                 isLoading={isFiltersLoading}
+                parentCategory={selectedCategory.name}
                 allIcon={selectedCategory.icon}
                 onSelectAll={() => applyCategorySelection()}
                 onSelectGroup={(group) => applyCategorySelection(group.originals)}
+                onCloseModal={onClose}
               />
             </div>
           ) : (

@@ -8,6 +8,8 @@ from aiogram.types import CallbackQuery
 from config_reader import config
 from database.db import AsyncSessionLocal
 from database.models import Supplier, SupplierStatus, User, UserRole
+from services.mydrop_sync import schedule_supplier_catalog_import
+from api.admin_suppliers import _ensure_shop_record
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -44,9 +46,14 @@ async def approve_partner(cb: CallbackQuery, bot: Bot):
             user = await db.get(User, supplier.user_id)
             if user and user.role != UserRole.admin:
                 user.role = UserRole.supplier
+        await _ensure_shop_record(db, supplier)
         await db.commit()
         contact_id = supplier.contact_telegram_id
         name = supplier.name
+        has_feed = bool(supplier.yml_link or supplier.xml_url or supplier.mydrop_api_key)
+
+    if has_feed:
+        schedule_supplier_catalog_import(supplier_id)
 
     logger.info("Адмін %s схвалив партнера #%s", cb.from_user.id, supplier_id)
     base = cb.message.text or ""

@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 from config_reader import config
 from services import publisher_service
 from services import ai_agent_service # <-- НОВИЙ "МОЗОК"
+from services.ai_queue_worker import start_ai_product_queue
 from database.db import AsyncSessionLocal
 from database.models import Supplier, Product, ProductVariant, SupplierStatus
 
@@ -155,5 +156,6 @@ async def start_scheduler(bot: Bot):
         if not _scheduler.running:
             _scheduler.start()
             logger.info("✅ 'Розумний' планувальник (Черга + AI-Агент) запущено.")
+        await start_ai_product_queue()
     except Exception as e:
         logger.error(f"Помилка запуску 'розумного' планувальника: {e}")

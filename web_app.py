@@ -40,6 +40,7 @@ from services import (
     omnichannel_service as ads_service # <-- ОНОВЛЕНО
 )
 from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession
+from services.ai_queue_worker import start_ai_product_queue
 from database.models import * # (Імпортуємо все)
 from config_reader import config
 from handlers import (
@@ -74,6 +75,10 @@ app.add_middleware(
 async def startup_event():
     app.state.bot = bot # Використовуємо імпортований `bot`
     logger.info("FastAPI startup: Bot instance attached.")
+    try:
+        await start_ai_product_queue()
+    except Exception as e:
+        logger.error("Не вдалося запустити AI-чергу товарів: %s", e, exc_info=True)
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -447,7 +452,7 @@ app.include_router(payment_router)
 app.include_router(delivery_router)
 app.include_router(twa_auth_router)  # POST /api/v1/auth/telegram
 app.include_router(twa_suppliers_router)  # POST /api/v1/suppliers/register (Mini App)
-app.include_router(admin_suppliers_router)  # GET /api/v1/admin/suppliers/pending
+app.include_router(admin_suppliers_router)  # pending / approve / reject / direct-create
 app.include_router(auth_handlers.router)
 app.include_router(supplier_handlers.router)
 app.include_router(admin_handlers.router)

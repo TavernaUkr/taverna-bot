@@ -5,9 +5,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { hapticNotification } from "@/lib/haptics";
+import { directCreateSupplier } from "@/lib/backendApi";
 
 interface ManualSupplierFormProps {
   onSuccess?: () => void;
@@ -41,78 +41,31 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
 
     setIsSubmitting(true);
     try {
-      const { data: supplier, error: supplierError } = await supabase
-        .from("suppliers")
-        .insert({
+      const tgUserId = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+      const created = await directCreateSupplier(
+        {
           shop_name: formData.shop_name,
-          company_name: formData.shop_name,
-          contact_name: "Адмін",
-          contact_phone: "-",
-          legal_type: "individual",
+          yml_link: formData.xml_url || null,
           xml_url: formData.xml_url || null,
-          telegram_channel_url: formData.telegram_channel_url || null,
           manager_telegram: formData.manager_telegram || null,
-          markup_percentage: 33,
-          is_active: true,
+          channel_link: formData.telegram_channel_url || null,
+          telegram_channel_url: formData.telegram_channel_url || null,
+          iban: formData.payment_iban || null,
           payment_iban: formData.payment_iban || null,
-          payment_card_holder: formData.payment_card_holder || null,
+          bank_name: formData.payment_bank_name || null,
           payment_bank_name: formData.payment_bank_name || null,
-        } as any)
-        .select()
-        .single();
-
-      if (supplierError) throw supplierError;
-
-      // Auto-link manager
-      if (formData.manager_telegram && supplier) {
-        const cleanUsername = formData.manager_telegram.replace('@', '').trim();
-        // Try to find existing profile by telegram_username
-        const { data: managerProfile } = await supabase
-          .from('profiles')
-          .select('id')
-          .eq('telegram_username', cleanUsername)
-          .single();
-        
-        if (managerProfile) {
-          // Assign shop_manager role and link
-          await supabase.from('user_roles')
-            .upsert({ user_id: managerProfile.id, role: 'shop_manager' as any }, { onConflict: 'user_id,role' });
-          await supabase.from('shop_manager_links')
-            .insert({ profile_id: managerProfile.id, supplier_id: supplier.id });
-          toast.success(`Менеджера @${cleanUsername} призначено`);
-        } else {
-          toast.info(`Менеджер @${cleanUsername} буде автоматично підключений при першому вході в додаток`);
-        }
-      }
-
-      // If no manager specified, auto-link admin as manager
-      if (!formData.manager_telegram && supplier) {
-        // Get current admin profile via session
-        const { data: sessionData } = await supabase.functions.invoke('telegram-auth', {
-          body: { action: 'validate', session_token: localStorage.getItem('session_token') },
-        });
-        if (sessionData?.profile?.id) {
-          await supabase.from('shop_manager_links')
-            .upsert({ 
-              profile_id: sessionData.profile.id, 
-              supplier_id: supplier.id 
-            }, { onConflict: 'profile_id,supplier_id' } as any);
-        }
-      }
-
-      // Trigger XML import if URL provided
-      if (formData.xml_url && supplier) {
-        await supabase.functions.invoke("parse-xml", {
-          body: {
-            xml_url: formData.xml_url,
-            supplier_id: supplier.id,
-          },
-        });
-        toast.success("Імпорт товарів запущено");
-      }
+          payment_card_holder: formData.payment_card_holder || null,
+          legal_name: formData.payment_card_holder || null,
+        },
+        tgUserId ? Number(tgUserId) : undefined
+      );
 
       hapticNotification("success");
-      toast.success(`Магазин "${formData.shop_name}" створено!${!formData.manager_telegram ? ' Ви автоматично призначені менеджером.' : ''}`);
+      toast.success(
+        created.import_started
+          ? `Магазин «${formData.shop_name}» створено. Імпорт товарів запущено.`
+          : `Магазин «${formData.shop_name}» створено.`
+      );
 
       setFormData({ shop_name: "", telegram_channel_url: "", manager_telegram: "", xml_url: "", payment_iban: "", payment_card_holder: "", payment_bank_name: "" });
       onSuccess?.();

@@ -1,5 +1,6 @@
 # services/supplier_analyzer.py
 """AI-модерація заявок постачальників (Gemini REST). Не чіпає логіку товарів."""
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -11,6 +12,11 @@ logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini-3.6-flash"
 GEMINI_FALLBACK_MODEL = "gemini-3.6-flash"
+
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+)
 
 
 def _resolve_gemini_api_key() -> str:
@@ -50,11 +56,16 @@ class SupplierAnalyzer:
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.2, "maxOutputTokens": 800},
         }
-        headers = {"Content-Type": "application/json"}
-        async with aiohttp.ClientSession() as session:
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": BROWSER_USER_AGENT,
+        }
+        async with aiohttp.ClientSession(headers={"User-Agent": BROWSER_USER_AGENT}) as session:
             async with session.post(api_url, headers=headers, json=payload) as resp:
                 if resp.status == 429:
                     raise Exception("429 Rate Limit")
+                if resp.status == 503:
+                    raise Exception("503 High Demand")
                 if resp.status != 200:
                     error_text = await resp.text()
                     raise Exception(f"Gemini API Error {resp.status}: {error_text}")
@@ -65,7 +76,7 @@ class SupplierAnalyzer:
             raise Exception(f"Gemini повернув неочікувану відповідь: {data}")
 
     async def analyze_supplier(self, supplier_data: dict, has_duplicates: bool) -> str:
-        """Повертає текстовий звіт. Якщо ключа немає або API впав — безпечний fallback."""
+        """Повертає текстовий звіт. 503 — до 3 спроб з паузою 5с."""
         if not self.is_ready:
             dup = "так" if has_duplicates else "ні"
             return (
@@ -76,16 +87,27 @@ class SupplierAnalyzer:
 
         prompt = self._build_prompt(supplier_data, has_duplicates)
         last_error = None
-        for model_name in (self.model_name, self.fallback_model):
-            try:
-                report = await self._complete(model_name, prompt)
-                if report:
-                    return report
-            except Exception as e:
-                last_error = e
-                logger.warning("SupplierAnalyzer (%s): %s", model_name, e)
-                if model_name == self.model_name and "429" in str(e):
-                    continue
+        for attempt in range(1, 4):
+            for model_name in (self.model_name, self.fallback_model):
+                try:
+                    report = await self._complete(model_name, prompt)
+                    if report:
+                        return report
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        "SupplierAnalyzer (%s, спроба %s/3): %s",
+                        model_name, attempt, e,
+                    )
+                    err = str(e)
+                    if "503" in err or "429" in err:
+                        break
+                    if model_name == self.model_name:
+                        continue
+            if last_error and ("503" in str(last_error) or "429" in str(last_error)) and attempt < 3:
+                await asyncio.sleep(5)
+                continue
+            break
 
         logger.error("SupplierAnalyzer не зміг отримати звіт: %s", last_error)
         dup = "так" if has_duplicates else "ні"

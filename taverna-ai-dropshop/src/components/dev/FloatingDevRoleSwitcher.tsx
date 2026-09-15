@@ -10,10 +10,10 @@ type TestRole = "guest" | "customer" | "supplier" | "shop_manager" | "moderator"
 export const FloatingDevRoleSwitcher = () => {
   if (import.meta.env.PROD) return null;
 
-  const { canUseDevRoleSwitcher, effectiveRole, setDevRoleOverride, realProfile } =
+  const { canUseDevRoleSwitcher, effectiveRole, setDevRoleOverride, realProfile, realRole } =
     useTelegramAuthContext();
 
-  if (!canUseDevRoleSwitcher) return null;
+  if (!canUseDevRoleSwitcher || realRole !== "admin") return null;
 
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-[calc(4.15rem+env(safe-area-inset-bottom,0px))] z-[56]">

@@ -10,13 +10,15 @@ YML-вигрузку постачальника (`Supplier.mydrop_api_key` = п�
 які повертає `get_products()`, залишився ТИМ САМИМ (product dict з
 `sizes[]`) — тож увесь код нижче (групування опцій/варіантів) не змінився.
 
-Тут НЕМАЄ AI-логіки (дублі/категорії тощо) — лише чисте, стійке до помилок
-підключення до API + запис у БД. AI-аналіз буде окремим кроком пізніше.
+Тут НЕМАЄ внутрішньої AI-логіки — лише імпорт каталогу в БД.
+Після імпорту нові товари віддаються в `services/ai_processor.py`
+(`ProductAIProcessor.process_product`) без зміни його коду.
 """
+import asyncio
 import logging
 import re
 from collections import defaultdict
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import case, select, delete, insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -24,11 +26,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import func
 
+from database.db import AsyncSessionLocal, ensure_product_ai_status_column
 from database.models import (
     Product, ProductVariant, ProductOption, ProductOptionValue,
-    product_variant_option_values, ProductStatus,
+    product_variant_option_values, ProductStatus, ProductAIStatus, Supplier, SupplierType,
 )
-from services.mydrop_api import MyDropAPIClient, MyDropAPIError
+from services.mydrop_api import MyDropAPIClient, MyDropAPIError, extract_public_api_key
 # Перевикористовуємо вже наявну (production) логіку націнки з PriceRule,
 # щоб товари з API і товари зі старого XML рахувались за ОДНАКОВИМИ
 # правилами. services/product_service.py не залежить від джерела даних
@@ -117,7 +120,10 @@ async def _get_or_create_options(
 
 
 async def sync_supplier_products(
-    supplier_id: int, api_key: str, db_session: AsyncSession
+    supplier_id: int,
+    api_key: str,
+    db_session: AsyncSession,
+    yml_url: Optional[str] = None,
 ) -> Dict[str, int]:
     """
     Синхронізує весь каталог постачальника з MyDrop REST API у нашу БД.
@@ -143,10 +149,13 @@ async def sync_supplier_products(
     """
     stats = {"products": 0, "variants": 0, "errors": 0}
 
-    # --- Крок 1: Отримання даних з MyDrop (мережа) ---
+    # --- Крок 1: Отримання даних з MyDrop / прямого YML (мережа) ---
     client = MyDropAPIClient()
     try:
-        products = await client.get_products(api_key)
+        if yml_url:
+            products = await client.get_products_from_yml_url(yml_url)
+        else:
+            products = await client.get_products(api_key)
     except MyDropAPIError as e:
         logger.error(
             "sync_supplier_products: не вдалося отримати каталог постачальника #%s з MyDrop: %s",
@@ -217,6 +226,7 @@ async def sync_supplier_products(
                     pictures=pictures,
                     category=category_tag,
                     status=ProductStatus.active,
+                    ai_status=ProductAIStatus.pending,
                 )
                 .on_conflict_do_update(
                     index_elements=["supplier_id", "supplier_sku"],
@@ -235,6 +245,15 @@ async def sync_supplier_products(
                         "category": case(
                             (Product.is_ai_processed.is_(True), Product.category),
                             else_=category_tag,
+                        ),
+                        "ai_status": case(
+                            (
+                                Product.ai_status.in_(
+                                    (ProductAIStatus.completed, ProductAIStatus.processing)
+                                ),
+                                Product.ai_status,
+                            ),
+                            else_=ProductAIStatus.pending,
                         ),
                         "updated_at": func.now(),
                     },
@@ -383,3 +402,114 @@ async def sync_supplier_products(
         stats["errors"] += 1
 
     return stats
+
+
+def _resolve_catalog_source(supplier: Supplier) -> Tuple[str, Optional[str]]:
+    """
+    Повертає (api_key, yml_url).
+    Пріоритет: yml_link / xml_url (лінка заявки), потім mydrop_api_key.
+    """
+    yml = (supplier.yml_link or supplier.xml_url or "").strip()
+    stored_key = (supplier.mydrop_api_key or "").strip()
+    extracted = extract_public_api_key(yml) if yml else None
+    is_http = yml.lower().startswith(("http://", "https://"))
+
+    if extracted:
+        return extracted, None
+    if is_http:
+        return stored_key, yml
+    if stored_key:
+        return stored_key, None
+    if yml:
+        return yml, None
+    return "", None
+
+
+async def import_supplier_catalog_and_process_ai(supplier_id: int) -> Dict[str, int]:
+    """
+    Окрема сесія БД (request-сесія вже закрита):
+    1) завантажити XML по yml_link / MyDrop-ключу;
+    2) записати товари з supplier_id (ai_status=pending);
+    3) Gemini обробляє їх окремою чергою по 1 товару / 15с.
+    """
+    result = {"products": 0, "variants": 0, "errors": 0, "ai_queued": 0}
+    if AsyncSessionLocal is None:
+        logger.error("import_supplier_catalog: AsyncSessionLocal не ініціалізовано.")
+        return result
+
+    await ensure_product_ai_status_column()
+
+    async with AsyncSessionLocal() as db:
+        supplier = await db.get(Supplier, supplier_id)
+        if not supplier:
+            logger.error("import_supplier_catalog: постачальника #%s не знайдено.", supplier_id)
+            return result
+
+        api_key, yml_url = _resolve_catalog_source(supplier)
+        if not api_key and not yml_url:
+            logger.warning(
+                "import_supplier_catalog: у постачальника #%s немає yml_link / mydrop_api_key — імпорт пропущено.",
+                supplier_id,
+            )
+            return result
+
+        extracted = extract_public_api_key(supplier.yml_link or supplier.xml_url or "")
+        if extracted and not supplier.mydrop_api_key:
+            supplier.mydrop_api_key = extracted
+        yml_text = (supplier.yml_link or supplier.xml_url or "").lower()
+        if "mydrop" in yml_text or extracted:
+            supplier.type = SupplierType.mydrop
+        await db.commit()
+
+        stats = await sync_supplier_products(
+            supplier_id,
+            api_key or "",
+            db,
+            yml_url=yml_url,
+        )
+        result.update(stats)
+
+        queued = int(
+            (
+                await db.execute(
+                    select(func.count())
+                    .select_from(Product)
+                    .where(
+                        Product.supplier_id == supplier_id,
+                        Product.ai_status == ProductAIStatus.pending,
+                    )
+                )
+            ).scalar_one()
+            or 0
+        )
+        result["ai_queued"] = queued
+        logger.info(
+            "Імпорт #%s: товари в AI-черзі (pending)=%s. Gemini обробить їх по 1 / 15с.",
+            supplier_id, queued,
+        )
+
+    logger.info(
+        "import_supplier_catalog #%s завершено: products=%s variants=%s errors=%s ai_queued=%s",
+        supplier_id,
+        result["products"], result["variants"], result["errors"],
+        result.get("ai_queued", 0),
+    )
+    return result
+
+
+def schedule_supplier_catalog_import(supplier_id: int) -> None:
+    """Неблокуючий запуск імпорту XML + AI після схвалення / direct-create."""
+    task = asyncio.create_task(import_supplier_catalog_and_process_ai(supplier_id))
+
+    def _log_task_result(done):
+        try:
+            exc = done.exception()
+        except asyncio.CancelledError:
+            return
+        if exc:
+            logger.error(
+                "Фоновий імпорт каталогу постачальника #%s впав: %s",
+                supplier_id, exc, exc_info=exc,
+            )
+
+    task.add_done_callback(_log_task_result)

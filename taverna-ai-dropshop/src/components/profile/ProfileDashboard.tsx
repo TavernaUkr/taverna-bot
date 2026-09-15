@@ -50,6 +50,7 @@ export const ProfileDashboard = () => {
     profile,
     addresses,
     logout,
+    authenticate,
     updateProfile,
     addAddress,
     updateAddress,
@@ -60,6 +61,7 @@ export const ProfileDashboard = () => {
   const [showSupplierGuide, setShowSupplierGuide] = useState(false);
   const [showCustomerGuide, setShowCustomerGuide] = useState(false);
   const [showAccountSettings, setShowAccountSettings] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
   const { reputationScore, balance } = useBonuses();
 
   const isSupplier = roles.includes('supplier') || roles.includes('admin');
@@ -108,13 +110,18 @@ export const ProfileDashboard = () => {
     return "Гість";
   };
 
-  const handleAuthClick = () => {
-    const tg = (window as any).Telegram?.WebApp;
-    if (tg?.initDataUnsafe?.user) {
-      // Trigger the auth confirmation dialog
-      window.dispatchEvent(new CustomEvent('taverna:request-auth'));
-    } else {
-      toast.error('Відкрийте додаток через Telegram');
+  const handleAuthClick = async () => {
+    if (authBusy) return;
+    setAuthBusy(true);
+    try {
+      const result = await authenticate({ forceTelegram: true });
+      if (result) {
+        toast.success("Ви увійшли через Telegram");
+      } else {
+        toast.error("Не вдалося підтвердити Telegram. Відкрийте Mini App з бота.");
+      }
+    } finally {
+      setAuthBusy(false);
     }
   };
 
@@ -200,24 +207,32 @@ export const ProfileDashboard = () => {
 
       {/* Authorization Button for Guests */}
       {!isAuthenticated && (
-        <button
-          onClick={handleAuthClick}
-          className="w-full py-4 px-6 bg-gradient-to-r from-primary to-accent text-primary-foreground rounded-xl font-semibold shadow-lg hover:shadow-xl active:scale-[0.98] transition-all flex items-center justify-center gap-3"
-        >
-          <User className="h-5 w-5" />
-          <span>
-            Авторизувати мене
-            {(() => {
-              const tg = (window as any).Telegram?.WebApp;
-              if (tg?.initDataUnsafe?.user) {
-                const user = tg.initDataUnsafe.user;
-                const name = [user.first_name, user.last_name].filter(Boolean).join(' ');
-                return ` — "${name || user.username || 'Telegram'}"`;
-              }
-              return ' через Telegram';
-            })()}
-          </span>
-        </button>
+        <div className="space-y-2">
+          <p className="text-[11px] leading-snug text-muted-foreground text-center px-1">
+            Натискаючи кнопку, ви даєте згоду на обробку персональних даних згідно з законодавством України
+          </p>
+          <button
+            onClick={handleAuthClick}
+            disabled={authBusy}
+            className="w-full py-4 px-6 bg-gradient-to-r from-primary to-accent text-primary-foreground rounded-xl font-semibold shadow-lg hover:shadow-xl active:scale-[0.98] transition-all flex items-center justify-center gap-3 disabled:opacity-70"
+          >
+            <User className="h-5 w-5" />
+            <span>
+              Авторизувати мене
+              {authBusy
+                ? "..."
+                : (() => {
+                const tg = (window as any).Telegram?.WebApp;
+                if (tg?.initDataUnsafe?.user) {
+                  const user = tg.initDataUnsafe.user;
+                  const name = [user.first_name, user.last_name].filter(Boolean).join(' ');
+                  return ` — "${name || user.username || 'Telegram'}"`;
+                }
+                return ' через Telegram';
+              })()}
+            </span>
+          </button>
+        </div>
       )}
 
       {/* Partner Panel Button - Only for suppliers/admins/moderators */}

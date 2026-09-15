@@ -2,21 +2,17 @@ import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Users, Check, X, Loader2, DollarSign, ShoppingCart, Package,
-  Eye, ChevronDown, ChevronUp, Shield, UserCog, AlertTriangle, RefreshCw,
+  Shield, UserCog, RefreshCw,
   Crown, Tag, Gift, Brain, MessageSquare, Trophy, Store, Megaphone, Wallet,
+  Phone, Link2, Bot, Trash2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
-import { cn } from '@/lib/utils';
 import { useTelegramAuthContext } from '@/components/TelegramAuthProvider';
 import { hapticSelection } from '@/lib/haptics';
 import { PromoCodesManager } from '@/components/admin/PromoCodesManager';
@@ -38,6 +34,7 @@ import {
   fetchPendingSupplierApplications,
   approveSupplierApplication,
   rejectSupplierApplication,
+  deleteSupplierAccount,
 } from '@/lib/backendApi';
 
 interface SupplierApplication {
@@ -51,6 +48,7 @@ interface SupplierApplication {
   tax_id: string;
   description: string | null;
   xml_url: string | null;
+  manager_telegram?: string | null;
   status: string;
   created_at: string;
   reseller_probability: number | null;
@@ -59,6 +57,11 @@ interface SupplierApplication {
   profile_id: string | null;
   telegram_id: number | null;
   ai_score_report?: string | null;
+}
+
+function supplierTypeLabel(type?: string | null): string {
+  if (type === "business" || type === "company") return "ФОП";
+  return "Фіз особа";
 }
 
 interface OrderStats {
@@ -75,13 +78,10 @@ export default function AdminDashboard() {
   const [searchParams] = useSearchParams();
   const { isLoading: authLoading, rolesLoading, isAuthenticated, effectiveRole, profile } = useTelegramAuthContext();
   const [activeTab, setActiveTab] = useState('overview');
-  const [applications, setApplications] = useState<SupplierApplication[]>([]);
+  const [pendingSuppliers, setPendingSuppliers] = useState<SupplierApplication[]>([]);
+  const [processingAppId, setProcessingAppId] = useState<string | null>(null);
+  const [processingAction, setProcessingAction] = useState<'approve' | 'reject' | 'delete' | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [processingId, setProcessingId] = useState<string | null>(null);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [rejectionReason, setRejectionReason] = useState('');
-  const [customMarkup, setCustomMarkup] = useState<Record<string, number>>({});
-  const [selectedRole, setSelectedRole] = useState<Record<string, string>>({});
   const [orderStats, setOrderStats] = useState<OrderStats>({
     totalOrders: 0, totalRevenue: 0, totalMargin: 0,
     pendingOrders: 0, openTickets: 0, suppliersCount: 0,
@@ -130,7 +130,7 @@ export default function AdminDashboard() {
       const rows = await fetchPendingSupplierApplications(
         adminTelegramId ? Number(adminTelegramId) : undefined
       );
-      setApplications(
+      setPendingSuppliers(
         rows.map((r) => ({
           id: String(r.id),
           shop_name: r.shop_name,
@@ -141,7 +141,8 @@ export default function AdminDashboard() {
           supplier_type: r.supplier_type || "individual",
           tax_id: r.tax_id || "",
           description: r.description,
-          xml_url: r.xml_url,
+          xml_url: r.xml_url || r.yml_link,
+          manager_telegram: r.manager_telegram,
           status: r.status,
           created_at: r.created_at || new Date().toISOString(),
           reseller_probability: null,
@@ -153,9 +154,10 @@ export default function AdminDashboard() {
         }))
       );
       const focusId = searchParams.get("supplier");
-      if (focusId) setExpandedId(focusId);
+      if (focusId) setActiveTab("applications");
     } catch (err) {
       console.error("Error fetching applications:", err);
+      toast.error("Не вдалося завантажити заявки");
     } finally {
       setIsLoading(false);
     }
@@ -184,37 +186,71 @@ export default function AdminDashboard() {
     }
   };
 
-  const handleApprove = async (app: SupplierApplication, assignRole: string = 'supplier') => {
-    setProcessingId(app.id);
+  const handleApprove = async (id: number) => {
+    if (processingAppId) return;
+    const idStr = String(id);
+    setProcessingAppId(idStr);
+    setProcessingAction('approve');
     try {
-      await approveSupplierApplication(Number(app.id), adminTelegramId ? Number(adminTelegramId) : undefined);
-      toast.success(`"${app.shop_name}" схвалено!`);
-      setApplications(prev => prev.filter(a => a.id !== app.id));
-      fetchOrderStats();
-    } catch (err) {
-      toast.error('Помилка схвалення');
+      await approveSupplierApplication(
+        id,
+        adminTelegramId ? Number(adminTelegramId) : undefined
+      );
+      hapticSelection();
+      setPendingSuppliers((prev) => prev.filter((item) => item.id !== idStr));
+      toast.success("Магазин схвалено! AI почав імпорт та категоризацію товарів у фоновому режимі.");
+    } catch (err: any) {
+      console.error("Approve error:", err);
+      toast.error(err?.message || "Не вдалося схвалити заявку");
     } finally {
-      setProcessingId(null);
+      setProcessingAppId(null);
+      setProcessingAction(null);
     }
   };
 
-  const handleReject = async (app: SupplierApplication) => {
-    if (!rejectionReason.trim()) { toast.error('Вкажіть причину'); return; }
-    setProcessingId(app.id);
+  const handleReject = async (id: number) => {
+    if (processingAppId) return;
+    const idStr = String(id);
+    setProcessingAppId(idStr);
+    setProcessingAction('reject');
     try {
-      await rejectSupplierApplication(Number(app.id), adminTelegramId ? Number(adminTelegramId) : undefined);
-      toast.success('Заявку відхилено');
-      setApplications(prev => prev.filter(a => a.id !== app.id));
-      setRejectionReason('');
-      setExpandedId(null);
-    } catch (err) {
-      toast.error('Помилка відхилення');
+      await rejectSupplierApplication(
+        id,
+        adminTelegramId ? Number(adminTelegramId) : undefined
+      );
+      hapticSelection();
+      setPendingSuppliers((prev) => prev.filter((item) => item.id !== idStr));
+      toast.success("Заявку відхилено");
+    } catch (err: any) {
+      console.error("Reject error:", err);
+      toast.error(err?.message || "Не вдалося відхилити заявку");
     } finally {
-      setProcessingId(null);
+      setProcessingAppId(null);
+      setProcessingAction(null);
     }
   };
 
-  const formatDate = (d: string) => new Date(d).toLocaleDateString('uk-UA', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const handleDelete = async (id: number) => {
+    if (processingAppId) return;
+    const idStr = String(id);
+    setProcessingAppId(idStr);
+    setProcessingAction('delete');
+    try {
+      await deleteSupplierAccount(
+        id,
+        adminTelegramId ? Number(adminTelegramId) : undefined
+      );
+      hapticSelection();
+      setPendingSuppliers((prev) => prev.filter((item) => item.id !== idStr));
+      toast.success("Постачальника та його товари видалено. Користувач знову став клієнтом");
+    } catch (err: any) {
+      console.error("Delete supplier error:", err);
+      toast.error(err?.message || "Не вдалося видалити постачальника");
+    } finally {
+      setProcessingAppId(null);
+      setProcessingAction(null);
+    }
+  };
 
   if (authLoading || rolesLoading) {
     return <div className="min-h-screen bg-background flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
@@ -292,56 +328,56 @@ export default function AdminDashboard() {
             <MessageSquare className="h-3 w-3" /> {orderStats.openTickets} тікетів
           </Badge>
         )}
-        {applications.length > 0 && (
+        {pendingSuppliers.length > 0 && (
           <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/30 gap-1">
-            <Users className="h-3 w-3" /> {applications.length} заявок
+            <Users className="h-3 w-3" /> {pendingSuppliers.length} заявок
           </Badge>
         )}
       </div>
 
       {/* Tabs */}
-      <div className="p-4">
+      <div className="p-4 min-w-0">
         <Tabs value={activeTab} onValueChange={(v) => { hapticSelection(); setActiveTab(v); }}>
-          <ScrollArea className="w-full pb-2">
-            <TabsList className="w-max flex gap-1 mb-4">
-              <TabsTrigger value="overview" className="text-xs px-3 gap-1">
+          <div className="flex overflow-x-auto whitespace-nowrap flex-nowrap gap-2 pb-2 scrollbar-hide [&::-webkit-scrollbar]:hidden w-full min-w-0">
+            <TabsList className="flex w-max flex-nowrap gap-2 mb-0 h-auto">
+              <TabsTrigger value="overview" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Crown className="h-3.5 w-3.5" /> Огляд
               </TabsTrigger>
-              <TabsTrigger value="orders" className="text-xs px-3 gap-1">
+              <TabsTrigger value="orders" className="text-xs px-3 gap-1 flex-shrink-0">
                 <ShoppingCart className="h-3.5 w-3.5" /> Замовлення
               </TabsTrigger>
-              <TabsTrigger value="payments" className="text-xs px-3 gap-1">
+              <TabsTrigger value="payments" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Wallet className="h-3.5 w-3.5" /> Оплати
               </TabsTrigger>
-              <TabsTrigger value="stores" className="text-xs px-3 gap-1">
+              <TabsTrigger value="stores" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Store className="h-3.5 w-3.5" /> Магазини
               </TabsTrigger>
-              <TabsTrigger value="applications" className="text-xs px-3 gap-1">
+              <TabsTrigger value="applications" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Users className="h-3.5 w-3.5" /> Заявки
-                {applications.length > 0 && (
-                  <Badge variant="destructive" className="ml-1 h-4 px-1 text-[10px]">{applications.length}</Badge>
+                {pendingSuppliers.length > 0 && (
+                  <Badge variant="destructive" className="ml-1 h-4 px-1 text-[10px]">{pendingSuppliers.length}</Badge>
                 )}
               </TabsTrigger>
-              <TabsTrigger value="support" className="text-xs px-3 gap-1">
+              <TabsTrigger value="support" className="text-xs px-3 gap-1 flex-shrink-0">
                 <MessageSquare className="h-3.5 w-3.5" /> Підтримка
               </TabsTrigger>
-              <TabsTrigger value="marketing" className="text-xs px-3 gap-1">
+              <TabsTrigger value="marketing" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Megaphone className="h-3.5 w-3.5" /> Маркетинг
               </TabsTrigger>
-              <TabsTrigger value="analytics" className="text-xs px-3 gap-1">
+              <TabsTrigger value="analytics" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Brain className="h-3.5 w-3.5" /> Аналітика
               </TabsTrigger>
-              <TabsTrigger value="roles" className="text-xs px-3 gap-1">
+              <TabsTrigger value="roles" className="text-xs px-3 gap-1 flex-shrink-0">
                 <UserCog className="h-3.5 w-3.5" /> Користувачі
               </TabsTrigger>
             </TabsList>
-          </ScrollArea>
+          </div>
 
           {/* === ОГЛЯД === */}
           <TabsContent value="overview">
             <CommandCenter
               stats={orderStats}
-              applicationsCount={applications.length}
+              applicationsCount={pendingSuppliers.length}
               onNavigate={(tab) => { hapticSelection(); setActiveTab(tab); }}
             />
           </TabsContent>
@@ -429,12 +465,12 @@ export default function AdminDashboard() {
           {/* === ЗАЯВКИ === */}
           <TabsContent value="applications">
             <ScrollArea className="h-[calc(100vh-380px)]">
-              <div className="space-y-4 pr-4">
+              <div className="space-y-4 pr-4 pb-6">
                 {isLoading ? (
                   <div className="flex items-center justify-center py-12">
                     <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
                   </div>
-                ) : applications.length === 0 ? (
+                ) : pendingSuppliers.length === 0 ? (
                   <div className="text-center py-12">
                     <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
                       <Users className="h-8 w-8 text-muted-foreground" />
@@ -443,136 +479,121 @@ export default function AdminDashboard() {
                     <p className="text-sm text-muted-foreground">Всі заявки оброблені</p>
                   </div>
                 ) : (
-                  applications.map((app) => (
-                    <Card key={app.id} className="overflow-hidden">
+                  pendingSuppliers.map((app) => {
+                    const xmlUrl = app.xml_url;
+                    return (
+                    <Card key={app.id} className="overflow-hidden border-border">
                       <CardContent className="p-4 space-y-4">
-                        <div className="flex items-start justify-between">
-                          <div>
-                            <h3 className="font-semibold text-foreground">{app.shop_name}</h3>
-                            <p className="text-sm text-muted-foreground">{app.full_name}</p>
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <h3 className="font-semibold text-foreground truncate">{app.shop_name}</h3>
+                            <p className="text-sm text-muted-foreground">{app.full_name || "—"}</p>
                           </div>
-                          <Badge variant={app.supplier_type === 'individual' ? 'secondary' : 'outline'}>
-                            {app.supplier_type === 'individual' ? 'ФОП' : 'ТОВ'}
+                          <Badge variant={app.supplier_type === "individual" ? "secondary" : "outline"}>
+                            {supplierTypeLabel(app.supplier_type)}
                           </Badge>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-2 text-sm">
-                          <div>
-                            <span className="text-muted-foreground">Email:</span>
-                            <p className="text-foreground truncate">{app.email}</p>
+                        <div className="grid grid-cols-1 gap-2 text-sm">
+                          <div className="flex justify-between gap-3">
+                            <span className="text-muted-foreground shrink-0">ПІБ</span>
+                            <span className="text-foreground text-right">{app.full_name || "—"}</span>
                           </div>
-                          <div>
-                            <span className="text-muted-foreground">Телефон:</span>
-                            <p className="text-foreground">{app.phone}</p>
+                          <div className="flex justify-between gap-3">
+                            <span className="text-muted-foreground shrink-0">ЄДРПОУ / ІПН</span>
+                            <span className="text-foreground text-right font-medium">{app.tax_id || "—"}</span>
+                          </div>
+                          <div className="flex justify-between gap-3 items-center">
+                            <span className="text-muted-foreground shrink-0 flex items-center gap-1">
+                              <Phone className="h-3.5 w-3.5" /> Телефон
+                            </span>
+                            {app.phone ? (
+                              <a href={`tel:${app.phone}`} className="text-primary text-right">
+                                {app.phone}
+                              </a>
+                            ) : (
+                              <span className="text-foreground">—</span>
+                            )}
+                          </div>
+                          <div className="flex justify-between gap-3">
+                            <span className="text-muted-foreground shrink-0">Telegram менеджера</span>
+                            <span className="text-foreground text-right">
+                              {app.manager_telegram || "—"}
+                            </span>
+                          </div>
+                          <div className="flex justify-between gap-3 items-start">
+                            <span className="text-muted-foreground shrink-0 flex items-center gap-1">
+                              <Link2 className="h-3.5 w-3.5" /> XML
+                            </span>
+                            {xmlUrl ? (
+                              <a
+                                href={xmlUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-primary text-right text-xs break-all underline underline-offset-2"
+                              >
+                                {xmlUrl}
+                              </a>
+                            ) : (
+                              <span className="text-foreground">—</span>
+                            )}
                           </div>
                         </div>
 
-                        {(app.reseller_probability !== null || app.plagiarism_score !== null) && (
-                          <div className="flex gap-2 flex-wrap">
-                            {app.reseller_probability !== null && (
-                              <Badge variant={app.reseller_probability > 50 ? 'destructive' : 'secondary'}>
-                                <AlertTriangle className="h-3 w-3 mr-1" />
-                                Ресейлер: {app.reseller_probability}%
-                              </Badge>
-                            )}
-                            {app.plagiarism_score !== null && (
-                              <Badge variant={app.plagiarism_score > 50 ? 'destructive' : 'secondary'}>
-                                Плагіат: {app.plagiarism_score}%
-                              </Badge>
-                            )}
-                          </div>
-                        )}
-
-                        {app.ai_score_report && (
-                          <div className="p-3 rounded-lg bg-muted/60 border border-border space-y-1">
-                            <p className="text-xs font-medium text-foreground flex items-center gap-1">
-                              <Brain className="h-3.5 w-3.5" />
-                              AI-звіт для CEO
-                            </p>
-                            <p className="text-xs text-muted-foreground whitespace-pre-wrap">{app.ai_score_report}</p>
-                          </div>
-                        )}
-                        {!app.ai_score_report && (
-                          <p className="text-xs text-muted-foreground">AI-звіт ще готується…</p>
-                        )}
-
-                        {app.description && (
-                          <p className="text-sm text-muted-foreground line-clamp-2">{app.description}</p>
-                        )}
-
-                        <div className="space-y-3">
-                          <div className="flex items-center gap-2">
-                            <Label className="text-xs whitespace-nowrap">Націнка %:</Label>
-                            <Input
-                              type="number"
-                              value={customMarkup[app.id] || 33}
-                              onChange={e => setCustomMarkup(prev => ({ ...prev, [app.id]: parseInt(e.target.value) || 33 }))}
-                              className="w-20 h-8 text-sm"
-                              min={1}
-                              max={100}
-                            />
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            <Label className="text-xs whitespace-nowrap">Роль:</Label>
-                            <Select
-                              value={selectedRole[app.id] || 'supplier'}
-                              onValueChange={v => setSelectedRole(prev => ({ ...prev, [app.id]: v }))}
-                            >
-                              <SelectTrigger className="h-8 text-xs">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="supplier">Постачальник</SelectItem>
-                                <SelectItem value="shop_manager">Менеджер магазину</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
+                        <div className="rounded-xl border border-violet-400/30 bg-violet-500/10 p-3 space-y-2">
+                          <p className="text-sm font-semibold text-violet-700 dark:text-violet-300 flex items-center gap-1.5">
+                            <Bot className="h-4 w-4" />
+                            🤖 AI-аналіз
+                          </p>
+                          <p className="text-sm text-foreground/90 whitespace-pre-wrap break-words leading-relaxed max-h-64 overflow-y-auto">
+                            {app.ai_score_report || "AI-звіт ще готується. Оновіть список через хвилину."}
+                          </p>
                         </div>
 
-                        <div className="flex gap-2">
+                        <div className="grid grid-cols-2 gap-2 pt-1">
                           <Button
-                            className="flex-1 gap-2"
-                            onClick={() => handleApprove(app, selectedRole[app.id] || 'supplier')}
-                            disabled={processingId === app.id}
+                            className="h-11 gap-2 bg-green-600 hover:bg-green-700 text-white"
+                            disabled={processingAppId === app.id}
+                            onClick={() => handleApprove(Number(app.id))}
                           >
-                            {processingId === app.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                            Схвалити
+                            {processingAppId === app.id && processingAction === 'approve' ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Check className="h-4 w-4" />
+                            )}
+                            ✅ Схвалити
+                          </Button>
+                          <Button
+                            variant="destructive"
+                            className="h-11 gap-2"
+                            disabled={processingAppId === app.id}
+                            onClick={() => handleReject(Number(app.id))}
+                          >
+                            {processingAppId === app.id && processingAction === 'reject' ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <X className="h-4 w-4" />
+                            )}
+                            ❌ Відхилити
                           </Button>
                           <Button
                             variant="outline"
-                            size="icon"
-                            onClick={() => setExpandedId(expandedId === app.id ? null : app.id)}
+                            className="h-11 col-span-2 gap-2 text-destructive border-destructive/40 hover:bg-destructive/10"
+                            disabled={processingAppId === app.id}
+                            onClick={() => handleDelete(Number(app.id))}
                           >
-                            {expandedId === app.id ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                            {processingAppId === app.id && processingAction === 'delete' ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-4 w-4" />
+                            )}
+                            🗑 Видалити акаунт
                           </Button>
                         </div>
-
-                        {expandedId === app.id && (
-                          <div className="space-y-2 border-t pt-3 border-border">
-                            <Textarea
-                              value={rejectionReason}
-                              onChange={e => setRejectionReason(e.target.value)}
-                              placeholder="Причина відхилення..."
-                              className="text-sm"
-                            />
-                            <Button
-                              variant="destructive"
-                              className="w-full gap-2"
-                              onClick={() => handleReject(app)}
-                              disabled={processingId === app.id}
-                            >
-                              <X className="h-4 w-4" />
-                              Відхилити
-                            </Button>
-                            <p className="text-xs text-muted-foreground text-center">
-                              Подано: {formatDate(app.created_at)}
-                            </p>
-                          </div>
-                        )}
                       </CardContent>
                     </Card>
-                  ))
+                    );
+                  })
                 )}
               </div>
             </ScrollArea>

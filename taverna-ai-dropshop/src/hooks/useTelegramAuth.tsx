@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
+import { authTelegramMiniApp, type BackendTelegramUser } from '@/lib/backendApi';
 
 interface TelegramUser {
   id: number;
@@ -54,26 +55,100 @@ interface AuthState {
 }
 
 const SESSION_TOKEN_KEY = 'taverna_session_token';
+const AUTH_CONSENT_KEY = 'isAuthorized';
 
-const isDevAuthEnvironment = () => {
+function hasAuthConsent(): boolean {
   try {
-    const host = window.location.hostname;
-    if (host === 'localhost' || host === '127.0.0.1') return true;
-    // Lovable sandbox previews (in-editor iframe and shareable preview) — allow mock auth
-    // so the app is testable without a real Telegram Mini App context.
-    if (host.startsWith('id-preview--')) return true;
-    if (host.endsWith('.lovableproject.com')) return true;
-    if (host.endsWith('.lovable.app')) return true;
-    return false;
+    return localStorage.getItem(AUTH_CONSENT_KEY) === 'true';
   } catch {
     return false;
   }
-};
+}
+
+function setAuthConsent(value: boolean) {
+  try {
+    if (value) localStorage.setItem(AUTH_CONSENT_KEY, 'true');
+    else localStorage.removeItem(AUTH_CONSENT_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+function getTelegramWebApp(): any {
+  try {
+    return (window as any).Telegram?.WebApp;
+  } catch {
+    return undefined;
+  }
+}
+
+function readTelegramInitData(): string {
+  return String(getTelegramWebApp()?.initData || "");
+}
+
+function readTelegramUnsafeUser(): {
+  id?: number;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+  photo_url?: string;
+} | null {
+  try {
+    return getTelegramWebApp()?.initDataUnsafe?.user || null;
+  } catch {
+    return null;
+  }
+}
+
+/** На телефоні WebApp інколи з'являється з мікрозатримкою — чекаємо, не блокуємо UI. */
+async function waitForTelegramInitData(maxMs = 800): Promise<string> {
+  const existing = readTelegramInitData();
+  if (existing) return existing;
+
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const tick = () => {
+      const data = readTelegramInitData();
+      if (data || Date.now() - started >= maxMs) {
+        resolve(data);
+        return;
+      }
+      window.setTimeout(tick, 50);
+    };
+    tick();
+  });
+}
+
+function mapBackendRole(role?: string | null): string {
+  if (!role || role === "guest") return "guest";
+  if (role === "client" || role === "user") return "customer";
+  return role;
+}
+
+function mapBackendUserToProfile(user: BackendTelegramUser, role: string): Profile {
+  const mapped = mapBackendRole(role || user.role);
+  const tgUser = readTelegramUnsafeUser();
+  return {
+    id: String(user.id),
+    telegram_id: user.telegram_id || tgUser?.id || null,
+    telegram_username: user.username || tgUser?.username || null,
+    first_name: user.first_name || tgUser?.first_name || null,
+    last_name: user.last_name || tgUser?.last_name || null,
+    phone: null,
+    email: null,
+    avatar_url: tgUser?.photo_url || null,
+    user_type: mapped === "supplier" ? "supplier" : "customer",
+    is_active: true,
+    created_at: user.created_at || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    roles: mapped === "guest" ? [] : [mapped],
+  };
+}
 
 
 export function useTelegramAuth() {
   const [state, setState] = useState<AuthState>({
-    isLoading: true,
+    isLoading: false,
     isAuthenticated: false,
     profile: null,
     addresses: [],
@@ -82,15 +157,6 @@ export function useTelegramAuth() {
   });
 
   // Get session token from storage
-  const getStoredToken = useCallback((): string | null => {
-    try {
-      return localStorage.getItem(SESSION_TOKEN_KEY);
-    } catch {
-      return null;
-    }
-  }, []);
-
-  // Store session token
   const storeToken = useCallback((token: string | null) => {
     try {
       if (token) {
@@ -103,99 +169,71 @@ export function useTelegramAuth() {
     }
   }, []);
 
-  // Validate existing session
-  const validateSession = useCallback(async (token: string): Promise<boolean> => {
+  const applyGuest = useCallback(() => {
+    setState({
+      isLoading: false,
+      isAuthenticated: false,
+      profile: null,
+      addresses: [],
+      sessionToken: null,
+      error: null,
+    });
+  }, []);
+
+  const authRequestId = useRef(0);
+
+  const authenticate = useCallback(async (options?: { forceTelegram?: boolean }) => {
+    const requestId = ++authRequestId.current;
     try {
-      const { data, error } = await supabase.functions.invoke('telegram-auth', {
-        body: { action: 'validate', session_token: token },
-      });
-      
-      if (error || !data?.success) {
-        // Clear stale token on validation failure
-        storeToken(null);
-        return false;
+      setState(prev => ({ ...prev, error: null }));
+
+      const tg = getTelegramWebApp();
+      try {
+        tg?.ready?.();
+        tg?.expand?.();
+      } catch {
+        // WebApp ще не готовий — не блокуємо додаток
       }
-      
+
+      const initData =
+        (await waitForTelegramInitData()) ||
+        String(getTelegramWebApp()?.initData || "");
+
+      if (requestId !== authRequestId.current) return null;
+
+      const result = await authTelegramMiniApp(initData);
+      if (requestId !== authRequestId.current) return null;
+
+      const mappedRole = mapBackendRole(result.role || result.user?.role);
+
+      if (
+        !result ||
+        result.is_guest ||
+        mappedRole === "guest" ||
+        !result.user?.telegram_id
+      ) {
+        applyGuest();
+        return null;
+      }
+
+      const profile = mapBackendUserToProfile(result.user, mappedRole);
+      setAuthConsent(true);
       setState({
         isLoading: false,
         isAuthenticated: true,
-        profile: data.profile,
-        addresses: data.addresses || [],
-        sessionToken: token,
+        profile,
+        addresses: [],
+        sessionToken: initData || null,
         error: null,
       });
-      
-      return true;
-    } catch {
-      // Clear stale token on any error (including 401)
-      storeToken(null);
-      return false;
-    }
-  }, [storeToken]);
-
-  const authenticate = useCallback(async () => {
-    try {
-      setState(prev => ({ ...prev, isLoading: true, error: null }));
-      
-      // Check for existing session first
-      const existingToken = getStoredToken();
-      if (existingToken) {
-        const isValid = await validateSession(existingToken);
-        if (isValid) {
-          return state.profile;
-        }
-        // Invalid session, clear it
-        storeToken(null);
-      }
-      
-      // Check if running in Telegram Mini App
-      const tg = (window as any).Telegram?.WebApp;
-      let initData = tg?.initData;
-      
-      // For development, use mock auth
-      if (!initData || initData === '') {
-        console.log('No Telegram initData, using mock auth for development');
-        initData = 'mock_dev_auth';
-      }
-      
-      const { data, error } = await supabase.functions.invoke('telegram-auth', {
-        body: { init_data: initData },
-      });
-      
-      if (error) throw error;
-      
-      if (data?.success && data?.profile) {
-        // Store the session token
-        if (data.session_token) {
-          storeToken(data.session_token);
-        }
-        
-        setState({
-          isLoading: false,
-          isAuthenticated: true,
-          profile: data.profile,
-          addresses: data.addresses || [],
-          sessionToken: data.session_token || null,
-          error: null,
-        });
-        return data.profile;
-      } else {
-        throw new Error(data?.error || 'Authentication failed');
-      }
+      return profile;
     } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Authentication failed';
-      console.error('Auth error:', errorMessage);
-      setState({
-        isLoading: false,
-        isAuthenticated: false,
-        profile: null,
-        addresses: [],
-        sessionToken: null,
-        error: errorMessage,
-      });
+      console.error('Auth error:', error);
+      if (requestId !== authRequestId.current) return null;
+      applyGuest();
       return null;
     }
-  }, [getStoredToken, storeToken, validateSession]);
+  }, [applyGuest]);
 
   const updateProfile = useCallback(async (updates: Partial<Profile>) => {
     if (!state.profile || !state.sessionToken) return null;
@@ -317,6 +355,7 @@ export function useTelegramAuth() {
     }
     
     storeToken(null);
+    setAuthConsent(false);
     setState({
       isLoading: false,
       isAuthenticated: false,
@@ -327,28 +366,23 @@ export function useTelegramAuth() {
     });
   }, [state.sessionToken, storeToken]);
 
-  // Check for existing session on mount
+  // Без свідомої згоди (isAuthorized) — завжди гість, без запиту на бекенд.
+  // Якщо згода вже є — тиха авторизація POST /api/v1/auth/telegram.
   useEffect(() => {
-    const checkSession = async () => {
-      const existingToken = getStoredToken();
-      if (existingToken) {
-        const isValid = await validateSession(existingToken);
-        if (isValid) return;
-        // Stale token — clear and fall through to fresh auth below.
-        storeToken(null);
-      }
+    if (!hasAuthConsent()) {
+      applyGuest();
+      return;
+    }
 
-      // If in Telegram WebApp or Lovable test preview, auto-authenticate.
-      const tg = (window as any).Telegram?.WebApp;
-      if (tg?.initData || isDevAuthEnvironment()) {
-        authenticate();
-      } else {
-        setState(prev => ({ ...prev, isLoading: false }));
-      }
+    let cancelled = false;
+    authenticate().then(() => {
+      if (cancelled) return;
+    });
+
+    return () => {
+      cancelled = true;
     };
-
-    checkSession();
-  }, [getStoredToken, storeToken, validateSession, authenticate]);
+  }, [authenticate, applyGuest]);
 
   return {
     ...state,

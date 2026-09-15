@@ -35,9 +35,15 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, unquote, urlparse
 
 import aiofiles
 import aiohttp
+
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +68,27 @@ _FALLBACK_XML_CANDIDATES = [
     _PROJECT_ROOT / "docs" / "product_export (3).xml",
     _PROJECT_ROOT / "docs" / "product_export (2).xml",
 ]
+
+
+def extract_public_api_key(yml_or_key: Optional[str]) -> Optional[str]:
+    """
+    Дістає публічний ключ вигрузки з yml_link або повертає рядок як ключ.
+
+    Приклади:
+      https://backend.mydrop.com.ua/vendor/api/export/products/prom/yml?public_api_key=ABC
+      ABC  (сам ключ, без URL)
+    Повний XML-лінка без public_api_key (Prom тощо) → None.
+    """
+    raw = (yml_or_key or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme in ("http", "https"):
+        values = parse_qs(parsed.query).get("public_api_key") or []
+        if values and str(values[0]).strip():
+            return unquote(str(values[0]).strip())
+        return None
+    return raw
 
 
 class MyDropAPIError(Exception):
@@ -177,6 +204,7 @@ class MyDropAPIClient:
         headers = {
             "X-API-KEY": api_key,
             "Content-Type": "application/json",
+            "User-Agent": BROWSER_USER_AGENT,
         }
 
         last_error: Optional[Exception] = None
@@ -279,7 +307,11 @@ class MyDropAPIClient:
             await self._throttle()
             try:
                 async with aiohttp.ClientSession(timeout=self._timeout) as session:
-                    async with session.get(url, params=params) as resp:
+                    async with session.get(
+                        url,
+                        params=params,
+                        headers={"User-Agent": BROWSER_USER_AGENT},
+                    ) as resp:
                         if resp.status == 429 or resp.status >= 500:
                             retry_after_header = resp.headers.get("Retry-After")
                             delay = float(retry_after_header) if retry_after_header else (2 ** attempt)
@@ -322,6 +354,85 @@ class MyDropAPIClient:
 
         logger.error("MyDrop YML export %s: усі %s спроби невдалі. Остання помилка: %s", path, self.max_retries, last_error)
         raise MyDropAPIError(f"Не вдалося завантажити YML з {path} після {self.max_retries} спроб: {last_error}")
+
+    async def fetch_yml_text_from_url(self, yml_url: str) -> str:
+        """Завантажує XML/YML за довільним публічним URL (Prom, прямий фіда тощо)."""
+        raw_url = (yml_url or "").strip()
+        if not raw_url.lower().startswith(("http://", "https://")):
+            raise MyDropAPIError(f"Невалідний yml_link: {yml_url!r}")
+
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self.max_retries + 1):
+            await self._throttle()
+            try:
+                async with aiohttp.ClientSession(timeout=self._timeout) as session:
+                    async with session.get(
+                        raw_url,
+                        headers={"User-Agent": BROWSER_USER_AGENT},
+                    ) as resp:
+                        if resp.status == 429 or resp.status >= 500:
+                            retry_after_header = resp.headers.get("Retry-After")
+                            delay = float(retry_after_header) if retry_after_header else (2 ** attempt)
+                            body_preview = (await resp.text())[:300]
+                            logger.warning(
+                                "YML URL %s -> статус %s (спроба %s/%s). Чекаю %.1fс. Тіло: %s",
+                                raw_url, resp.status, attempt, self.max_retries, delay, body_preview,
+                            )
+                            last_error = MyDropAPIError(
+                                f"YML URL тимчасово недоступний (status={resp.status})",
+                                status=resp.status,
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+
+                        if resp.status >= 400:
+                            body_preview = (await resp.text())[:300]
+                            logger.error("YML URL %s помилка %s: %s", raw_url, resp.status, body_preview)
+                            raise MyDropAPIError(
+                                f"YML URL повернув помилку {resp.status}.",
+                                status=resp.status,
+                                payload=body_preview,
+                            )
+                        return await resp.text()
+            except MyDropAPIError:
+                raise
+            except asyncio.TimeoutError as e:
+                last_error = e
+                logger.warning("YML URL %s: timeout, спроба %s/%s", raw_url, attempt, self.max_retries)
+                await asyncio.sleep(2 ** attempt)
+            except aiohttp.ClientError as e:
+                last_error = e
+                logger.warning(
+                    "YML URL %s: мережева помилка %s, спроба %s/%s", raw_url, e, attempt, self.max_retries,
+                )
+                await asyncio.sleep(2 ** attempt)
+
+        raise MyDropAPIError(
+            f"Не вдалося завантажити YML з {raw_url} після {self.max_retries} спроб: {last_error}"
+        )
+
+    async def get_products_from_yml_url(self, yml_url: str) -> List[Dict[str, Any]]:
+        """
+        Каталог з прямого XML/YML-лінка. Якщо в URL є public_api_key MyDrop —
+        йдемо стандартним публічним експортом; інакше качаємо URL як є.
+        При мережевій помилці — той самий локальний fallback, що й get_products().
+        """
+        key = extract_public_api_key(yml_url)
+        is_http = (yml_url or "").strip().lower().startswith(("http://", "https://"))
+        try:
+            if key and (not is_http or "mydrop" in (yml_url or "").lower()):
+                xml_text = await self._fetch_public_yml(key)
+            elif is_http:
+                xml_text = await self.fetch_yml_text_from_url(yml_url)
+            elif key:
+                xml_text = await self._fetch_public_yml(key)
+            else:
+                raise MyDropAPIError("Порожній або невалідний yml_link.")
+            return self._parse_yml_to_dicts(xml_text)
+        except Exception as e:
+            logger.warning("Мережева помилка YML. Використовую локальний файл-заглушку. (%s)", e)
+            fallback_xml_text = await self._read_fallback_xml()
+            return self._parse_yml_to_dicts(fallback_xml_text)
 
     async def _fetch_public_yml(self, public_api_key: str) -> str:
         """

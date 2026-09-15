@@ -18,7 +18,7 @@ sys.path.append(str(current_dir))
 from sqlalchemy import select
 
 from database.db import AsyncSessionLocal
-from database.models import Product
+from database.models import Product, ProductAIStatus
 from services.ai_processor import ProductAIProcessor
 
 logging.basicConfig(level=logging.INFO)
@@ -34,7 +34,10 @@ async def _fetch_next_raw_product(
     supplier_id: int | None,
     skip_ids: set[int],
 ) -> Product | None:
-    stmt = select(Product).where(Product.is_ai_processed.is_(False))
+    stmt = select(Product).where(
+        Product.is_ai_processed.is_(False),
+        Product.ai_status.in_((ProductAIStatus.pending, ProductAIStatus.failed)),
+    )
     if supplier_id is not None:
         stmt = stmt.where(Product.supplier_id == supplier_id)
     if skip_ids:

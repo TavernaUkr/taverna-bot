@@ -6,20 +6,23 @@
 import asyncio
 import html
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from fastapi import APIRouter, Depends, HTTPException, Header
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 
-from api_models import PartnerRegisterRequest, PartnerRegisterResponse
+from api_models import PartnerRegisterRequest, PartnerRegisterResponse, SupplierImportProgressResponse
 from bot_instance import get_bot_instance
 from config_reader import config
 from database.db import AsyncSessionLocal, get_db, AsyncSession
 from database.models import (
+    Product,
+    ProductAIStatus,
     Supplier,
     SupplierLegalType,
     SupplierStatus,
@@ -200,6 +203,74 @@ def _schedule_background(coro) -> None:
         if exc:
             logger.error("Фонова задача заявки впала: %s", exc, exc_info=exc)
     task.add_done_callback(_log_task_result)
+
+
+SECONDS_PER_PRODUCT_AI = 15
+
+
+async def _supplier_ids_for_telegram(
+    db: AsyncSession,
+    telegram_id: int,
+) -> list[int]:
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    filters = [Supplier.contact_telegram_id == telegram_id]
+    if user:
+        filters.append(Supplier.user_id == user.id)
+    stmt = select(Supplier.id).where(or_(*filters))
+    return list((await db.execute(stmt)).scalars().all())
+
+
+@router.get("/me/import-progress", response_model=SupplierImportProgressResponse)
+async def get_my_import_progress(
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Скільки товарів поточного постачальника вже пройшли AI-категоризацію.
+    1 товар ≈ 15 секунд. is_importing=true, поки completed < total.
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    supplier_ids = await _supplier_ids_for_telegram(db, telegram_id)
+    if not supplier_ids:
+        return SupplierImportProgressResponse(
+            total=0,
+            completed=0,
+            estimated_minutes=0,
+            is_importing=False,
+        )
+
+    total = (
+        await db.execute(
+            select(func.count(Product.id)).where(Product.supplier_id.in_(supplier_ids))
+        )
+    ).scalar() or 0
+    completed = (
+        await db.execute(
+            select(func.count(Product.id)).where(
+                Product.supplier_id.in_(supplier_ids),
+                Product.ai_status == ProductAIStatus.completed,
+            )
+        )
+    ).scalar() or 0
+
+    total = int(total)
+    completed = int(completed)
+    remaining = max(total - completed, 0)
+    estimated_minutes = math.ceil(remaining * SECONDS_PER_PRODUCT_AI / 60) if remaining else 0
+    is_importing = completed < total
+
+    return SupplierImportProgressResponse(
+        total=total,
+        completed=completed,
+        estimated_minutes=estimated_minutes,
+        is_importing=is_importing,
+    )
 
 
 def _telegram_id_from_authorization(authorization: Optional[str]) -> Optional[int]:
