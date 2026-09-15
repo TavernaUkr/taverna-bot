@@ -555,15 +555,32 @@ export async function registerPartner(
   );
 }
 
+export const SUPPLIERS_ME_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me`;
+export const SUPPLIERS_REQUEST_DELETION_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/request-deletion`;
 export const SUPPLIERS_IMPORT_PROGRESS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/import-progress`;
 export const ADMIN_PENDING_SUPPLIERS_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/pending`;
 export const ADMIN_DIRECT_CREATE_SUPPLIER_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/direct-create`;
+
+export interface BackendSupplierMe {
+  id: number;
+  store_name: string;
+  supplier_type?: string | null;
+  status: string;
+  is_verified: boolean;
+  product_count: number;
+  completed_products: number;
+  deletion_requested: boolean;
+  created_at?: string | null;
+  approved_at?: string | null;
+  deleted_at?: string | null;
+}
 
 export interface BackendSupplierImportProgress {
   total: number;
   completed: number;
   estimated_minutes: number;
   is_importing: boolean;
+  queue_ahead?: number;
 }
 
 export interface BackendPendingSupplierApplication {
@@ -588,7 +605,10 @@ export interface BackendPendingSupplierApplication {
   ai_score_report?: string | null;
   trial_ends_at?: string | null;
   created_at?: string | null;
+  approved_at?: string | null;
+  deleted_at?: string | null;
   import_started?: boolean;
+  deletion_reason?: string | null;
 }
 
 function adminTelegramHeaders(): Record<string, string> {
@@ -601,6 +621,28 @@ function adminTelegramHeaders(): Record<string, string> {
     headers.Authorization = `Bearer ${initData}`;
   }
   return headers;
+}
+
+/** GET /api/v1/suppliers/me — магазин поточного постачальника. */
+export async function fetchMySupplier(): Promise<BackendSupplierMe | null> {
+  try {
+    return await backendGet<BackendSupplierMe>(SUPPLIERS_ME_ENDPOINT, adminTelegramHeaders());
+  } catch (error) {
+    if (error instanceof BackendApiError && (error.status === 404 || error.status === 401)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/** POST /api/v1/suppliers/me/request-deletion — заявка адміну на видалення магазину. */
+export async function requestSupplierDeletion(reason: string): Promise<{ ok: boolean; detail?: string }> {
+  return backendPost(
+    SUPPLIERS_REQUEST_DELETION_ENDPOINT,
+    { reason },
+    "Не вдалося надіслати заявку на видалення",
+    adminTelegramHeaders()
+  );
 }
 
 /** GET /api/v1/suppliers/me/import-progress — прогрес AI-категоризації товарів. */
@@ -617,6 +659,47 @@ export async function fetchPendingSupplierApplications(
   const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
   return backendGet<BackendPendingSupplierApplication[]>(
     `${ADMIN_PENDING_SUPPLIERS_ENDPOINT}${params}`,
+    adminTelegramHeaders()
+  );
+}
+
+export async function fetchSupplierDeletionRequests(
+  telegramId?: number | null
+): Promise<BackendPendingSupplierApplication[]> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendGet<BackendPendingSupplierApplication[]>(
+    `${API_BASE_URL}/api/v1/admin/suppliers/deletion-requests${params}`,
+    adminTelegramHeaders()
+  );
+}
+
+export async function fetchSupplierHistory(
+  telegramId?: number | null
+): Promise<BackendPendingSupplierApplication[]> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendGet<BackendPendingSupplierApplication[]>(
+    `${API_BASE_URL}/api/v1/admin/suppliers/history${params}`,
+    adminTelegramHeaders()
+  );
+}
+
+export async function approveSupplierDeletion(
+  supplierId: number,
+  telegramId?: number | null
+): Promise<{
+  ok: boolean;
+  supplier_id: number;
+  status: string;
+  user_reverted: boolean;
+  products_archived: number;
+  ai_cancelled: number;
+  detail?: string;
+}> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendPost(
+    `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/approve-deletion${params}`,
+    {},
+    "Не вдалося підтвердити видалення",
     adminTelegramHeaders()
   );
 }

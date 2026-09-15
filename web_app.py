@@ -39,7 +39,7 @@ from services import (
     payout_service, publisher_service,
     omnichannel_service as ads_service # <-- ОНОВЛЕНО
 )
-from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession
+from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession, ensure_supplier_status_timestamps
 from services.ai_queue_worker import start_ai_product_queue
 from database.models import * # (Імпортуємо все)
 from config_reader import config
@@ -75,6 +75,10 @@ app.add_middleware(
 async def startup_event():
     app.state.bot = bot # Використовуємо імпортований `bot`
     logger.info("FastAPI startup: Bot instance attached.")
+    try:
+        await ensure_supplier_status_timestamps()
+    except Exception as e:
+        logger.error("Не вдалося додати approved_at/deleted_at: %s", e, exc_info=True)
     try:
         await start_ai_product_queue()
     except Exception as e:

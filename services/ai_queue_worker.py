@@ -10,7 +10,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import or_, select, update
 
 from database.db import AsyncSessionLocal, engine, ensure_product_ai_status_column
-from database.models import Product, ProductAIStatus
+from database.models import Product, ProductAIStatus, ProductStatus, Supplier, SupplierStatus
 from services.ai_processor import GeminiCapacityError, ProductAIProcessor
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,10 @@ async def process_next_pending_product() -> None:
 
             stmt = (
                 select(Product)
-                .where(Product.ai_status == ProductAIStatus.pending)
+                .where(
+                    Product.ai_status == ProductAIStatus.pending,
+                    Product.status != ProductStatus.deleted,
+                )
                 .order_by(Product.id.asc())
                 .limit(1)
             )
@@ -73,6 +76,27 @@ async def process_next_pending_product() -> None:
             product = (await db.execute(stmt)).scalars().first()
 
             if not product:
+                return
+
+            supplier = await db.get(Supplier, product.supplier_id)
+            supplier_status = (
+                supplier.status.value if supplier and hasattr(supplier.status, "value") else (
+                    str(supplier.status) if supplier else ""
+                )
+            )
+            if supplier_status in (
+                SupplierStatus.deletion_requested.value,
+                SupplierStatus.deleted.value,
+                SupplierStatus.banned.value,
+            ):
+                product.ai_status = ProductAIStatus.cancelled
+                await db.commit()
+                logger.info(
+                    "AI-черга: товар #%s cancelled (магазин #%s статус=%s).",
+                    product.id,
+                    product.supplier_id,
+                    supplier_status,
+                )
                 return
 
             product_id = product.id

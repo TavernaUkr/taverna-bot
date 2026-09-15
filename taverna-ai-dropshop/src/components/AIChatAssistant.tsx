@@ -218,7 +218,7 @@ export const AIChatAssistant = () => {
         aria-label="Taverna AI"
         onClick={() => setIsOpen(true)}
         className={cn(
-          "fixed right-4 z-[55]",
+          "relative shrink-0",
           "w-14 h-14 rounded-full",
           "bg-gradient-to-br from-primary to-accent",
           "text-primary-foreground shadow-lg",
@@ -226,9 +226,6 @@ export const AIChatAssistant = () => {
           "hover:scale-110 active:scale-95",
           "transition-all duration-200",
           "animate-pulse-slow",
-          floating?.feedOpen
-            ? "bottom-[calc(25rem+env(safe-area-inset-bottom,0px))] right-3"
-            : "bottom-[calc(11.25rem+env(safe-area-inset-bottom,0px))]",
           isOpen && "hidden"
         )}
       >

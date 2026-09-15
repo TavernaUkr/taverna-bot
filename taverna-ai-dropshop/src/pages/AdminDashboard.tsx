@@ -4,7 +4,7 @@ import {
   ArrowLeft, Users, Check, X, Loader2, DollarSign, ShoppingCart, Package,
   Shield, UserCog, RefreshCw,
   Crown, Tag, Gift, Brain, MessageSquare, Trophy, Store, Megaphone, Wallet,
-  Phone, Link2, Bot, Trash2,
+  Phone, Link2, Bot, Trash2, MessageCircle, History, AlertTriangle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -30,11 +30,16 @@ import { CommandCenter } from '@/components/admin/CommandCenter';
 import { PaymentsManager } from '@/components/admin/PaymentsManager';
 import { ShopBalancesPanel } from '@/components/admin/ShopBalancesPanel';
 import { TavernaGroupPanel } from '@/components/admin/TavernaGroupPanel';
+import { AnimatePresence, motion } from 'framer-motion';
 import {
   fetchPendingSupplierApplications,
+  fetchSupplierDeletionRequests,
+  fetchSupplierHistory,
   approveSupplierApplication,
   rejectSupplierApplication,
   deleteSupplierAccount,
+  approveSupplierDeletion,
+  type BackendPendingSupplierApplication,
 } from '@/lib/backendApi';
 
 interface SupplierApplication {
@@ -51,17 +56,101 @@ interface SupplierApplication {
   manager_telegram?: string | null;
   status: string;
   created_at: string;
+  approved_at?: string | null;
+  deleted_at?: string | null;
   reseller_probability: number | null;
   plagiarism_score: number | null;
   suggested_categories: string[] | null;
   profile_id: string | null;
   telegram_id: number | null;
   ai_score_report?: string | null;
+  deletion_reason?: string | null;
 }
 
 function supplierTypeLabel(type?: string | null): string {
   if (type === "business" || type === "company") return "ФОП";
   return "Фіз особа";
+}
+
+function historyStatusLabel(status?: string) {
+  switch (status) {
+    case "approved":
+    case "active":
+      return "Approved";
+    case "rejected":
+      return "Rejected";
+    case "deleted":
+      return "Deleted";
+    case "banned":
+      return "Banned";
+    default:
+      return status || "—";
+  }
+}
+
+function historyStatusClass(status?: string) {
+  switch (status) {
+    case "approved":
+    case "active":
+      return "bg-green-500/10 text-green-700 border-green-500/30";
+    case "rejected":
+      return "bg-destructive/10 text-destructive border-destructive/30";
+    case "deleted":
+      return "bg-orange-500/10 text-orange-700 border-orange-500/30";
+    case "banned":
+      return "bg-red-500/10 text-red-700 border-red-500/30";
+    default:
+      return "";
+  }
+}
+
+function formatDate(value?: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString("uk-UA", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function managerTelegramUrl(raw?: string | null): string | null {
+  if (!raw) return null;
+  let value = raw.trim().replace(/^https?:\/\//i, "").replace(/^@/, "");
+  if (value.toLowerCase().startsWith("t.me/")) value = value.slice(5);
+  value = value.split("?")[0].replace(/^\/+|\/+$/g, "");
+  if (value.includes("/")) value = value.split("/").pop() || value;
+  return value ? `https://t.me/${value}` : null;
+}
+
+function mapSupplierApplication(r: BackendPendingSupplierApplication): SupplierApplication {
+  return {
+    id: String(r.id),
+    shop_name: r.shop_name,
+    full_name: r.full_name || "",
+    email: r.email || "",
+    phone: r.phone || "",
+    company_name: r.company_name,
+    supplier_type: r.supplier_type || "individual",
+    tax_id: r.tax_id || "",
+    description: r.description,
+    xml_url: r.xml_url || r.yml_link,
+    manager_telegram: r.manager_telegram,
+    status: r.status,
+    created_at: r.created_at || new Date().toISOString(),
+    approved_at: r.approved_at ?? null,
+    deleted_at: r.deleted_at ?? null,
+    reseller_probability: null,
+    plagiarism_score: null,
+    suggested_categories: null,
+    profile_id: null,
+    telegram_id: r.telegram_id ?? null,
+    ai_score_report: r.ai_score_report,
+    deletion_reason: r.deletion_reason,
+  };
 }
 
 interface OrderStats {
@@ -79,8 +168,11 @@ export default function AdminDashboard() {
   const { isLoading: authLoading, rolesLoading, isAuthenticated, effectiveRole, profile } = useTelegramAuthContext();
   const [activeTab, setActiveTab] = useState('overview');
   const [pendingSuppliers, setPendingSuppliers] = useState<SupplierApplication[]>([]);
+  const [deletionRequests, setDeletionRequests] = useState<SupplierApplication[]>([]);
+  const [historySuppliers, setHistorySuppliers] = useState<SupplierApplication[]>([]);
+  const [applicationsSubTab, setApplicationsSubTab] = useState<'partnership' | 'deletion' | 'history'>('partnership');
   const [processingAppId, setProcessingAppId] = useState<string | null>(null);
-  const [processingAction, setProcessingAction] = useState<'approve' | 'reject' | 'delete' | null>(null);
+  const [processingAction, setProcessingAction] = useState<'approve' | 'reject' | 'delete' | 'approve-deletion' | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [orderStats, setOrderStats] = useState<OrderStats>({
     totalOrders: 0, totalRevenue: 0, totalMargin: 0,
@@ -114,6 +206,7 @@ export default function AdminDashboard() {
   useEffect(() => {
     if (isAdmin) {
       fetchApplications();
+      fetchDeletionList();
       fetchOrderStats();
     }
   }, [isAdmin]);
@@ -130,29 +223,7 @@ export default function AdminDashboard() {
       const rows = await fetchPendingSupplierApplications(
         adminTelegramId ? Number(adminTelegramId) : undefined
       );
-      setPendingSuppliers(
-        rows.map((r) => ({
-          id: String(r.id),
-          shop_name: r.shop_name,
-          full_name: r.full_name || "",
-          email: r.email || "",
-          phone: r.phone || "",
-          company_name: r.company_name,
-          supplier_type: r.supplier_type || "individual",
-          tax_id: r.tax_id || "",
-          description: r.description,
-          xml_url: r.xml_url || r.yml_link,
-          manager_telegram: r.manager_telegram,
-          status: r.status,
-          created_at: r.created_at || new Date().toISOString(),
-          reseller_probability: null,
-          plagiarism_score: null,
-          suggested_categories: null,
-          profile_id: null,
-          telegram_id: r.telegram_id ?? null,
-          ai_score_report: r.ai_score_report,
-        }))
-      );
+      setPendingSuppliers(rows.map(mapSupplierApplication));
       const focusId = searchParams.get("supplier");
       if (focusId) setActiveTab("applications");
     } catch (err) {
@@ -160,6 +231,30 @@ export default function AdminDashboard() {
       toast.error("Не вдалося завантажити заявки");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const fetchDeletionList = async () => {
+    try {
+      const rows = await fetchSupplierDeletionRequests(
+        adminTelegramId ? Number(adminTelegramId) : undefined
+      );
+      setDeletionRequests(rows.map(mapSupplierApplication));
+    } catch (err) {
+      console.error("Error fetching deletion requests:", err);
+      toast.error("Не вдалося завантажити заявки на видалення");
+    }
+  };
+
+  const fetchHistoryList = async () => {
+    try {
+      const rows = await fetchSupplierHistory(
+        adminTelegramId ? Number(adminTelegramId) : undefined
+      );
+      setHistorySuppliers(rows.map(mapSupplierApplication));
+    } catch (err) {
+      console.error("Error fetching supplier history:", err);
+      toast.error("Не вдалося завантажити історію заявок");
     }
   };
 
@@ -252,6 +347,55 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleApproveDeletion = async (id: number) => {
+    if (processingAppId) return;
+    const idStr = String(id);
+    setProcessingAppId(idStr);
+    setProcessingAction('approve-deletion');
+    let removed: SupplierApplication | undefined;
+    setDeletionRequests((prev) => {
+      removed = prev.find((req) => String(req.id) === idStr);
+      return prev.filter((req) => String(req.id) !== idStr);
+    });
+    try {
+      await approveSupplierDeletion(
+        id,
+        adminTelegramId ? Number(adminTelegramId) : undefined
+      );
+      hapticSelection();
+      setDeletionRequests((prev) => prev.filter((req) => String(req.id) !== String(id)));
+      toast.success("Видалення підтверджено. Товари архівовано, користувач знову клієнт.");
+      fetchHistoryList();
+    } catch (err: any) {
+      console.error("Approve deletion error:", err);
+      const alreadyGone = err?.status === 409 || String(err?.message || "").includes("409");
+      if (alreadyGone) {
+        setDeletionRequests((prev) => prev.filter((req) => String(req.id) !== String(id)));
+        toast.success("Магазин уже видалено.");
+        fetchHistoryList();
+      } else {
+        if (removed) {
+          setDeletionRequests((prev) => {
+            if (prev.some((req) => String(req.id) === idStr)) return prev;
+            return [removed as SupplierApplication, ...prev];
+          });
+        }
+        toast.error(err?.message || "Не вдалося підтвердити видалення");
+      }
+    } finally {
+      setProcessingAppId(null);
+      setProcessingAction(null);
+    }
+  };
+
+  const switchApplicationsTab = (tab: 'partnership' | 'deletion' | 'history') => {
+    hapticSelection();
+    setApplicationsSubTab(tab);
+    if (tab === 'partnership') fetchApplications();
+    if (tab === 'deletion') fetchDeletionList();
+    if (tab === 'history') fetchHistoryList();
+  };
+
   if (authLoading || rolesLoading) {
     return <div className="min-h-screen bg-background flex items-center justify-center"><Loader2 className="h-8 w-8 animate-spin text-primary" /></div>;
   }
@@ -289,7 +433,10 @@ export default function AdminDashboard() {
             </div>
           </div>
           <Button variant="outline" size="sm" onClick={() => {
-            fetchApplications(); fetchOrderStats();
+            fetchApplications();
+            fetchDeletionList();
+            if (applicationsSubTab === 'history') fetchHistoryList();
+            fetchOrderStats();
             toast.success('Дані оновлено');
           }}>
             <RefreshCw className="h-4 w-4" />
@@ -328,9 +475,9 @@ export default function AdminDashboard() {
             <MessageSquare className="h-3 w-3" /> {orderStats.openTickets} тікетів
           </Badge>
         )}
-        {pendingSuppliers.length > 0 && (
+        {pendingSuppliers.length + deletionRequests.length > 0 && (
           <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/30 gap-1">
-            <Users className="h-3 w-3" /> {pendingSuppliers.length} заявок
+            <Users className="h-3 w-3" /> {pendingSuppliers.length + deletionRequests.length} заявок
           </Badge>
         )}
       </div>
@@ -354,8 +501,10 @@ export default function AdminDashboard() {
               </TabsTrigger>
               <TabsTrigger value="applications" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Users className="h-3.5 w-3.5" /> Заявки
-                {pendingSuppliers.length > 0 && (
-                  <Badge variant="destructive" className="ml-1 h-4 px-1 text-[10px]">{pendingSuppliers.length}</Badge>
+                {pendingSuppliers.length + deletionRequests.length > 0 && (
+                  <Badge variant="destructive" className="ml-1 h-4 px-1 text-[10px]">
+                    {pendingSuppliers.length + deletionRequests.length}
+                  </Badge>
                 )}
               </TabsTrigger>
               <TabsTrigger value="support" className="text-xs px-3 gap-1 flex-shrink-0">
@@ -464,139 +613,297 @@ export default function AdminDashboard() {
 
           {/* === ЗАЯВКИ === */}
           <TabsContent value="applications">
-            <ScrollArea className="h-[calc(100vh-380px)]">
-              <div className="space-y-4 pr-4 pb-6">
-                {isLoading ? (
-                  <div className="flex items-center justify-center py-12">
-                    <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-                  </div>
-                ) : pendingSuppliers.length === 0 ? (
-                  <div className="text-center py-12">
-                    <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
-                      <Users className="h-8 w-8 text-muted-foreground" />
-                    </div>
-                    <p className="font-medium text-foreground">Немає нових заявок</p>
-                    <p className="text-sm text-muted-foreground">Всі заявки оброблені</p>
-                  </div>
-                ) : (
-                  pendingSuppliers.map((app) => {
-                    const xmlUrl = app.xml_url;
-                    return (
-                    <Card key={app.id} className="overflow-hidden border-border">
-                      <CardContent className="p-4 space-y-4">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <h3 className="font-semibold text-foreground truncate">{app.shop_name}</h3>
-                            <p className="text-sm text-muted-foreground">{app.full_name || "—"}</p>
-                          </div>
-                          <Badge variant={app.supplier_type === "individual" ? "secondary" : "outline"}>
-                            {supplierTypeLabel(app.supplier_type)}
-                          </Badge>
-                        </div>
-
-                        <div className="grid grid-cols-1 gap-2 text-sm">
-                          <div className="flex justify-between gap-3">
-                            <span className="text-muted-foreground shrink-0">ПІБ</span>
-                            <span className="text-foreground text-right">{app.full_name || "—"}</span>
-                          </div>
-                          <div className="flex justify-between gap-3">
-                            <span className="text-muted-foreground shrink-0">ЄДРПОУ / ІПН</span>
-                            <span className="text-foreground text-right font-medium">{app.tax_id || "—"}</span>
-                          </div>
-                          <div className="flex justify-between gap-3 items-center">
-                            <span className="text-muted-foreground shrink-0 flex items-center gap-1">
-                              <Phone className="h-3.5 w-3.5" /> Телефон
-                            </span>
-                            {app.phone ? (
-                              <a href={`tel:${app.phone}`} className="text-primary text-right">
-                                {app.phone}
-                              </a>
-                            ) : (
-                              <span className="text-foreground">—</span>
-                            )}
-                          </div>
-                          <div className="flex justify-between gap-3">
-                            <span className="text-muted-foreground shrink-0">Telegram менеджера</span>
-                            <span className="text-foreground text-right">
-                              {app.manager_telegram || "—"}
-                            </span>
-                          </div>
-                          <div className="flex justify-between gap-3 items-start">
-                            <span className="text-muted-foreground shrink-0 flex items-center gap-1">
-                              <Link2 className="h-3.5 w-3.5" /> XML
-                            </span>
-                            {xmlUrl ? (
-                              <a
-                                href={xmlUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="text-primary text-right text-xs break-all underline underline-offset-2"
-                              >
-                                {xmlUrl}
-                              </a>
-                            ) : (
-                              <span className="text-foreground">—</span>
-                            )}
-                          </div>
-                        </div>
-
-                        <div className="rounded-xl border border-violet-400/30 bg-violet-500/10 p-3 space-y-2">
-                          <p className="text-sm font-semibold text-violet-700 dark:text-violet-300 flex items-center gap-1.5">
-                            <Bot className="h-4 w-4" />
-                            🤖 AI-аналіз
-                          </p>
-                          <p className="text-sm text-foreground/90 whitespace-pre-wrap break-words leading-relaxed max-h-64 overflow-y-auto">
-                            {app.ai_score_report || "AI-звіт ще готується. Оновіть список через хвилину."}
-                          </p>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-2 pt-1">
-                          <Button
-                            className="h-11 gap-2 bg-green-600 hover:bg-green-700 text-white"
-                            disabled={processingAppId === app.id}
-                            onClick={() => handleApprove(Number(app.id))}
-                          >
-                            {processingAppId === app.id && processingAction === 'approve' ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                              <Check className="h-4 w-4" />
-                            )}
-                            ✅ Схвалити
-                          </Button>
-                          <Button
-                            variant="destructive"
-                            className="h-11 gap-2"
-                            disabled={processingAppId === app.id}
-                            onClick={() => handleReject(Number(app.id))}
-                          >
-                            {processingAppId === app.id && processingAction === 'reject' ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                              <X className="h-4 w-4" />
-                            )}
-                            ❌ Відхилити
-                          </Button>
-                          <Button
-                            variant="outline"
-                            className="h-11 col-span-2 gap-2 text-destructive border-destructive/40 hover:bg-destructive/10"
-                            disabled={processingAppId === app.id}
-                            onClick={() => handleDelete(Number(app.id))}
-                          >
-                            {processingAppId === app.id && processingAction === 'delete' ? (
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                            ) : (
-                              <Trash2 className="h-4 w-4" />
-                            )}
-                            🗑 Видалити акаунт
-                          </Button>
-                        </div>
-                      </CardContent>
-                    </Card>
-                    );
-                  })
-                )}
+            <div className="space-y-3">
+              <div className="flex overflow-x-auto whitespace-nowrap flex-nowrap gap-2 pb-2 scrollbar-hide">
+                {(
+                  [
+                    { key: 'partnership' as const, label: 'Партнерство', icon: <Users className="h-3.5 w-3.5" />, count: pendingSuppliers.length },
+                    { key: 'deletion' as const, label: 'Видалення', icon: <Trash2 className="h-3.5 w-3.5" />, count: deletionRequests.length },
+                    { key: 'history' as const, label: 'Історія', icon: <History className="h-3.5 w-3.5" />, count: 0 },
+                  ] as const
+                ).map((tab) => (
+                  <Button
+                    key={tab.key}
+                    variant={applicationsSubTab === tab.key ? "default" : "outline"}
+                    size="sm"
+                    className="gap-1.5 text-xs flex-shrink-0"
+                    onClick={() => switchApplicationsTab(tab.key)}
+                  >
+                    {tab.icon}
+                    {tab.label}
+                    {tab.count > 0 && (
+                      <Badge variant="destructive" className="ml-0.5 h-4 px-1 text-[10px]">{tab.count}</Badge>
+                    )}
+                  </Button>
+                ))}
               </div>
-            </ScrollArea>
+
+              <AnimatePresence mode="wait">
+                <motion.div
+                  key={applicationsSubTab}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -8 }}
+                  transition={{ duration: 0.2, ease: "easeInOut" }}
+                >
+                  <ScrollArea className="h-[calc(100vh-430px)]">
+                    <div className="space-y-4 pr-4 pb-6">
+                      {applicationsSubTab === 'partnership' && (
+                        isLoading ? (
+                          <div className="flex items-center justify-center py-12">
+                            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                          </div>
+                        ) : pendingSuppliers.length === 0 ? (
+                          <div className="text-center py-12">
+                            <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
+                              <Users className="h-8 w-8 text-muted-foreground" />
+                            </div>
+                            <p className="font-medium text-foreground">Немає нових заявок</p>
+                            <p className="text-sm text-muted-foreground">Всі заявки оброблені</p>
+                          </div>
+                        ) : (
+                          pendingSuppliers.map((app) => {
+                            const xmlUrl = app.xml_url;
+                            return (
+                            <Card key={app.id} className="overflow-hidden border-border">
+                              <CardContent className="p-4 space-y-4">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <h3 className="font-semibold text-foreground truncate">{app.shop_name}</h3>
+                                    <p className="text-sm text-muted-foreground">{app.full_name || "—"}</p>
+                                  </div>
+                                  <Badge variant={app.supplier_type === "individual" ? "secondary" : "outline"}>
+                                    {supplierTypeLabel(app.supplier_type)}
+                                  </Badge>
+                                </div>
+
+                                <div className="grid grid-cols-1 gap-2 text-sm">
+                                  <div className="flex justify-between gap-3">
+                                    <span className="text-muted-foreground shrink-0">ПІБ</span>
+                                    <span className="text-foreground text-right">{app.full_name || "—"}</span>
+                                  </div>
+                                  <div className="flex justify-between gap-3">
+                                    <span className="text-muted-foreground shrink-0">ЄДРПОУ / ІПН</span>
+                                    <span className="text-foreground text-right font-medium">{app.tax_id || "—"}</span>
+                                  </div>
+                                  <div className="flex justify-between gap-3 items-center">
+                                    <span className="text-muted-foreground shrink-0 flex items-center gap-1">
+                                      <Phone className="h-3.5 w-3.5" /> Телефон
+                                    </span>
+                                    {app.phone ? (
+                                      <a href={`tel:${app.phone}`} className="text-primary text-right">
+                                        {app.phone}
+                                      </a>
+                                    ) : (
+                                      <span className="text-foreground">—</span>
+                                    )}
+                                  </div>
+                                  <div className="flex justify-between gap-3">
+                                    <span className="text-muted-foreground shrink-0">Telegram менеджера</span>
+                                    <span className="text-foreground text-right">
+                                      {app.manager_telegram || "—"}
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between gap-3 items-start">
+                                    <span className="text-muted-foreground shrink-0 flex items-center gap-1">
+                                      <Link2 className="h-3.5 w-3.5" /> XML
+                                    </span>
+                                    {xmlUrl ? (
+                                      <a
+                                        href={xmlUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-primary text-right text-xs break-all underline underline-offset-2"
+                                      >
+                                        {xmlUrl}
+                                      </a>
+                                    ) : (
+                                      <span className="text-foreground">—</span>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="rounded-xl border border-violet-400/30 bg-violet-500/10 p-3 space-y-2">
+                                  <p className="text-sm font-semibold text-violet-700 dark:text-violet-300 flex items-center gap-1.5">
+                                    <Bot className="h-4 w-4" />
+                                    🤖 AI-аналіз
+                                  </p>
+                                  <p className="text-sm text-foreground/90 whitespace-pre-wrap break-words leading-relaxed max-h-64 overflow-y-auto">
+                                    {app.ai_score_report || "AI-звіт ще готується. Оновіть список через хвилину."}
+                                  </p>
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-2 pt-1">
+                                  <Button
+                                    className="h-11 gap-2 bg-green-600 hover:bg-green-700 text-white"
+                                    disabled={processingAppId === app.id}
+                                    onClick={() => handleApprove(Number(app.id))}
+                                  >
+                                    {processingAppId === app.id && processingAction === 'approve' ? (
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <Check className="h-4 w-4" />
+                                    )}
+                                    ✅ Схвалити
+                                  </Button>
+                                  <Button
+                                    variant="destructive"
+                                    className="h-11 gap-2"
+                                    disabled={processingAppId === app.id}
+                                    onClick={() => handleReject(Number(app.id))}
+                                  >
+                                    {processingAppId === app.id && processingAction === 'reject' ? (
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <X className="h-4 w-4" />
+                                    )}
+                                    ❌ Відхилити
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    className="h-11 col-span-2 gap-2 text-destructive border-destructive/40 hover:bg-destructive/10"
+                                    disabled={processingAppId === app.id}
+                                    onClick={() => handleDelete(Number(app.id))}
+                                  >
+                                    {processingAppId === app.id && processingAction === 'delete' ? (
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <Trash2 className="h-4 w-4" />
+                                    )}
+                                    🗑 Видалити акаунт
+                                  </Button>
+                                </div>
+                              </CardContent>
+                            </Card>
+                            );
+                          })
+                        )
+                      )}
+
+                      {applicationsSubTab === 'deletion' && (
+                        deletionRequests.length === 0 ? (
+                          <div className="text-center py-12">
+                            <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
+                              <Trash2 className="h-8 w-8 text-muted-foreground" />
+                            </div>
+                            <p className="font-medium text-foreground">Немає заявок на видалення</p>
+                            <p className="text-sm text-muted-foreground">Постачальники ще не просили закрити магазин</p>
+                          </div>
+                        ) : (
+                          deletionRequests.map((app) => {
+                            const tgUrl = managerTelegramUrl(app.manager_telegram);
+                            return (
+                              <Card key={app.id} className="overflow-hidden border-orange-500/30">
+                                <CardContent className="p-4 space-y-4">
+                                  <div className="flex items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                      <h3 className="font-semibold text-foreground truncate">{app.shop_name}</h3>
+                                      <p className="text-sm text-muted-foreground">{app.full_name || "—"}</p>
+                                    </div>
+                                    <Badge variant="destructive">На видалення</Badge>
+                                  </div>
+
+                                  <div className="grid grid-cols-1 gap-2 text-sm">
+                                    <div className="flex justify-between gap-3">
+                                      <span className="text-muted-foreground shrink-0">ПІБ</span>
+                                      <span className="text-foreground text-right">{app.full_name || "—"}</span>
+                                    </div>
+                                    <div className="flex justify-between gap-3">
+                                      <span className="text-muted-foreground shrink-0">Telegram для зв'язку</span>
+                                      <span className="text-foreground text-right">
+                                        {app.manager_telegram || "—"}
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  <div className="rounded-xl border border-orange-500/40 bg-orange-500/15 p-3 space-y-1.5">
+                                    <p className="text-sm font-semibold text-orange-700 dark:text-orange-300 flex items-center gap-1.5">
+                                      <AlertTriangle className="h-4 w-4" />
+                                      Причина видалення
+                                    </p>
+                                    <p className="text-sm text-foreground whitespace-pre-wrap break-words leading-relaxed">
+                                      {app.deletion_reason || "Причину не вказано"}
+                                    </p>
+                                  </div>
+
+                                  <div className="grid grid-cols-1 gap-2 pt-1">
+                                    <Button
+                                      variant="outline"
+                                      className="h-11 gap-2"
+                                      disabled={!tgUrl}
+                                      onClick={() => {
+                                        if (!tgUrl) return;
+                                        hapticSelection();
+                                        const tg = (window as any).Telegram?.WebApp;
+                                        if (tg?.openTelegramLink) tg.openTelegramLink(tgUrl);
+                                        else window.open(tgUrl, "_blank", "noopener,noreferrer");
+                                      }}
+                                    >
+                                      <MessageCircle className="h-4 w-4" />
+                                      💬 Написати менеджеру
+                                    </Button>
+                                    <Button
+                                      variant="destructive"
+                                      className="h-11 gap-2"
+                                      disabled={processingAppId === app.id}
+                                      onClick={() => handleApproveDeletion(Number(app.id))}
+                                    >
+                                      {processingAppId === app.id && processingAction === 'approve-deletion' ? (
+                                        <Loader2 className="h-4 w-4 animate-spin" />
+                                      ) : (
+                                        <Trash2 className="h-4 w-4" />
+                                      )}
+                                      🗑 Підтвердити видалення
+                                    </Button>
+                                  </div>
+                                </CardContent>
+                              </Card>
+                            );
+                          })
+                        )
+                      )}
+
+                      {applicationsSubTab === 'history' && (
+                        historySuppliers.length === 0 ? (
+                          <div className="text-center py-12">
+                            <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
+                              <History className="h-8 w-8 text-muted-foreground" />
+                            </div>
+                            <p className="font-medium text-foreground">Історія порожня</p>
+                            <p className="text-sm text-muted-foreground">Тут з'являться схвалені, відхилені та видалені магазини</p>
+                          </div>
+                        ) : (
+                          historySuppliers.map((app) => (
+                            <Card key={app.id} className="overflow-hidden border-border">
+                              <CardContent className="p-4 space-y-3">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <h3 className="font-semibold text-foreground truncate">{app.shop_name}</h3>
+                                    <p className="text-sm text-muted-foreground">{app.full_name || "—"}</p>
+                                  </div>
+                                  <Badge variant="outline" className={historyStatusClass(app.status)}>
+                                    {historyStatusLabel(app.status)}
+                                  </Badge>
+                                </div>
+                                <div className="space-y-1 text-xs text-gray-500">
+                                  <p>📅 Створено: {formatDate(app.created_at)}</p>
+                                  {app.approved_at ? (
+                                    <p>✅ Схвалено: {formatDate(app.approved_at)}</p>
+                                  ) : null}
+                                  {app.deleted_at ? (
+                                    <p>🗑 Видалено: {formatDate(app.deleted_at)}</p>
+                                  ) : null}
+                                </div>
+                              </CardContent>
+                            </Card>
+                          ))
+                        )
+                      )}
+                    </div>
+                  </ScrollArea>
+                </motion.div>
+              </AnimatePresence>
+            </div>
           </TabsContent>
 
           {/* === ПІДТРИМКА === */}

@@ -6,7 +6,7 @@ from typing import List, Optional
 import logging
 
 from database.db import get_db, AsyncSessionLocal
-from database.models import Product, ProductVariant, ProductOption
+from database.models import Product, ProductStatus, ProductVariant, ProductOption
 from api_models import (
     ProductAPI,
     ProductVariantAPI,
@@ -68,6 +68,9 @@ def _apply_pim_filters(
     ai_only: bool = False,
 ):
     """Накладає PIM-фільтри (OR всередині списку, AND між різними полями)."""
+    stmt = stmt.where(
+        Product.status.notin_((ProductStatus.deleted, ProductStatus.archived))
+    )
     if ai_only:
         stmt = stmt.where(Product.is_ai_processed.is_(True))
     if main_categories:
@@ -147,6 +150,7 @@ async def get_ai_categories(db: AsyncSession = Depends(get_db)):
             )
             .where(
                 Product.is_ai_processed.is_(True),
+                Product.status.notin_((ProductStatus.deleted, ProductStatus.archived)),
                 Product.category.isnot(None),
                 Product.category != "",
             )
@@ -247,6 +251,7 @@ async def get_product_filters(
                 select(column)
                 .where(
                     Product.is_ai_processed.is_(True),
+                    Product.status.notin_((ProductStatus.deleted, ProductStatus.archived)),
                     column.isnot(None),
                     column != "",
                 )
@@ -293,6 +298,7 @@ async def get_product_filters(
 
         attrs_stmt = select(Product.attributes).where(
             Product.is_ai_processed.is_(True),
+            Product.status.notin_((ProductStatus.deleted, ProductStatus.archived)),
             Product.attributes.isnot(None),
         )
         attr_rows = (await db.execute(attrs_stmt)).scalars().all()
@@ -395,6 +401,9 @@ async def get_product_by_id(product_id: int, db: AsyncSession = Depends(get_db))
         product = result.scalars().unique().one_or_none()
 
         if product is None:
+            raise HTTPException(status_code=404, detail="Товар не знайдено")
+        status_value = product.status.value if hasattr(product.status, "value") else str(product.status)
+        if status_value in (ProductStatus.deleted.value, ProductStatus.archived.value):
             raise HTTPException(status_code=404, detail="Товар не знайдено")
 
         return _build_product_with_share(product)

@@ -35,10 +35,8 @@ import Login from "./pages/Login";
 import { AppBackProvider } from "@/hooks/useAppBack";
 import Ratings from "./pages/Ratings";
 import { FloatingDevRoleSwitcher } from "@/components/dev/FloatingDevRoleSwitcher";
-import { FloatingBonusWidget } from "@/components/promos/FloatingBonusWidget";
 import { FloatingToolsProvider } from "@/components/floating/FloatingToolsContext";
-import { AIChatAssistant } from "@/components/AIChatAssistant";
-import { FloatingSupportWidget } from "@/components/floating/FloatingSupportWidget";
+import { FloatingToolsContainer } from "@/components/floating/FloatingToolsContainer";
 import { SupplierImportProgress } from "@/components/supplier/SupplierImportProgress";
 
 const queryClient = new QueryClient();
@@ -153,9 +151,7 @@ const App = () => (
             <BrowserRouter>
               <FloatingToolsProvider>
                 <AnimatedRoutes />
-                <AIChatAssistant />
-                <FloatingSupportWidget />
-                <FloatingBonusWidget />
+                <FloatingToolsContainer />
                 <FloatingDevRoleSwitcher />
                 <SupplierImportProgress />
               </FloatingToolsProvider>

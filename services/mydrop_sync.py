@@ -29,7 +29,7 @@ from sqlalchemy.sql import func
 from database.db import AsyncSessionLocal, ensure_product_ai_status_column
 from database.models import (
     Product, ProductVariant, ProductOption, ProductOptionValue,
-    product_variant_option_values, ProductStatus, ProductAIStatus, Supplier, SupplierType,
+    product_variant_option_values, ProductStatus, ProductAIStatus, Supplier, SupplierStatus, SupplierType,
 )
 from services.mydrop_api import MyDropAPIClient, MyDropAPIError, extract_public_api_key
 # Перевикористовуємо вже наявну (production) логіку націнки з PriceRule,
@@ -249,7 +249,11 @@ async def sync_supplier_products(
                         "ai_status": case(
                             (
                                 Product.ai_status.in_(
-                                    (ProductAIStatus.completed, ProductAIStatus.processing)
+                                    (
+                                        ProductAIStatus.completed,
+                                        ProductAIStatus.processing,
+                                        ProductAIStatus.cancelled,
+                                    )
                                 ),
                                 Product.ai_status,
                             ),
@@ -443,6 +447,19 @@ async def import_supplier_catalog_and_process_ai(supplier_id: int) -> Dict[str, 
         supplier = await db.get(Supplier, supplier_id)
         if not supplier:
             logger.error("import_supplier_catalog: постачальника #%s не знайдено.", supplier_id)
+            return result
+
+        status_value = supplier.status.value if hasattr(supplier.status, "value") else str(supplier.status)
+        if status_value in (
+            SupplierStatus.deletion_requested.value,
+            SupplierStatus.deleted.value,
+            SupplierStatus.banned.value,
+        ):
+            logger.warning(
+                "import_supplier_catalog: пропущено #%s (статус=%s, Kill Switch).",
+                supplier_id,
+                status_value,
+            )
             return result
 
         api_key, yml_url = _resolve_catalog_source(supplier)

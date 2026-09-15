@@ -1,17 +1,20 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  ArrowLeft, Store, Plus, Package, Settings, 
-  Loader2, Star, ShoppingCart, MessageSquare, Megaphone, Send, Wallet,
+  ArrowLeft, Store, Plus, Package, Settings,
+  Loader2, Star, ShoppingCart, MessageSquare, Megaphone, Send, Wallet, Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
@@ -19,6 +22,11 @@ import { supabase } from "@/integrations/supabase/client";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { toast } from "sonner";
 import { hapticSelection } from "@/lib/haptics";
+import {
+  BackendApiError,
+  fetchMySupplier,
+  requestSupplierDeletion,
+} from "@/lib/backendApi";
 
 interface ShopInfo {
   id: string;
@@ -28,6 +36,40 @@ interface ShopInfo {
   product_count: number;
   review_count: number;
   role: "owner" | "manager";
+  supplier_type?: string | null;
+  status?: string;
+  completed_products?: number;
+  deletion_requested?: boolean;
+}
+
+function supplierStatusLabel(status?: string) {
+  switch (status) {
+    case "active":
+      return "Активний";
+    case "deletion_requested":
+      return "Заявка на видалення";
+    case "deleted":
+      return "Видалено";
+    case "banned":
+      return "Заблоковано";
+    case "pending_admin_approval":
+      return "На модерації";
+    case "pending_ai_analysis":
+    case "ai_in_progress":
+      return "AI-аналіз";
+    case "rejected":
+      return "Відхилено";
+    case "disabled":
+      return "Вимкнено";
+    default:
+      return status || "—";
+  }
+}
+
+function supplierTypeLabel(type?: string | null) {
+  if (type === "business") return "ТОВ / юр. особа";
+  if (type === "individual") return "ФОП";
+  return type || null;
 }
 
 const isLovableDevEnvironment = () => {
@@ -46,6 +88,9 @@ export default function MyShops() {
   const [shops, setShops] = useState<ShopInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [promoShopId, setPromoShopId] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteReason, setDeleteReason] = useState("");
+  const [isSubmittingDeletion, setIsSubmittingDeletion] = useState(false);
 
   const isSupplier = effectiveRole === "supplier";
   const isShopManager = effectiveRole === "shop_manager";
@@ -67,75 +112,27 @@ export default function MyShops() {
     try {
       const allShops: ShopInfo[] = [];
 
-      // 1. Shops owned by this supplier (by telegram_id)
       if (isSupplier || isAdmin) {
-        const telegramId = profile?.telegram_id;
-        if (telegramId) {
-          const { data: ownedShops } = await supabase
-            .from("suppliers")
-            .select("id, shop_name, logo_url, is_active")
-            .eq("telegram_id", telegramId);
-
-          if (ownedShops) {
-            for (const shop of ownedShops) {
-              const { count: productCount } = await supabase
-                .from("products")
-                .select("*", { count: "exact", head: true })
-                .eq("supplier_id", shop.id);
-
-              const { data: productIds } = await supabase
-                .from("products")
-                .select("id")
-                .eq("supplier_id", shop.id);
-
-              let reviewCount = 0;
-              if (productIds?.length) {
-                const { count } = await supabase
-                  .from("reviews")
-                  .select("*", { count: "exact", head: true })
-                  .in("product_id", productIds.map(p => p.id));
-                reviewCount = count || 0;
-              }
-
-              allShops.push({
-                ...shop,
-                product_count: productCount || 0,
-                review_count: reviewCount,
-                role: "owner",
-              });
-            }
-          }
-        }
-
-        // DEV FALLBACK: In Lovable dev environment, if no owned shops found for supplier role,
-        // fetch first 3 active suppliers as mock "owner" shops for UI testing
-        if (allShops.length === 0 && isLovableDevEnvironment() && isSupplier) {
-          const { data: devShops } = await supabase
-            .from("suppliers")
-            .select("id, shop_name, logo_url, is_active")
-            .eq("is_active", true)
-            .limit(3);
-
-          if (devShops) {
-            for (const shop of devShops) {
-              const { count: productCount } = await supabase
-                .from("products")
-                .select("*", { count: "exact", head: true })
-                .eq("supplier_id", shop.id);
-
-              allShops.push({
-                ...shop,
-                product_count: productCount || 0,
-                review_count: 0,
-                role: "owner",
-              });
-            }
-          }
+        const mine = await fetchMySupplier();
+        if (mine?.store_name) {
+          allShops.push({
+            id: String(mine.id),
+            shop_name: mine.store_name,
+            logo_url: null,
+            is_active: mine.status === "active",
+            product_count: mine.product_count || 0,
+            review_count: 0,
+            role: "owner",
+            supplier_type: mine.supplier_type,
+            status: mine.status,
+            completed_products: mine.completed_products,
+            deletion_requested: mine.deletion_requested,
+          });
         }
       }
 
-      // 2. Shops managed via shop_manager_links
-      if (profile?.id) {
+      // Магазини, де користувач — менеджер (поки ще з Supabase-зв'язок)
+      if (profile?.id && isShopManager) {
         const { data: links } = await supabase
           .from("shop_manager_links")
           .select("supplier_id")
@@ -212,6 +209,35 @@ export default function MyShops() {
     if (shop.role === "owner") return true;
     if (isLovableDevEnvironment() && isSupplier) return true;
     return false;
+  };
+
+  const openDeleteDialog = () => {
+    hapticSelection();
+    setDeleteReason("");
+    setDeleteOpen(true);
+  };
+
+  const submitDeletion = async () => {
+    const reason = deleteReason.trim();
+    if (reason.length < 3) {
+      toast.error("Вкажіть причину видалення (обов'язково)");
+      return;
+    }
+    setIsSubmittingDeletion(true);
+    try {
+      await requestSupplierDeletion(reason);
+      hapticSelection();
+      toast.success("Заявка на видалення надіслана адміністратору");
+      setDeleteOpen(false);
+      setDeleteReason("");
+      await fetchShops();
+    } catch (error) {
+      const message =
+        error instanceof BackendApiError ? error.message : "Не вдалося надіслати заявку";
+      toast.error(message);
+    } finally {
+      setIsSubmittingDeletion(false);
+    }
   };
 
   return (
@@ -304,21 +330,35 @@ export default function MyShops() {
                       </Badge>
                     </div>
 
-                    <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                      <span className="flex items-center gap-1">
-                        <Package className="h-3 w-3" />
-                        {shop.product_count} товарів
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Star className="h-3 w-3" />
-                        {shop.review_count} відгуків
-                      </span>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                      {supplierTypeLabel(shop.supplier_type) && (
+                        <span>{supplierTypeLabel(shop.supplier_type)}</span>
+                      )}
                       <Badge
-                        variant={shop.is_active ? "default" : "destructive"}
+                        variant={shop.is_active ? "default" : "secondary"}
                         className="text-[10px]"
                       >
-                        {shop.is_active ? "Активний" : "Неактивний"}
+                        {supplierStatusLabel(shop.status) || (shop.is_active ? "Активний" : "Неактивний")}
                       </Badge>
+                      {shop.deletion_requested && (
+                        <Badge variant="destructive" className="text-[10px]">
+                          Заявка на видалення
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
+                      <span className="flex items-center gap-1">
+                        <Package className="h-3 w-3" />
+                        {typeof shop.completed_products === "number"
+                          ? `${shop.completed_products} з ${shop.product_count} товарів оброблено`
+                          : `${shop.product_count} товарів`}
+                      </span>
+                      {shop.review_count > 0 && (
+                        <span className="flex items-center gap-1">
+                          <Star className="h-3 w-3" />
+                          {shop.review_count} відгуків
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -394,6 +434,19 @@ export default function MyShops() {
                     Відгуки
                   </Button>
                 </div>
+
+                {shop.role === "owner" && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-full h-9 mt-2 text-destructive border-destructive/40 hover:bg-destructive/10 hover:text-destructive"
+                    disabled={shop.deletion_requested}
+                    onClick={openDeleteDialog}
+                  >
+                    <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+                    {shop.deletion_requested ? "Заявку надіслано" : "Видалити магазин"}
+                  </Button>
+                )}
               </CardContent>
             </Card>
           ))
@@ -438,6 +491,54 @@ export default function MyShops() {
               </span>
             </button>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          if (!isSubmittingDeletion) {
+            setDeleteOpen(open);
+            if (!open) setDeleteReason("");
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-[400px] mx-4">
+          <DialogHeader>
+            <DialogTitle>Видалити магазин</DialogTitle>
+            <DialogDescription>
+              Магазин не зникне одразу. Адміністратор отримає заявку і перевірить її вручну.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="deletion-reason">Вкажіть причину видалення (обов'язково)</Label>
+            <Textarea
+              id="deletion-reason"
+              value={deleteReason}
+              onChange={(event) => setDeleteReason(event.target.value)}
+              placeholder="Наприклад: закриваю магазин / змінюю постачальника"
+              rows={4}
+            />
+          </div>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setDeleteOpen(false)}
+              disabled={isSubmittingDeletion}
+            >
+              Скасувати
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={submitDeletion}
+              disabled={isSubmittingDeletion || deleteReason.trim().length < 3}
+            >
+              {isSubmittingDeletion ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : null}
+              Надіслати запит на видалення
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

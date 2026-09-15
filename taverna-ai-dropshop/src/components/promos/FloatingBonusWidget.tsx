@@ -17,7 +17,7 @@ interface BonusFabProps {
   menuAlign?: "start" | "end" | "center";
 }
 
-/** Кнопка бонусів — можна поставити в глобальний стовпчик або в стрічку. */
+/** Кнопка бонусів у глобальному стовпчику FAB. */
 export const BonusFab = ({ className, menuAlign = "end" }: BonusFabProps) => {
   const { openBonusInventory, openPersonalBonus } = useFloatingTools();
 
@@ -33,7 +33,7 @@ export const BonusFab = ({ className, menuAlign = "end" }: BonusFabProps) => {
           whileTap={{ scale: 0.92 }}
           aria-label="Бонуси"
           className={cn(
-            "relative w-12 h-12 rounded-full",
+            "relative w-10 h-10 rounded-full",
             "bg-gradient-to-br from-warning via-rating to-primary",
             "text-primary-foreground shadow-lg shadow-primary/25",
             "flex items-center justify-center shrink-0",
@@ -41,7 +41,7 @@ export const BonusFab = ({ className, menuAlign = "end" }: BonusFabProps) => {
           )}
         >
           <span className="pointer-events-none absolute inset-0 rounded-full bg-primary/30 blur-md animate-pulse" />
-          <Gift className="relative z-10 h-5 w-5" />
+          <Gift className="relative z-10 h-4 w-4" />
         </motion.button>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="left" align={menuAlign} sideOffset={10} className="w-64 z-[80]">
@@ -70,10 +70,9 @@ export const BonusFab = ({ className, menuAlign = "end" }: BonusFabProps) => {
   );
 };
 
-/** Глобальна кнопка бонусів під Taverna AI. У стрічці ховається — там своя копія під кошиком. */
+/** Глобальна кнопка бонусів у спільному стовпчику FAB. */
 export const FloatingBonusWidget = () => {
   const {
-    feedOpen,
     chatOpen,
     bonusInventoryOpen,
     setBonusInventoryOpen,
@@ -83,11 +82,7 @@ export const FloatingBonusWidget = () => {
 
   return (
     <>
-      {!feedOpen && !chatOpen && (
-        <div className="pointer-events-auto fixed right-4 z-[55] bottom-[calc(7.5rem+env(safe-area-inset-bottom,0px))]">
-          <BonusFab />
-        </div>
-      )}
+      {!chatOpen && <BonusFab />}
 
       <PersonalBonusDialog open={personalBonusOpen} onOpenChange={setPersonalBonusOpen} />
       <MyBonusesInventorySheet open={bonusInventoryOpen} onOpenChange={setBonusInventoryOpen} />

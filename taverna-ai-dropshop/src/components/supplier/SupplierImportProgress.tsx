@@ -31,7 +31,7 @@ export function SupplierImportProgress() {
         setProgress(data);
         // Поки йде імпорт — оновлюємо кожні 10 с. Якщо товарів ще немає,
         // теж питаємо далі, щоб плашка з'явилась, щойно sync почнеться.
-        if (data.is_importing || data.total === 0) {
+        if (data.is_importing || data.total === 0 || (data.queue_ahead ?? 0) > 0) {
           timer = window.setTimeout(load, POLL_MS);
         }
       } catch (error) {
@@ -57,8 +57,11 @@ export function SupplierImportProgress() {
     return null;
   }
 
-  const { total, completed, estimated_minutes } = progress;
+  const { total, completed, estimated_minutes, queue_ahead = 0 } = progress;
   const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+  const remainingOwn = Math.max(0, total - completed);
+  const displayMinutes =
+    Math.ceil((remainingOwn + queue_ahead) * 15 / 60) || estimated_minutes || 0;
 
   return (
     <div
@@ -77,10 +80,15 @@ export function SupplierImportProgress() {
             AI-обробка товарів... Завантажено {completed} з {total}
           </p>
           <p className="mt-0.5 text-[10px] text-white/60">
-            Орієнтовний час: ~{estimated_minutes} хв
+            Орієнтовний час: ~{displayMinutes} хв
           </p>
         </div>
       </div>
+      {queue_ahead > 0 && (
+        <p className="mt-2 text-[11px] font-medium leading-snug text-amber-300">
+          ⏳ Ви в живій черзі. Перед вами обробляється товарів: {queue_ahead}
+        </p>
+      )}
       <Progress
         value={percent}
         className="mt-2 h-1.5 bg-white/15"

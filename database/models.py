@@ -27,6 +27,9 @@ class SupplierStatus(str, enum.Enum):
     active = "active"
     rejected = "rejected"
     disabled = "disabled"
+    deletion_requested = "deletion_requested"
+    deleted = "deleted"
+    banned = "banned"
 
 class OrderStatus(str, enum.Enum):
     new = "new"
@@ -60,12 +63,14 @@ class ProductStatus(str, enum.Enum):
     active = 'active'
     inactive = 'inactive'
     archived = 'archived'
+    deleted = 'deleted'
 
 class ProductAIStatus(str, enum.Enum):
     pending = "pending"
     processing = "processing"
     completed = "completed"
     failed = "failed"
+    cancelled = "cancelled"
 
 class OrderItemStatus(str, enum.Enum):
     pending = "pending"
@@ -180,7 +185,9 @@ class Supplier(Base):
 
     last_posted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     user = relationship("User", back_populates="suppliers")
     
@@ -215,7 +222,10 @@ class Product(Base):
         default=ProductAIStatus.pending,
         index=True,
     )
-    status = Column(Enum(ProductStatus), default=ProductStatus.active) # 'active', 'inactive'
+    status = Column(
+        Enum(ProductStatus, native_enum=False, length=32),
+        default=ProductStatus.active,
+    ) # 'active', 'inactive', 'archived', 'deleted'
     pictures = Column(JSON, nullable=True) # Зберігаємо як JSON список URL
     
     last_posted_at = Column(DateTime(timezone=True), nullable=True)

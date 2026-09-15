@@ -126,6 +126,33 @@ async def ensure_product_ai_status_column() -> None:
                 "UPDATE products SET ai_status = 'pending' "
                 "WHERE is_ai_processed IS FALSE AND (ai_status IS NULL OR ai_status = '')"
             ))
+            try:
+                sync_conn.execute(text(
+                    "ALTER TYPE productstatus ADD VALUE IF NOT EXISTS 'deleted'"
+                ))
+            except Exception:
+                pass
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
+async def ensure_supplier_status_timestamps() -> None:
+    """Live-режим: approved_at / deleted_at на suppliers, якщо колонок ще немає."""
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        insp = inspect(sync_conn)
+        if "suppliers" not in set(insp.get_table_names()):
+            return
+        cols = {col["name"] for col in insp.get_columns("suppliers")}
+        if "approved_at" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN approved_at DATETIME"))
+            logger.info("Додано колонку suppliers.approved_at.")
+        if "deleted_at" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN deleted_at DATETIME"))
+            logger.info("Додано колонку suppliers.deleted_at.")
 
     async with engine.begin() as conn:
         await conn.run_sync(_ensure)
@@ -160,3 +187,4 @@ async def init_db() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await ensure_supplier_status_timestamps()

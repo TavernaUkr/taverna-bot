@@ -12,7 +12,6 @@ import {
 import { cn } from "@/lib/utils";
 import { hapticImpact } from "@/lib/haptics";
 import { VariantSelectionModal } from "@/components/product/VariantSelectionModal";
-import { BonusFab } from "@/components/promos/FloatingBonusWidget";
 import { useFloatingToolsOptional } from "@/components/floating/FloatingToolsContext";
 import type { BackendProductOption, BackendProductVariant } from "@/lib/backendApi";
 
@@ -310,7 +309,6 @@ function ProductFeedSlide({
         >
           <ShoppingCart className="h-6 w-6" />
         </motion.button>
-        <BonusFab className="shadow-lg" />
       </div>
 
       <motion.div

@@ -227,6 +227,31 @@ class SupplierImportProgressResponse(BaseModel):
     completed: int = 0
     estimated_minutes: int = 0
     is_importing: bool = False
+    queue_ahead: int = 0
+
+
+class SupplierMeResponse(BaseModel):
+    """Картка магазину поточного постачальника (GET /suppliers/me)."""
+    id: int
+    store_name: str
+    supplier_type: Optional[str] = None
+    status: str
+    is_verified: bool = False
+    product_count: int = 0
+    completed_products: int = 0
+    deletion_requested: bool = False
+    created_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+
+
+class SupplierDeletionRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=2000)
+
+
+class SupplierDeletionResponse(BaseModel):
+    ok: bool = True
+    detail: str = "Заявка на видалення надіслана адміністратору"
 
 
 class PendingSupplierApplicationResponse(BaseModel):
@@ -254,7 +279,10 @@ class PendingSupplierApplicationResponse(BaseModel):
     ai_score_report: Optional[str] = None
     trial_ends_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
     import_started: bool = False
+    deletion_reason: Optional[str] = None
 
 
 class AdminSupplierDeleteResponse(BaseModel):
@@ -262,6 +290,16 @@ class AdminSupplierDeleteResponse(BaseModel):
     supplier_id: int
     user_reverted: bool = False
     detail: str = "Постачальника та його товари видалено."
+
+
+class AdminApproveDeletionResponse(BaseModel):
+    ok: bool = True
+    supplier_id: int
+    status: str = "deleted"
+    user_reverted: bool = False
+    products_archived: int = 0
+    ai_cancelled: int = 0
+    detail: str = "Магазин видалено. Товари архівовано, користувач знову клієнт."
 
 
 class AdminDirectCreateSupplierRequest(BaseModel):
@@ -333,6 +371,9 @@ class SupplierAdminResponse(BaseModel):
     xml_url: Optional[HttpUrl] = None
     shop_url: Optional[HttpUrl] = None
     admin_notes: Optional[str] = None
+    created_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
 
 class AdminManualAddRequest(BaseModel):
     name: str
@@ -542,3 +583,6 @@ class SupplierResponse(BaseModel):
     payout_method: Optional[PayoutMethod] = None
     payout_iban: Optional[str] = None
     payout_card_token: Optional[str] = None
+    created_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None

@@ -7,7 +7,7 @@ import { hapticImpact } from "@/lib/haptics";
 
 const SUPPORT_ROLES = new Set(["customer", "supplier"]);
 
-/** Плаваюча кнопка «Підтримка» — симетрична AI-боту, зліва. */
+/** Плаваюча кнопка «Підтримка» — супутник у спільному стовпчику FAB. */
 export function FloatingSupportWidget() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -18,7 +18,6 @@ export function FloatingSupportWidget() {
   const canShow =
     isAuthenticated &&
     SUPPORT_ROLES.has(effectiveRole) &&
-    !floating?.feedOpen &&
     !floating?.chatOpen &&
     !onSupportPage;
 
@@ -33,17 +32,16 @@ export function FloatingSupportWidget() {
         navigate("/support?contact=1");
       }}
       className={cn(
-        "fixed left-4 z-[55]",
-        "w-14 h-14 rounded-full",
+        "relative shrink-0",
+        "w-10 h-10 rounded-full",
         "bg-gradient-to-br from-indigo-500 to-violet-600",
         "text-white shadow-lg shadow-indigo-500/35",
         "flex items-center justify-center",
         "hover:scale-110 active:scale-95",
-        "transition-all duration-200",
-        "bottom-[calc(11.25rem+env(safe-area-inset-bottom,0px))]"
+        "transition-all duration-200"
       )}
     >
-      <Headphones className="h-6 w-6" />
+      <Headphones className="h-4 w-4" />
     </button>
   );
 }

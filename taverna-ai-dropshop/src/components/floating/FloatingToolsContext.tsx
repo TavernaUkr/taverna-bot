@@ -2,6 +2,8 @@ import { createContext, useContext, useMemo, useState, type ReactNode } from "re
 
 interface FloatingToolsContextValue {
   feedOpen: boolean;
+  /** true, коли відкрита стрічка товарів (TikTok view). */
+  isFeedActive: boolean;
   setFeedOpen: (open: boolean) => void;
   chatOpen: boolean;
   setChatOpen: (open: boolean) => void;
@@ -24,6 +26,7 @@ export function FloatingToolsProvider({ children }: { children: ReactNode }) {
   const value = useMemo(
     () => ({
       feedOpen,
+      isFeedActive: feedOpen,
       setFeedOpen,
       chatOpen,
       setChatOpen,

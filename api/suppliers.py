@@ -13,10 +13,17 @@ from typing import Any, Dict, Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from fastapi import APIRouter, Depends, HTTPException, Header
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from api_models import PartnerRegisterRequest, PartnerRegisterResponse, SupplierImportProgressResponse
+from api_models import (
+    PartnerRegisterRequest,
+    PartnerRegisterResponse,
+    SupplierDeletionRequest,
+    SupplierDeletionResponse,
+    SupplierImportProgressResponse,
+    SupplierMeResponse,
+)
 from bot_instance import get_bot_instance
 from config_reader import config
 from database.db import AsyncSessionLocal, get_db, AsyncSession
@@ -77,6 +84,52 @@ def _application_keyboard(supplier_id: int) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def _deletion_keyboard(supplier: Supplier) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    base = config.MINI_APP_URL
+    startapp = f"admin_supplier_{supplier.id}"
+    if base:
+        web_url = f"{base}/admin-dashboard?startapp={startapp}"
+        rows.append([
+            InlineKeyboardButton(
+                text="🔍 Переглянути заявку",
+                web_app=WebAppInfo(url=web_url),
+            )
+        ])
+    else:
+        rows.append([
+            InlineKeyboardButton(
+                text="🔍 Переглянути заявку",
+                callback_data=f"partner:view:{supplier.id}",
+            )
+        ])
+    username = _telegram_username(supplier.manager_telegram)
+    if username:
+        rows.append([
+            InlineKeyboardButton(
+                text="💬 Зв'язатися з менеджером",
+                url=f"https://t.me/{username}",
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _telegram_username(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    value = raw.strip().replace("https://", "").replace("http://", "")
+    value = value.lstrip("@")
+    if value.lower().startswith("t.me/"):
+        value = value[5:]
+    value = value.split("?")[0].strip("/")
+    if "/" in value:
+        value = value.split("/")[-1]
+    cleaned = value.replace("_", "")
+    if len(value) < 3 or not cleaned.isalnum():
+        return None
+    return value
 
 
 def _payload_for_ai(request_data: PartnerRegisterRequest, store_name: str) -> Dict[str, Any]:
@@ -206,6 +259,29 @@ def _schedule_background(coro) -> None:
 
 
 SECONDS_PER_PRODUCT_AI = 15
+DELETION_NOTE_PREFIX = "[ЗАЯВКА НА ВИДАЛЕННЯ]"
+
+
+async def _get_supplier_for_telegram(
+    db: AsyncSession,
+    telegram_id: int,
+) -> Optional[Supplier]:
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    filters = [Supplier.contact_telegram_id == telegram_id]
+    if user:
+        filters.append(Supplier.user_id == user.id)
+    stmt = (
+        select(Supplier)
+        .where(
+            or_(*filters),
+            Supplier.status != SupplierStatus.deleted,
+        )
+        .order_by(
+            (Supplier.status == SupplierStatus.active).desc(),
+            Supplier.id.desc(),
+        )
+    )
+    return (await db.execute(stmt)).scalars().first()
 
 
 async def _supplier_ids_for_telegram(
@@ -218,6 +294,162 @@ async def _supplier_ids_for_telegram(
         filters.append(Supplier.user_id == user.id)
     stmt = select(Supplier.id).where(or_(*filters))
     return list((await db.execute(stmt)).scalars().all())
+
+
+def _enum_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    return value.value if hasattr(value, "value") else str(value)
+
+
+def _deletion_requested(supplier: Supplier) -> bool:
+    status = _enum_value(supplier.status)
+    if status == SupplierStatus.deletion_requested.value:
+        return True
+    notes = supplier.admin_notes or ""
+    return DELETION_NOTE_PREFIX in notes
+
+
+def _deletion_reason(supplier: Supplier) -> Optional[str]:
+    notes = supplier.admin_notes or ""
+    if DELETION_NOTE_PREFIX not in notes:
+        return None
+    after = notes.split(DELETION_NOTE_PREFIX, 1)[1].strip()
+    return after.split("\n\n", 1)[0].strip() or None
+
+
+async def _product_stats(db: AsyncSession, supplier_id: int) -> tuple[int, int]:
+    total = (
+        await db.execute(select(func.count(Product.id)).where(Product.supplier_id == supplier_id))
+    ).scalar() or 0
+    completed = (
+        await db.execute(
+            select(func.count(Product.id)).where(
+                Product.supplier_id == supplier_id,
+                Product.ai_status == ProductAIStatus.completed,
+            )
+        )
+    ).scalar() or 0
+    return int(total), int(completed)
+
+
+async def _notify_admins_deletion_request(supplier: Supplier, reason: str) -> None:
+    store = html.escape(supplier.store_name or supplier.name or "-")
+    reason_safe = html.escape(reason.strip())
+    text = (
+        "🗑 <b>Заявка на видалення магазину</b>\n"
+        f"🏢 Магазин: {store}\n"
+        f"🆔 ID: {supplier.id}\n\n"
+        f"📝 Причина:\n{reason_safe}"
+    )
+    admin_ids = config.ADMIN_IDS
+    if not admin_ids:
+        logger.error("ADMIN_IDS порожній — заявку на видалення #%s не надіслано адмінам.", supplier.id)
+        return
+    bot = await get_bot_instance()
+    keyboard = _deletion_keyboard(supplier)
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=text,
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            logger.error("Не вдалося надіслати заявку на видалення адміну %s: %s", admin_id, e)
+
+
+@router.get("/me", response_model=SupplierMeResponse)
+async def get_my_supplier(
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Картка магазину поточного постачальника для «Керування магазинами»."""
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    supplier = await _get_supplier_for_telegram(db, telegram_id)
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+
+    store_name = (supplier.store_name or supplier.name or "").strip()
+    if not store_name:
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+
+    product_count, completed_products = await _product_stats(db, supplier.id)
+    return SupplierMeResponse(
+        id=supplier.id,
+        store_name=store_name,
+        supplier_type=_enum_value(supplier.supplier_type),
+        status=_enum_value(supplier.status) or "pending_ai_analysis",
+        is_verified=bool(supplier.is_verified),
+        product_count=product_count,
+        completed_products=completed_products,
+        deletion_requested=_deletion_requested(supplier),
+        created_at=getattr(supplier, "created_at", None),
+        approved_at=getattr(supplier, "approved_at", None),
+        deleted_at=getattr(supplier, "deleted_at", None),
+    )
+
+
+@router.post("/me/request-deletion", response_model=SupplierDeletionResponse)
+async def request_my_shop_deletion(
+    payload: SupplierDeletionRequest,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Постачальник просить адміна видалити магазин. Сам запис не стираємо."""
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    reason = (payload.reason or "").strip()
+    if len(reason) < 3:
+        raise HTTPException(status_code=400, detail="Вкажіть причину видалення.")
+
+    supplier = await _get_supplier_for_telegram(db, telegram_id)
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+    if _deletion_requested(supplier) or _enum_value(supplier.status) in (
+        SupplierStatus.deletion_requested.value,
+        SupplierStatus.deleted.value,
+    ):
+        raise HTTPException(status_code=409, detail="Заявку на видалення вже надіслано.")
+
+    block = f"{DELETION_NOTE_PREFIX}\n{reason}"
+    existing = (supplier.admin_notes or "").strip()
+    supplier.admin_notes = f"{block}\n\n{existing}" if existing else block
+    supplier.status = SupplierStatus.deletion_requested
+
+    cancel_result = await db.execute(
+        update(Product)
+        .where(
+            Product.supplier_id == supplier.id,
+            Product.ai_status == ProductAIStatus.pending,
+        )
+        .values(ai_status=ProductAIStatus.cancelled)
+    )
+    cancelled_count = int(cancel_result.rowcount or 0)
+    await db.commit()
+    logger.info(
+        "Kill Switch: заявка на видалення #%s, pending→cancelled: %s",
+        supplier.id,
+        cancelled_count,
+    )
+
+    try:
+        await _notify_admins_deletion_request(supplier, reason)
+    except Exception as e:
+        logger.error("Заявку на видалення #%s збережено, сповіщення адмінам не пішло: %s", supplier.id, e)
+
+    return SupplierDeletionResponse()
 
 
 @router.get("/me/import-progress", response_model=SupplierImportProgressResponse)
@@ -247,7 +479,10 @@ async def get_my_import_progress(
 
     total = (
         await db.execute(
-            select(func.count(Product.id)).where(Product.supplier_id.in_(supplier_ids))
+            select(func.count(Product.id)).where(
+                Product.supplier_id.in_(supplier_ids),
+                Product.ai_status != ProductAIStatus.cancelled,
+            )
         )
     ).scalar() or 0
     completed = (
@@ -258,18 +493,40 @@ async def get_my_import_progress(
             )
         )
     ).scalar() or 0
+    in_queue = (
+        await db.execute(
+            select(func.count(Product.id)).where(
+                Product.supplier_id.in_(supplier_ids),
+                Product.ai_status.in_((ProductAIStatus.pending, ProductAIStatus.processing)),
+            )
+        )
+    ).scalar() or 0
 
     total = int(total)
     completed = int(completed)
-    remaining = max(total - completed, 0)
+    in_queue = int(in_queue)
+
+    queue_ahead = int(
+        (
+            await db.execute(
+                select(func.count(Product.id)).where(
+                    Product.ai_status == ProductAIStatus.pending,
+                    Product.supplier_id.notin_(supplier_ids),
+                )
+            )
+        ).scalar() or 0
+    )
+
+    remaining = in_queue + queue_ahead
     estimated_minutes = math.ceil(remaining * SECONDS_PER_PRODUCT_AI / 60) if remaining else 0
-    is_importing = completed < total
+    is_importing = in_queue > 0
 
     return SupplierImportProgressResponse(
         total=total,
         completed=completed,
         estimated_minutes=estimated_minutes,
         is_importing=is_importing,
+        queue_ahead=queue_ahead,
     )
 
 

@@ -2,14 +2,16 @@
 """Заявки постачальників для React-адмінки Mini App."""
 import logging
 import time
+from datetime import datetime
 from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from sqlalchemy import delete, inspect, select, text, update
+from sqlalchemy import delete, func, inspect, select, text, update
 
 from api.auth import validate_init_data
 from api_models import (
+    AdminApproveDeletionResponse,
     AdminDirectCreateSupplierRequest,
     AdminSupplierDeleteResponse,
     PendingSupplierApplicationResponse,
@@ -22,8 +24,10 @@ from database.models import (
     PaidService,
     PriceRule,
     Product,
+    ProductAIStatus,
     ProductOption,
     ProductOptionValue,
+    ProductStatus,
     ProductVariant,
     Supplier,
     SupplierLegalType,
@@ -34,6 +38,7 @@ from database.models import (
     product_variant_option_values,
     supplier_channels,
 )
+from api.suppliers import _deletion_reason, _deletion_requested
 from services.mydrop_api import extract_public_api_key
 from services.mydrop_sync import schedule_supplier_catalog_import
 
@@ -44,6 +49,14 @@ PENDING_STATUSES = (
     SupplierStatus.pending_ai_analysis,
     SupplierStatus.ai_in_progress,
     SupplierStatus.pending_admin_approval,
+)
+
+HISTORY_STATUSES = (
+    SupplierStatus.active,
+    SupplierStatus.rejected,
+    SupplierStatus.banned,
+    SupplierStatus.deleted,
+    SupplierStatus.disabled,
 )
 
 
@@ -63,6 +76,8 @@ def _to_application(
         ui_status = "pending"
     elif status_value == SupplierStatus.active.value:
         ui_status = "approved"
+    elif status_value == SupplierStatus.disabled.value:
+        ui_status = "banned"
     else:
         ui_status = status_value
     return PendingSupplierApplicationResponse(
@@ -87,7 +102,10 @@ def _to_application(
         ai_score_report=supplier.ai_score_report,
         trial_ends_at=supplier.trial_ends_at,
         created_at=supplier.created_at,
+        approved_at=getattr(supplier, "approved_at", None),
+        deleted_at=getattr(supplier, "deleted_at", None),
         import_started=import_started,
+        deletion_reason=_deletion_reason(supplier),
     )
 
 
@@ -185,11 +203,75 @@ async def _ensure_shop_record(db: AsyncSession, supplier: Supplier) -> None:
     await db.run_sync(_maybe_insert_legacy_shop)
 
 
+def _user_role_value(user: User) -> str:
+    return user.role.value if hasattr(user.role, "value") else str(user.role)
+
+
+async def _count_other_approved_shops(
+    db: AsyncSession,
+    user_id: int,
+    exclude_supplier_id: int,
+) -> int:
+    """Скільки ще магазинів зі статусом approved/active є в цього user_id."""
+    result = await db.execute(
+        select(func.count(Supplier.id)).where(
+            Supplier.user_id == user_id,
+            Supplier.id != exclude_supplier_id,
+            Supplier.status == SupplierStatus.active,
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+async def _maybe_revert_user_to_client(
+    db: AsyncSession,
+    user_id: Optional[int],
+    exclude_supplier_id: int,
+) -> bool:
+    """
+    client ставимо лише якщо це не admin і це був останній approved-магазин.
+    """
+    if not user_id:
+        return False
+    user = await db.get(User, user_id)
+    if not user:
+        return False
+    if _user_role_value(user) == UserRole.admin.value:
+        logger.info("Роль admin не змінюємо (user_id=%s, магазин #%s).", user_id, exclude_supplier_id)
+        return False
+    others = await _count_other_approved_shops(db, user_id, exclude_supplier_id)
+    if others > 0:
+        logger.info(
+            "User #%s має ще %s активних магазинів — роль supplier лишаємо.",
+            user_id,
+            others,
+        )
+        return False
+    user.role = UserRole.client
+    return True
+
+
+async def _mark_all_supplier_products_deleted(db: AsyncSession, supplier_id: int) -> int:
+    """
+    Усі товари магазину зникають з каталогу: status=deleted, AI cancelled,
+    is_ai_processed=False (готовий completed теж ховаємо).
+    """
+    result = await db.execute(
+        update(Product)
+        .where(Product.supplier_id == supplier_id)
+        .values(
+            status=ProductStatus.deleted,
+            is_ai_processed=False,
+            ai_status=ProductAIStatus.cancelled,
+        )
+    )
+    return int(result.rowcount or 0)
+
+
 async def _hard_delete_supplier(db: AsyncSession, supplier: Supplier) -> bool:
     """Жорстко видаляє товари, замовлення магазину і сам Supplier. User лишається."""
     supplier_id = supplier.id
     user_id = supplier.user_id
-    user_reverted = False
 
     product_ids = list(
         (await db.execute(select(Product.id).where(Product.supplier_id == supplier_id))).scalars().all()
@@ -242,22 +324,9 @@ async def _hard_delete_supplier(db: AsyncSession, supplier: Supplier) -> bool:
     if product_ids:
         await db.execute(delete(Product).where(Product.id.in_(product_ids)))
 
-    if user_id:
-        user = await db.get(User, user_id)
-        if user and user.role != UserRole.admin:
-            other_active = (
-                await db.execute(
-                    select(Supplier.id).where(
-                        Supplier.user_id == user_id,
-                        Supplier.id != supplier_id,
-                        Supplier.status == SupplierStatus.active,
-                    ).limit(1)
-                )
-            ).scalar_one_or_none()
-            if other_active is None:
-                user.role = UserRole.client
-                user_reverted = True
+    user_reverted = await _maybe_revert_user_to_client(db, user_id, supplier_id)
 
+    supplier.deleted_at = datetime.utcnow()
     await db.delete(supplier)
     await db.commit()
     return user_reverted
@@ -279,6 +348,91 @@ async def list_pending_supplier_applications(
     )
     rows = (await db.execute(stmt)).scalars().all()
     return [_to_application(item) for item in rows]
+
+
+@router.get("/suppliers/deletion-requests", response_model=List[PendingSupplierApplicationResponse])
+async def list_deletion_requests(
+    db: AsyncSession = Depends(get_db),
+    telegram_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Постачальники, які подали заявку на видалення магазину."""
+    _assert_admin(telegram_id, authorization)
+
+    stmt = (
+        select(Supplier)
+        .where(Supplier.status == SupplierStatus.deletion_requested)
+        .order_by(Supplier.created_at.desc())
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return [_to_application(item) for item in rows]
+
+
+@router.get("/suppliers/history", response_model=List[PendingSupplierApplicationResponse])
+async def list_supplier_history(
+    db: AsyncSession = Depends(get_db),
+    telegram_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Історія: approved (активні), rejected, banned, deleted."""
+    _assert_admin(telegram_id, authorization)
+
+    stmt = (
+        select(Supplier)
+        .where(Supplier.status.in_(HISTORY_STATUSES))
+        .order_by(Supplier.created_at.desc())
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return [_to_application(item) for item in rows]
+
+
+@router.post("/suppliers/{supplier_id}/approve-deletion", response_model=AdminApproveDeletionResponse)
+async def approve_supplier_deletion(
+    supplier_id: int,
+    db: AsyncSession = Depends(get_db),
+    telegram_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Адмін підтверджує видалення: статус deleted, УСІ товари ховаємо з каталогу,
+    роль User → client лише якщо не admin і немає інших approved-магазинів.
+    """
+    _assert_admin(telegram_id, authorization)
+
+    supplier = await db.get(Supplier, supplier_id)
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Постачальника не знайдено")
+
+    status_value = supplier.status.value if hasattr(supplier.status, "value") else str(supplier.status)
+    if status_value == SupplierStatus.deleted.value:
+        raise HTTPException(status_code=409, detail="Магазин уже видалено.")
+    if not _deletion_requested(supplier):
+        raise HTTPException(status_code=409, detail="Немає заявки на видалення.")
+
+    products_removed = await _mark_all_supplier_products_deleted(db, supplier_id)
+
+    supplier.status = SupplierStatus.deleted
+    supplier.is_verified = False
+    supplier.deleted_at = datetime.utcnow()
+
+    user_reverted = await _maybe_revert_user_to_client(db, supplier.user_id, supplier_id)
+
+    await db.commit()
+    logger.info(
+        "Адмін підтвердив видалення #%s, products_deleted=%s, user_reverted=%s",
+        supplier_id,
+        products_removed,
+        user_reverted,
+    )
+    return AdminApproveDeletionResponse(
+        ok=True,
+        supplier_id=supplier_id,
+        status="deleted",
+        user_reverted=user_reverted,
+        products_archived=products_removed,
+        ai_cancelled=products_removed,
+        detail="Магазин видалено. Усі товари прибрано з каталогу.",
+    )
 
 
 @router.post("/suppliers/direct-create", response_model=PendingSupplierApplicationResponse, status_code=201)
@@ -340,6 +494,7 @@ async def direct_create_supplier(
         legal_name=legal_name,
         mydrop_api_key=extracted_key,
         ai_score_report="Створено адміном (direct-create). AI-скоринг заявки не потрібен.",
+        approved_at=datetime.utcnow(),
     )
     db.add(new_supplier)
     await db.flush()
@@ -373,6 +528,7 @@ async def approve_supplier_application(
 
     supplier.is_verified = True
     supplier.status = SupplierStatus.active
+    supplier.approved_at = datetime.utcnow()
     extracted_key = extract_public_api_key(supplier.yml_link or supplier.xml_url or "")
     if extracted_key and not supplier.mydrop_api_key:
         supplier.mydrop_api_key = extracted_key
