@@ -1,5 +1,6 @@
 import { Star, Percent, TrendingUp, Users, RotateCcw, Clock } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 const RULES = [
   {
@@ -53,6 +54,7 @@ interface BonusRulesSheetProps {
 
 /** Правила бонусної програми — окреме вікно, щоб не перевантажувати рахунок текстом. */
 export function BonusRulesSheet({ open, onOpenChange }: BonusRulesSheetProps) {
+  useModalHistory(open, () => onOpenChange(false));
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="bottom" className="rounded-t-2xl max-h-[88vh] overflow-y-auto">

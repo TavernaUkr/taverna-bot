@@ -7,7 +7,8 @@ from aiogram.types import CallbackQuery
 
 from config_reader import config
 from database.db import AsyncSessionLocal
-from database.models import Supplier, SupplierStatus, User, UserRole
+from database.models import Supplier, SupplierStatus, SupplierType, User, UserRole
+from services.mydrop_api import InvalidMyDropYmlLinkError, normalize_mydrop_yml_link
 from services.mydrop_sync import schedule_supplier_catalog_import
 from api.admin_suppliers import _ensure_shop_record
 
@@ -42,6 +43,24 @@ async def approve_partner(cb: CallbackQuery, bot: Bot):
 
         supplier.is_verified = True
         supplier.status = SupplierStatus.active
+        try:
+            canonical_yml, extracted_key = normalize_mydrop_yml_link(
+                supplier.yml_link or supplier.xml_url or supplier.mydrop_api_key or ""
+            )
+        except InvalidMyDropYmlLinkError:
+            await cb.answer(
+                "Недійсне посилання MyDrop. Не знайдено public_api_key.",
+                show_alert=True,
+            )
+            return
+        if extracted_key:
+            supplier.yml_link = canonical_yml
+            supplier.xml_url = canonical_yml
+            supplier.mydrop_api_key = extracted_key
+            supplier.type = SupplierType.mydrop
+        elif canonical_yml:
+            supplier.yml_link = canonical_yml
+            supplier.xml_url = canonical_yml
         if supplier.user_id:
             user = await db.get(User, supplier.user_id)
             if user and user.role != UserRole.admin:

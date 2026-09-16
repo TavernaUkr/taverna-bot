@@ -5,6 +5,7 @@ import {
   ShoppingCart, 
   Truck, 
   CreditCard, 
+  Headphones,
   HeartHandshake,
   Shield,
   Package,
@@ -21,6 +22,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useNavigate } from "react-router-dom";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 interface CustomerGuideModalProps {
   isOpen: boolean;
@@ -29,24 +31,30 @@ interface CustomerGuideModalProps {
 
 export const CustomerGuideModal = ({ isOpen, onClose }: CustomerGuideModalProps) => {
   const navigate = useNavigate();
+  useModalHistory(isOpen, onClose);
 
   const handleBecomePartner = () => {
     onClose();
     navigate('/partner');
   };
 
+  const handleOpenSupport = () => {
+    navigate("/support?contact=1");
+    onClose();
+  };
+
   return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-lg max-h-[90vh] p-0 gap-0">
-        <DialogHeader className="p-4 pb-0">
-          <DialogTitle className="flex items-center gap-2">
-            <ShoppingCart className="h-5 w-5 text-primary" />
-            Як користуватись Taverna
+    <Dialog open={isOpen} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="w-[95vw] max-w-lg max-h-[90vh] p-0 gap-0 overflow-hidden">
+        <DialogHeader className="p-4 pb-0 w-full max-w-full overflow-hidden">
+          <DialogTitle className="flex items-center gap-2 w-full max-w-full overflow-hidden text-gray-900 dark:text-white">
+            <ShoppingCart className="h-5 w-5 text-primary shrink-0" />
+            <span className="whitespace-normal break-words">Як користуватись Taverna</span>
           </DialogTitle>
         </DialogHeader>
 
-        <ScrollArea className="max-h-[75vh]">
-          <div className="p-4 pt-2">
+        <ScrollArea className="max-h-[75vh] w-full max-w-full overflow-hidden">
+          <div className="p-4 pt-2 w-full max-w-full overflow-hidden break-words whitespace-normal">
             <Tabs defaultValue="howto" className="w-full">
               <TabsList className="w-full grid grid-cols-4 mb-4">
                 <TabsTrigger value="howto" className="text-xs">
@@ -72,41 +80,41 @@ export const CustomerGuideModal = ({ isOpen, onClose }: CustomerGuideModalProps)
                   </h3>
 
                   <div className="space-y-3">
-                    <div className="flex items-start gap-3 p-3 bg-muted rounded-xl">
+                    <div className="flex items-start gap-3 p-3 bg-muted rounded-xl min-w-0">
                       <span className="w-6 h-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs shrink-0">1</span>
-                      <div>
-                        <h4 className="font-medium text-foreground text-sm">Оберіть товар</h4>
-                        <p className="text-xs text-muted-foreground">
+                      <div className="min-w-0 flex-1">
+                        <h4 className="font-medium text-foreground text-sm whitespace-normal break-words">Оберіть товар</h4>
+                        <p className="text-xs text-muted-foreground whitespace-normal break-words">
                           Перегляньте каталог або скористайтесь пошуком
                         </p>
                       </div>
                     </div>
 
-                    <div className="flex items-start gap-3 p-3 bg-muted rounded-xl">
+                    <div className="flex items-start gap-3 p-3 bg-muted rounded-xl min-w-0">
                       <span className="w-6 h-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs shrink-0">2</span>
-                      <div>
-                        <h4 className="font-medium text-foreground text-sm">Оберіть розмір/колір</h4>
-                        <p className="text-xs text-muted-foreground">
+                      <div className="min-w-0 flex-1">
+                        <h4 className="font-medium text-foreground text-sm whitespace-normal break-words">Оберіть розмір/колір</h4>
+                        <p className="text-xs text-muted-foreground whitespace-normal break-words">
                           Виберіть потрібний варіант товару
                         </p>
                       </div>
                     </div>
 
-                    <div className="flex items-start gap-3 p-3 bg-muted rounded-xl">
+                    <div className="flex items-start gap-3 p-3 bg-muted rounded-xl min-w-0">
                       <span className="w-6 h-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs shrink-0">3</span>
-                      <div>
-                        <h4 className="font-medium text-foreground text-sm">Додайте в кошик</h4>
-                        <p className="text-xs text-muted-foreground">
+                      <div className="min-w-0 flex-1">
+                        <h4 className="font-medium text-foreground text-sm whitespace-normal break-words">Додайте в кошик</h4>
+                        <p className="text-xs text-muted-foreground whitespace-normal break-words">
                           Можете додати кілька товарів
                         </p>
                       </div>
                     </div>
 
-                    <div className="flex items-start gap-3 p-3 bg-muted rounded-xl">
+                    <div className="flex items-start gap-3 p-3 bg-muted rounded-xl min-w-0">
                       <span className="w-6 h-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs shrink-0">4</span>
-                      <div>
-                        <h4 className="font-medium text-foreground text-sm">Оформіть замовлення</h4>
-                        <p className="text-xs text-muted-foreground">
+                      <div className="min-w-0 flex-1">
+                        <h4 className="font-medium text-foreground text-sm whitespace-normal break-words">Оформіть замовлення</h4>
+                        <p className="text-xs text-muted-foreground whitespace-normal break-words">
                           Вкажіть адресу доставки та спосіб оплати
                         </p>
                       </div>
@@ -358,6 +366,16 @@ export const CustomerGuideModal = ({ isOpen, onClose }: CustomerGuideModalProps)
                 </div>
               </TabsContent>
             </Tabs>
+
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full mt-2 gap-2"
+              onClick={handleOpenSupport}
+            >
+              <Headphones className="h-4 w-4" />
+              Залишилися питання? Написати в Підтримку
+            </Button>
           </div>
         </ScrollArea>
       </DialogContent>

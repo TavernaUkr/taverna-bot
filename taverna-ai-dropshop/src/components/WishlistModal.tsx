@@ -7,6 +7,7 @@ import { Button } from './ui/button';
 import { toast } from 'sonner';
 import { supabase } from '@/integrations/supabase/client';
 import { hapticImpact, hapticNotification } from '@/lib/haptics';
+import { useModalHistory } from '@/hooks/useModalHistory';
 import { EmptyState } from './ui/empty-state';
 import {
   DropdownMenu,
@@ -31,6 +32,8 @@ export function WishlistModal({ isOpen, onClose, onProductClick }: WishlistModal
   const { addItem } = useCartContext();
   const [selectedVariants, setSelectedVariants] = useState<Record<string, { size?: string; color?: string }>>({});
   const [productVariants, setProductVariants] = useState<Record<string, ProductVariants>>({});
+
+  useModalHistory(isOpen, onClose);
 
   // Fetch variants for all favorite products
   useEffect(() => {

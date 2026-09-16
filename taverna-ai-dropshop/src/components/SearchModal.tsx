@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Search, X, ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 interface SearchModalProps {
   isOpen: boolean;
@@ -10,6 +11,7 @@ interface SearchModalProps {
 
 export const SearchModal = ({ isOpen, onClose, onSearch }: SearchModalProps) => {
   const [query, setQuery] = useState("");
+  useModalHistory(isOpen, onClose);
   const [recentSearches] = useState([
     "Тактичні рукавички",
     "Берці Gore-Tex",

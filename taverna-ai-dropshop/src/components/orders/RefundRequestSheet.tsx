@@ -10,6 +10,7 @@ import { isPreviewDevEnvironment } from "@/lib/dev-preview";
 import { hapticNotification } from "@/lib/haptics";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 const REASONS = [
   "Не підійшов розмір",
@@ -50,6 +51,8 @@ export function RefundRequestSheet({ order, onClose, onSubmit, onOpenRefundSetti
   const [reason, setReason] = useState(REASONS[0]);
   const [comment, setComment] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+
+  useModalHistory(true, onClose);
 
   useEffect(() => {
     (async () => {

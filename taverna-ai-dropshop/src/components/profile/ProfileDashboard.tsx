@@ -6,22 +6,22 @@ import {
   Gift,
   Settings,
   User,
-  Bell,
+  Users,
   ChevronRight,
   LogOut,
   Store,
   HelpCircle,
   BookOpen,
-  Users,
   Shield,
   Flag,
   MessageSquare,
+  Headphones,
+  Scale,
+  ClipboardList,
   MapPin,
-  
   Archive,
   Star,
 } from "lucide-react";
-import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
@@ -30,8 +30,12 @@ import { toast } from "sonner";
 import { SupplierGuideModal } from "@/components/SupplierGuideModal";
 import { CustomerGuideModal } from "@/components/CustomerGuideModal";
 import { hapticSelection } from "@/lib/haptics";
+import { hideMainButton, showMainButton, vibrate } from "@/hooks/useTelegramUI";
 import { DevRoleSwitcher } from "@/components/profile/DevRoleSwitcher";
 import { AccountSettings } from "@/components/AccountSettings";
+import { ModeratorGuideModal } from "@/components/guides/ModeratorGuideModal";
+import { ManagerGuideModal } from "@/components/guides/ManagerGuideModal";
+import { AppSettingsSheet } from "@/components/profile/AppSettingsSheet";
 import { useBonuses } from "@/hooks/useBonuses";
 
 type TestRole = "guest" | "customer" | "supplier" | "shop_manager" | "moderator" | "admin";
@@ -51,15 +55,18 @@ export const ProfileDashboard = () => {
     addresses,
     logout,
     authenticate,
+    error: authError,
     updateProfile,
     addAddress,
     updateAddress,
     deleteAddress
   } = useTelegramAuthContext();
   const [activeTab, setActiveTab] = useState("orders");
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [showSupplierGuide, setShowSupplierGuide] = useState(false);
   const [showCustomerGuide, setShowCustomerGuide] = useState(false);
+  const [showModeratorGuide, setShowModeratorGuide] = useState(false);
+  const [showManagerGuide, setShowManagerGuide] = useState(false);
+  const [showAppSettings, setShowAppSettings] = useState(false);
   const [showAccountSettings, setShowAccountSettings] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
   const { reputationScore, balance } = useBonuses();
@@ -69,6 +76,9 @@ export const ProfileDashboard = () => {
   const isShopManager = roles.includes('shop_manager');
   const isAdmin = roles.includes('admin');
   const isModerator = roles.includes('moderator');
+  const canSeeSupplierGuide = roles.includes('supplier') || isAdmin;
+  const canSeeModeratorGuide = roles.includes('moderator') || isAdmin;
+  const canSeeManagerGuide = roles.includes('shop_manager') || isAdmin;
 
   useEffect(() => {
     // If we simulate Guest, ensure sensitive modals are closed.
@@ -77,6 +87,10 @@ export const ProfileDashboard = () => {
     }
   }, [isAuthenticated]);
 
+  const openAppSettings = () => {
+    hapticSelection();
+    setShowAppSettings(true);
+  };
 
   const handleLogout = async () => {
     await logout();
@@ -112,18 +126,54 @@ export const ProfileDashboard = () => {
 
   const handleAuthClick = async () => {
     if (authBusy) return;
+    vibrate("light");
     setAuthBusy(true);
     try {
       const result = await authenticate({ forceTelegram: true });
       if (result) {
+        vibrate("success");
         toast.success("Ви увійшли через Telegram");
       } else {
-        toast.error("Не вдалося підтвердити Telegram. Відкрийте Mini App з бота.");
+        vibrate("error");
+        toast.error(authError || "Не вдалося підтвердити Telegram. Відкрийте Mini App з бота.");
       }
+    } catch (err) {
+      vibrate("error");
+      toast.error(err instanceof Error ? err.message : "Не вдалося підтвердити Telegram. Відкрийте Mini App з бота.");
     } finally {
       setAuthBusy(false);
     }
   };
+
+  const appSettingsButton = (
+    <button
+      type="button"
+      onClick={openAppSettings}
+      className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors"
+    >
+      <div className="flex items-center">
+        <div className="w-10 h-10 rounded-full bg-gray-100 dark:bg-gray-800 flex items-center justify-center text-gray-500 mr-4">
+          <Settings className="w-5 h-5" />
+        </div>
+        <div className="text-left">
+          <p className="font-medium text-foreground">Налаштування додатку</p>
+          <p className="text-sm text-muted-foreground">Тема, вібрація та сповіщення</p>
+        </div>
+      </div>
+      <ChevronRight className="h-5 w-5 text-muted-foreground" />
+    </button>
+  );
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      hideMainButton();
+      return;
+    }
+    showMainButton(authBusy ? "Перевіряємо..." : "Авторизувати мене", () => {
+      void handleAuthClick();
+    });
+    return () => hideMainButton();
+  }, [authBusy, isAuthenticated]);
 
   return (
     <div className="space-y-4 pb-28 animate-fade-in">
@@ -204,6 +254,84 @@ export const ProfileDashboard = () => {
           </div>
         )}
       </div>
+
+      {isAuthenticated && isAdmin && (
+        <div className="bg-orange-500/5 rounded-xl border border-orange-500/20 p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <Shield className="h-5 w-5 text-orange-500" />
+            <h4 className="font-semibold text-foreground">Швидкі дії</h4>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Link
+              to="/admin-dashboard?tab=applications"
+              className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors min-w-0"
+            >
+              <ClipboardList className="h-4 w-4 text-orange-500 shrink-0" />
+              <span className="text-sm font-medium text-foreground break-words">Заявки</span>
+            </Link>
+            <Link
+              to="/moderator?tab=disputes"
+              className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors min-w-0"
+            >
+              <Scale className="h-4 w-4 text-orange-500 shrink-0" />
+              <span className="text-sm font-medium text-foreground break-words">Спори</span>
+            </Link>
+            <Link
+              to="/moderator"
+              className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors min-w-0"
+            >
+              <Flag className="h-4 w-4 text-orange-500 shrink-0" />
+              <span className="text-sm font-medium text-foreground break-words">Скарги</span>
+            </Link>
+            <Link
+              to="/admin-dashboard?tab=roles"
+              className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors min-w-0"
+            >
+              <Users className="h-4 w-4 text-orange-500 shrink-0" />
+              <span className="text-sm font-medium text-foreground break-words">Користувачі</span>
+            </Link>
+          </div>
+        </div>
+      )}
+
+      {isAuthenticated && isModerator && !isAdmin && (
+        <div className="bg-orange-500/5 rounded-xl border border-orange-500/20 p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <Shield className="h-5 w-5 text-orange-500" />
+            <h4 className="font-semibold text-foreground">Швидкі дії</h4>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <Link
+              to="/moderator"
+              className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors min-w-0"
+            >
+              <Flag className="h-4 w-4 text-orange-500 shrink-0" />
+              <span className="text-sm font-medium text-foreground break-words">Скарги</span>
+            </Link>
+            <Link
+              to="/moderator?tab=disputes"
+              className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors min-w-0"
+            >
+              <Scale className="h-4 w-4 text-orange-500 shrink-0" />
+              <span className="text-sm font-medium text-foreground break-words">Спори</span>
+            </Link>
+            <Link
+              to="/manager-chats"
+              className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors min-w-0"
+            >
+              <MessageSquare className="h-4 w-4 text-orange-500 shrink-0" />
+              <span className="text-sm font-medium text-foreground break-words">Чати</span>
+            </Link>
+            <Link
+              to="/support?contact=1"
+              className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors min-w-0"
+            >
+              <Headphones className="h-4 w-4 text-orange-500 shrink-0" />
+              <span className="text-sm font-medium text-foreground break-words">Підтримка</span>
+            </Link>
+          </div>
+        </div>
+      )}
 
       {/* Authorization Button for Guests */}
       {!isAuthenticated && (
@@ -356,25 +484,10 @@ export const ProfileDashboard = () => {
           {/* Settings Tab */}
           <TabsContent value="settings" className="mt-4 space-y-4">
             <div className="bg-card rounded-xl border border-border overflow-hidden">
-              {/* Notifications */}
-              <div className="flex items-center justify-between p-4 border-b border-border">
-                <div className="flex items-center gap-3">
-                  <Bell className="h-5 w-5 text-muted-foreground" />
-                  <div>
-                    <p className="font-medium text-foreground">Сповіщення</p>
-                    <p className="text-sm text-muted-foreground">
-                      Отримувати сповіщення про замовлення
-                    </p>
-                  </div>
-                </div>
-                <Switch
-                  checked={notificationsEnabled}
-                  onCheckedChange={setNotificationsEnabled}
-                />
-              </div>
+              {appSettingsButton}
+              <Separator />
 
-              {/* Account Settings Button */}
-              <button 
+              <button
                 onClick={() => {
                   hapticSelection();
                   setShowAccountSettings(true);
@@ -405,8 +518,10 @@ export const ProfileDashboard = () => {
                 onClick={() => setShowCustomerGuide(true)}
                 className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors"
               >
-                <div className="flex items-center gap-3">
-                  <HelpCircle className="h-5 w-5 text-muted-foreground" />
+                <div className="flex items-center">
+                  <div className="w-10 h-10 rounded-full bg-gray-100 dark:bg-gray-800 flex items-center justify-center text-gray-500 mr-4">
+                    <HelpCircle className="w-5 h-5" />
+                  </div>
                   <div className="text-left">
                     <p className="font-medium text-foreground">Як користуватись</p>
                     <p className="text-sm text-muted-foreground">
@@ -417,7 +532,7 @@ export const ProfileDashboard = () => {
                 <ChevronRight className="h-5 w-5 text-muted-foreground" />
               </button>
 
-              {(isSupplier || isAdmin) && (
+              {(canSeeSupplierGuide) && (
                 <button 
                   onClick={() => setShowSupplierGuide(true)}
                   className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors border-t border-border"
@@ -425,7 +540,7 @@ export const ProfileDashboard = () => {
                   <div className="flex items-center gap-3">
                     <BookOpen className="h-5 w-5 text-primary" />
                     <div className="text-left">
-                      <p className="font-medium text-foreground">Гід для партнерів</p>
+                      <p className="font-medium text-foreground">Інструкція постачальника</p>
                       <p className="text-sm text-muted-foreground">
                         Черга, націнки, реклама
                       </p>
@@ -433,6 +548,38 @@ export const ProfileDashboard = () => {
                   </div>
                   <ChevronRight className="h-5 w-5 text-primary" />
                 </button>
+              )}
+
+              {canSeeModeratorGuide && (
+              <button
+                onClick={() => setShowModeratorGuide(true)}
+                className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors border-t border-border"
+              >
+                <div className="flex items-center gap-3">
+                  <Shield className="h-5 w-5 text-orange-500" />
+                  <div className="text-left">
+                    <p className="font-medium text-foreground">Інструкція модератора</p>
+                    <p className="text-sm text-muted-foreground">Скарги, повернення, чати</p>
+                  </div>
+                </div>
+                <ChevronRight className="h-5 w-5 text-muted-foreground" />
+              </button>
+              )}
+
+              {canSeeManagerGuide && (
+              <button
+                onClick={() => setShowManagerGuide(true)}
+                className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors border-t border-border"
+              >
+                <div className="flex items-center gap-3">
+                  <Store className="h-5 w-5 text-primary" />
+                  <div className="text-left">
+                    <p className="font-medium text-foreground">Інструкція менеджера</p>
+                    <p className="text-sm text-muted-foreground">Замовлення магазину та чати клієнтів</p>
+                  </div>
+                </div>
+                <ChevronRight className="h-5 w-5 text-muted-foreground" />
+              </button>
               )}
             </div>
 
@@ -481,43 +628,23 @@ export const ProfileDashboard = () => {
             </div>
           </div>
 
-          {/* Help button for guests */}
-          <button 
-            onClick={() => setShowCustomerGuide(true)}
-            className="w-full flex items-center justify-center gap-2 p-3 bg-muted/50 rounded-xl text-muted-foreground hover:bg-muted transition-colors"
-          >
-            <HelpCircle className="h-4 w-4" />
-            <span className="text-sm font-medium">Як користуватись Taverna</span>
-          </button>
         </div>
       )}
-      
-      {/* Moderator Quick Actions - Only for moderators */}
-      {isAuthenticated && isModerator && !isAdmin && (
-        <div className="bg-orange-500/5 rounded-xl border border-orange-500/20 p-4 space-y-3">
-          <div className="flex items-center gap-2">
-            <Shield className="h-5 w-5 text-orange-500" />
-            <h4 className="font-semibold text-foreground">Швидкі дії модератора</h4>
+      {!isAuthenticated && (
+        <div className="space-y-3">
+          <div className="bg-card rounded-xl border border-border overflow-hidden">
+            {appSettingsButton}
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            <Link
-              to="/moderator"
-              className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors"
-            >
-              <Flag className="h-4 w-4 text-orange-500" />
-              <span className="text-sm font-medium text-foreground">Скарги</span>
-            </Link>
-            <Link
-              to="/support"
-              className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors"
-            >
-              <MessageSquare className="h-4 w-4 text-orange-500" />
-              <span className="text-sm font-medium text-foreground">Чати</span>
-            </Link>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            ⚠️ Акції, бонуси та розіграші потребують підтвердження адміна
-          </p>
+          <button
+            type="button"
+            onClick={() => {
+              hapticSelection();
+              setShowCustomerGuide(true);
+            }}
+            className="w-full py-4 px-5 rounded-xl font-semibold shadow-md hover:shadow-lg active:scale-[0.98] transition-all flex items-center justify-center gap-2 bg-gradient-to-r from-amber-500/15 to-orange-500/15 border border-amber-500/30 text-foreground"
+          >
+            <span>🛒 Як користуватись Taverna</span>
+          </button>
         </div>
       )}
 
@@ -529,6 +656,18 @@ export const ProfileDashboard = () => {
       <CustomerGuideModal 
         isOpen={showCustomerGuide} 
         onClose={() => setShowCustomerGuide(false)} 
+      />
+      <ModeratorGuideModal
+        isOpen={showModeratorGuide}
+        onClose={() => setShowModeratorGuide(false)}
+      />
+      <ManagerGuideModal
+        isOpen={showManagerGuide}
+        onClose={() => setShowManagerGuide(false)}
+      />
+      <AppSettingsSheet
+        open={showAppSettings}
+        onOpenChange={setShowAppSettings}
       />
 
       {/* Account Settings Modal */}

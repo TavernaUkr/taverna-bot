@@ -3,6 +3,7 @@ import { ArrowDownRight, ArrowUpRight, Receipt, Percent } from "lucide-react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 const fmt = (v: number) => Number(v || 0).toLocaleString("uk-UA", { maximumFractionDigits: 0 });
 
@@ -38,6 +39,7 @@ interface FinancialDetailsSheetProps {
 
 /** Прозора розбивка: дохід постачальника та знята націнка платформи по кожному замовленню. */
 export function FinancialDetailsSheet({ open, onOpenChange, initialTab = "income" }: FinancialDetailsSheetProps) {
+  useModalHistory(open, () => onOpenChange(false));
   const totals = useMemo(
     () => ({
       income: ENTRIES.reduce((s, e) => s + e.income, 0),

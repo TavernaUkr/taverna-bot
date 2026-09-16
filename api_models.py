@@ -97,6 +97,13 @@ class UserResponse(BaseModel):
     username: Optional[str] = None
     loyalty_points: int
     role: UserRole
+    haptic_enabled: bool = True
+    notifications_enabled: bool = True
+
+
+class UserSettingsUpdate(BaseModel):
+    haptic_enabled: Optional[bool] = None
+    notifications_enabled: Optional[bool] = None
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -129,6 +136,8 @@ class TelegramAuthUserResponse(BaseModel):
     last_name: Optional[str] = None
     role: str
     created_at: Optional[datetime] = None
+    haptic_enabled: bool = True
+    notifications_enabled: bool = True
 
 
 class TelegramAuthResponse(BaseModel):
@@ -228,6 +237,7 @@ class SupplierImportProgressResponse(BaseModel):
     estimated_minutes: int = 0
     is_importing: bool = False
     queue_ahead: int = 0
+    queue_position: int = 0
 
 
 class SupplierMeResponse(BaseModel):
@@ -283,6 +293,24 @@ class PendingSupplierApplicationResponse(BaseModel):
     deleted_at: Optional[datetime] = None
     import_started: bool = False
     deletion_reason: Optional[str] = None
+
+
+class AdminStoreListItem(BaseModel):
+    """Картка магазину для вкладки «Усі магазини» в адмінці."""
+    id: int
+    shop_name: str
+    company_name: Optional[str] = None
+    contact_name: Optional[str] = None
+    is_active: bool = True
+    markup_percentage: Optional[float] = None
+    created_at: Optional[datetime] = None
+    manager_telegram: Optional[str] = None
+    xml_url: Optional[str] = None
+    description: Optional[str] = None
+    product_count: int = 0
+    user_id: Optional[int] = None
+    telegram_id: Optional[int] = None
+    status: str
 
 
 class AdminSupplierDeleteResponse(BaseModel):

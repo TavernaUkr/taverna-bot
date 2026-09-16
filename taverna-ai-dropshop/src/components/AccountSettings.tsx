@@ -4,6 +4,7 @@ import { SettingsMainPage } from "@/components/settings/SettingsMainPage";
 import { PersonalDataPage } from "@/components/settings/PersonalDataPage";
 import { DeliveryAddressesPage } from "@/components/settings/DeliveryAddressesPage";
 import { RefundMethodPage } from "@/components/settings/RefundMethodPage";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 interface Profile {
   id: string;
@@ -56,6 +57,14 @@ export const AccountSettings = ({
   onDeleteAddress,
 }: AccountSettingsProps) => {
   const [view, setView] = useState<SettingsView>('main');
+
+  useModalHistory(true, () => {
+    if (view !== "main") {
+      setView("main");
+      return;
+    }
+    onBack();
+  });
 
   const content = (() => {
     if (view === 'main') {

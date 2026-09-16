@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '@/integrations/supabase/client';
-import { authTelegramMiniApp, type BackendTelegramUser } from '@/lib/backendApi';
+import { authTelegramMiniApp, BackendApiError, type BackendTelegramUser } from '@/lib/backendApi';
+import { setHapticEnabled } from '@/hooks/useTelegramUI';
 
 interface TelegramUser {
   id: number;
@@ -24,6 +25,8 @@ interface Profile {
   created_at: string;
   updated_at: string;
   roles?: string[]; // Roles from secure user_roles table
+  haptic_enabled?: boolean;
+  notifications_enabled?: boolean;
 }
 
 interface DeliveryAddress {
@@ -56,6 +59,42 @@ interface AuthState {
 
 const SESSION_TOKEN_KEY = 'taverna_session_token';
 const AUTH_CONSENT_KEY = 'isAuthorized';
+const INIT_DATA_CACHE_KEY = 'taverna_tg_init_data';
+const USER_SETTINGS_CACHE_KEY = 'taverna_user_settings';
+
+function readCachedUserSettings(): { haptic_enabled: boolean; notifications_enabled: boolean } | null {
+  try {
+    const raw = localStorage.getItem(USER_SETTINGS_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { haptic_enabled?: unknown; notifications_enabled?: unknown };
+    if (typeof parsed?.haptic_enabled !== 'boolean' && typeof parsed?.notifications_enabled !== 'boolean') {
+      return null;
+    }
+    return {
+      haptic_enabled: parsed.haptic_enabled !== false,
+      notifications_enabled: parsed.notifications_enabled !== false,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function cacheUserSettings(settings: { haptic_enabled?: boolean; notifications_enabled?: boolean }) {
+  try {
+    const prev = readCachedUserSettings() || { haptic_enabled: true, notifications_enabled: true };
+    localStorage.setItem(USER_SETTINGS_CACHE_KEY, JSON.stringify({
+      haptic_enabled: typeof settings.haptic_enabled === 'boolean' ? settings.haptic_enabled : prev.haptic_enabled,
+      notifications_enabled: typeof settings.notifications_enabled === 'boolean' ? settings.notifications_enabled : prev.notifications_enabled,
+    }));
+  } catch {
+    // ignore
+  }
+}
+
+const cachedUserSettingsOnLoad = readCachedUserSettings();
+if (cachedUserSettingsOnLoad) {
+  setHapticEnabled(cachedUserSettingsOnLoad.haptic_enabled);
+}
 
 function hasAuthConsent(): boolean {
   try {
@@ -82,8 +121,60 @@ function getTelegramWebApp(): any {
   }
 }
 
+function readCachedInitData(): string {
+  try {
+    return sessionStorage.getItem(INIT_DATA_CACHE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function cacheInitData(initData: string) {
+  if (!initData) return;
+  try {
+    sessionStorage.setItem(INIT_DATA_CACHE_KEY, initData);
+  } catch {
+    // ignore
+  }
+  try {
+    (window as any).__TAVERNA_INIT_DATA__ = initData;
+  } catch {
+    // ignore
+  }
+}
+
+function readInitDataFromUrl(): string {
+  try {
+    const rawHash = String(window.location.hash || "");
+    const hash = rawHash.startsWith("#") ? rawHash.slice(1) : rawHash;
+    const fromHash = new URLSearchParams(hash).get("tgWebAppData");
+    if (fromHash) return fromHash;
+    const fromSearch = new URLSearchParams(window.location.search).get("tgWebAppData");
+    if (fromSearch) return fromSearch;
+    const encodedMatch = hash.match(/(?:^|&)tgWebAppData=([^&]+)/);
+    if (encodedMatch?.[1]) return decodeURIComponent(encodedMatch[1]);
+    return "";
+  } catch {
+    return "";
+  }
+}
+
 function readTelegramInitData(): string {
-  return String(getTelegramWebApp()?.initData || "");
+  const fromWebApp = String(getTelegramWebApp()?.initData || "");
+  if (fromWebApp) {
+    cacheInitData(fromWebApp);
+    return fromWebApp;
+  }
+  const early = String((window as any).__TAVERNA_INIT_DATA__ || "");
+  if (early) {
+    cacheInitData(early);
+    return early;
+  }
+  const cached = readCachedInitData();
+  if (cached) return cached;
+  const fromUrl = readInitDataFromUrl();
+  if (fromUrl) cacheInitData(fromUrl);
+  return fromUrl;
 }
 
 function readTelegramUnsafeUser(): {
@@ -100,20 +191,25 @@ function readTelegramUnsafeUser(): {
   }
 }
 
-/** На телефоні WebApp інколи з'являється з мікрозатримкою — чекаємо, не блокуємо UI. */
-async function waitForTelegramInitData(maxMs = 800): Promise<string> {
+/** На телефоні та в Telegram Web initData інколи з'являється з затримкою. */
+async function waitForTelegramInitData(maxMs = 3000): Promise<string> {
   const existing = readTelegramInitData();
   if (existing) return existing;
 
   const started = Date.now();
   return new Promise((resolve) => {
     const tick = () => {
+      try {
+        getTelegramWebApp()?.ready?.();
+      } catch {
+        // ignore
+      }
       const data = readTelegramInitData();
       if (data || Date.now() - started >= maxMs) {
         resolve(data);
         return;
       }
-      window.setTimeout(tick, 50);
+      window.setTimeout(tick, 80);
     };
     tick();
   });
@@ -128,6 +224,20 @@ function mapBackendRole(role?: string | null): string {
 function mapBackendUserToProfile(user: BackendTelegramUser, role: string): Profile {
   const mapped = mapBackendRole(role || user.role);
   const tgUser = readTelegramUnsafeUser();
+  const cached = readCachedUserSettings();
+  const hapticEnabled =
+    typeof user.haptic_enabled === 'boolean'
+      ? user.haptic_enabled
+      : (cached?.haptic_enabled ?? true);
+  const notificationsEnabled =
+    typeof user.notifications_enabled === 'boolean'
+      ? user.notifications_enabled
+      : (cached?.notifications_enabled ?? true);
+  setHapticEnabled(hapticEnabled);
+  cacheUserSettings({
+    haptic_enabled: hapticEnabled,
+    notifications_enabled: notificationsEnabled,
+  });
   return {
     id: String(user.id),
     telegram_id: user.telegram_id || tgUser?.id || null,
@@ -142,6 +252,8 @@ function mapBackendUserToProfile(user: BackendTelegramUser, role: string): Profi
     created_at: user.created_at || new Date().toISOString(),
     updated_at: new Date().toISOString(),
     roles: mapped === "guest" ? [] : [mapped],
+    haptic_enabled: hapticEnabled,
+    notifications_enabled: notificationsEnabled,
   };
 }
 
@@ -169,14 +281,14 @@ export function useTelegramAuth() {
     }
   }, []);
 
-  const applyGuest = useCallback(() => {
+  const applyGuest = useCallback((error: string | null = null) => {
     setState({
       isLoading: false,
       isAuthenticated: false,
       profile: null,
       addresses: [],
       sessionToken: null,
-      error: null,
+      error,
     });
   }, []);
 
@@ -196,13 +308,25 @@ export function useTelegramAuth() {
       }
 
       const initData =
-        (await waitForTelegramInitData()) ||
-        String(getTelegramWebApp()?.initData || "");
+        (await waitForTelegramInitData(options?.forceTelegram ? 4000 : 3000)) ||
+        String(getTelegramWebApp()?.initData || "") ||
+        readTelegramInitData();
 
-      if (requestId !== authRequestId.current) return null;
+      if (requestId !== authRequestId.current && !options?.forceTelegram) return null;
 
+      if (!initData) {
+        if (options?.forceTelegram) {
+          const message = "Немає підпису Telegram. Відкрийте Mini App кнопкою в боті, не як звичайну вкладку браузера.";
+          applyGuest(message);
+          throw new Error(message);
+        }
+        applyGuest();
+        return null;
+      }
+
+      cacheInitData(initData);
       const result = await authTelegramMiniApp(initData);
-      if (requestId !== authRequestId.current) return null;
+      if (requestId !== authRequestId.current && !options?.forceTelegram) return null;
 
       const mappedRole = mapBackendRole(result.role || result.user?.role);
 
@@ -212,7 +336,14 @@ export function useTelegramAuth() {
         mappedRole === "guest" ||
         !result.user?.telegram_id
       ) {
-        applyGuest();
+        applyGuest(
+          options?.forceTelegram
+            ? "Telegram не підтвердив сесію. Закрийте Mini App і відкрийте його знову з бота."
+            : null
+        );
+        if (options?.forceTelegram) {
+          throw new Error("Telegram не підтвердив сесію. Закрийте Mini App і відкрийте його знову з бота.");
+        }
         return null;
       }
 
@@ -229,11 +360,41 @@ export function useTelegramAuth() {
       return profile;
     } catch (error: unknown) {
       console.error('Auth error:', error);
-      if (requestId !== authRequestId.current) return null;
-      applyGuest();
+      if (requestId !== authRequestId.current && !options?.forceTelegram) return null;
+      const message =
+        error instanceof BackendApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Не вдалося авторизуватись через Telegram.";
+      applyGuest(message);
+      if (options?.forceTelegram) {
+        throw new Error(message);
+      }
       return null;
     }
   }, [applyGuest]);
+
+  const applyProfileSettings = useCallback((updates: {
+    haptic_enabled?: boolean;
+    notifications_enabled?: boolean;
+  }) => {
+    if (typeof updates.haptic_enabled === 'boolean') {
+      setHapticEnabled(updates.haptic_enabled);
+    }
+    cacheUserSettings(updates);
+    setState(prev => {
+      if (!prev.profile) return prev;
+      return {
+        ...prev,
+        profile: {
+          ...prev.profile,
+          ...updates,
+          updated_at: new Date().toISOString(),
+        },
+      };
+    });
+  }, []);
 
   const updateProfile = useCallback(async (updates: Partial<Profile>) => {
     if (!state.profile || !state.sessionToken) return null;
@@ -387,6 +548,7 @@ export function useTelegramAuth() {
   return {
     ...state,
     authenticate,
+    applyProfileSettings,
     updateProfile,
     addAddress,
     updateAddress,

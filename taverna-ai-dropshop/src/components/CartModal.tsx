@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import { EmptyState } from "./ui/empty-state";
 import { Button } from "@/components/ui/button";
 import { useNavigate } from "react-router-dom";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 export interface CartItem {
   id: string;
@@ -47,6 +48,7 @@ export const CartModal = ({
   const [localVariants, setLocalVariants] = useState<Record<string, { size?: string; color?: string }>>({});
   const [savedAddress, setSavedAddress] = useState<any>(null);
   const navigate = useNavigate();
+  useModalHistory(isOpen, onClose);
 
   const handleBrowseCatalog = () => {
     onClose();

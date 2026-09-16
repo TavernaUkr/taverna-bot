@@ -42,6 +42,7 @@ import { ReturnPolicyModal } from "@/components/product/ReturnPolicyModal";
 import { DeliveryInfoModal } from "@/components/product/DeliveryInfoModal";
 import { VerifiedBadge } from "@/components/ui/verified-badge";
 import { hapticImpact } from "@/lib/haptics";
+import { vibrate } from "@/hooks/useTelegramUI";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -276,7 +277,7 @@ const ProductDetail = () => {
   const handleAddToCart = () => {
     if (!product) return;
     
-    hapticImpact("light");
+    vibrate("light");
     
     if (product.sizes?.length && !selectedSize) {
       toast.error("Оберіть розмір");
@@ -311,6 +312,7 @@ const ProductDetail = () => {
       selectedVariant ? String(selectedVariant.id) : undefined
     );
 
+    vibrate("success");
     toast.success(`${product.name} додано до кошика`);
   };
 

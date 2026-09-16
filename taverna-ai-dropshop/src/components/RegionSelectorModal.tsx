@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Check } from "lucide-react";
 import { useState } from "react";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 const regions = [
   { code: "ua", label: "Україна", flag: "🇺🇦", active: true },
@@ -35,6 +36,7 @@ interface RegionSelectorModalProps {
 
 export function RegionSelectorModal({ isOpen, onClose }: RegionSelectorModalProps) {
   const [selected] = useState("ua");
+  useModalHistory(isOpen, onClose);
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>

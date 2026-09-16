@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -14,32 +15,12 @@ type BackHandler = () => boolean;
 interface AppBackContextValue {
   register: (handler: BackHandler) => () => void;
   goBack: () => void;
+  hasOverlay: boolean;
 }
 
 const AppBackContext = createContext<AppBackContextValue | null>(null);
 
-/** Головні вкладки: системна «Назад» має закривати Mini App, а не йти по історії. */
-function isRootTab(pathname: string, search: string) {
-  if (pathname === "/suppliers" || pathname === "/support") return true;
-  if (pathname !== "/") return false;
-  const tab = new URLSearchParams(search).get("tab");
-  return !tab || tab === "catalog" || tab === "live" || tab === "account";
-}
-
-function telegramWebApp() {
-  return (window as any).Telegram?.WebApp as
-    | {
-        BackButton?: {
-          show: () => void;
-          hide: () => void;
-          onClick: (fn: () => void) => void;
-          offClick: (fn: () => void) => void;
-        };
-        onEvent?: (event: string, fn: () => void) => void;
-        offEvent?: (event: string, fn: () => void) => void;
-      }
-    | undefined;
-}
+/** Головна `/`: системна «Назад» закриває Mini App. Інші екрани — історія. */
 
 export function AppBackProvider({ children }: { children: ReactNode }) {
   const location = useLocation();
@@ -54,16 +35,13 @@ export function AppBackProvider({ children }: { children: ReactNode }) {
       const top = stack[stack.length - 1];
       if (top.handler()) return;
     }
-    if (isRootTab(location.pathname, location.search)) return;
+    if (location.pathname === "/") return;
     if (window.history.length > 1) {
       navigate(-1);
       return;
     }
     navigate("/");
-  }, [location.pathname, location.search, navigate]);
-
-  const goBackRef = useRef(goBack);
-  goBackRef.current = goBack;
+  }, [location.pathname, navigate]);
 
   const register = useCallback((handler: BackHandler) => {
     const id = nextId.current++;
@@ -75,27 +53,13 @@ export function AppBackProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  useEffect(() => {
-    const tg = telegramWebApp();
-    const backButton = tg?.BackButton;
-    const onBack = () => goBackRef.current();
-    const showButton = overlayCount > 0 || !isRootTab(location.pathname, location.search);
-
-    if (backButton) {
-      if (showButton) backButton.show();
-      else backButton.hide();
-      backButton.onClick(onBack);
-    }
-    tg?.onEvent?.("backButtonClicked", onBack);
-
-    return () => {
-      backButton?.offClick(onBack);
-      tg?.offEvent?.("backButtonClicked", onBack);
-    };
-  }, [location.pathname, location.search, overlayCount]);
+  const value = useMemo(
+    () => ({ register, goBack, hasOverlay: overlayCount > 0 }),
+    [register, goBack, overlayCount],
+  );
 
   return (
-    <AppBackContext.Provider value={{ register, goBack }}>
+    <AppBackContext.Provider value={value}>
       {children}
     </AppBackContext.Provider>
   );
@@ -107,6 +71,10 @@ export function useAppBack() {
     throw new Error("useAppBack must be used within AppBackProvider");
   }
   return ctx;
+}
+
+export function useAppBackOptional() {
+  return useContext(AppBackContext);
 }
 
 /** Коли `enabled` — системна «Назад» (Samsung / Telegram) закриває цей шар. */

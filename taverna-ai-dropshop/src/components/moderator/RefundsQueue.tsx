@@ -11,7 +11,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { isPreviewDevEnvironment } from "@/lib/dev-preview";
 import { DEMO_REFUNDS } from "@/hooks/useOrderRefunds";
-import { hapticNotification } from "@/lib/haptics";
+import { vibrate } from "@/hooks/useTelegramUI";
 import { toast } from "sonner";
 
 interface RefundRow {
@@ -91,7 +91,7 @@ export function RefundsQueue() {
         if (error || data?.error) throw new Error(data?.error || "error");
         await load();
       }
-      hapticNotification("success");
+      vibrate(status === "rejected" ? "error" : "success");
       toast.success(status === "paid" ? "Кошти позначено як виплачені" : status === "approved" ? "Заявку схвалено" : "Заявку відхилено");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Не вдалося оновити заявку");

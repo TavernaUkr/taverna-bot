@@ -20,7 +20,7 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from sqlalchemy import case, select, delete, insert
+from sqlalchemy import case, literal, select, delete, insert, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,7 +31,12 @@ from database.models import (
     Product, ProductVariant, ProductOption, ProductOptionValue,
     product_variant_option_values, ProductStatus, ProductAIStatus, Supplier, SupplierStatus, SupplierType,
 )
-from services.mydrop_api import MyDropAPIClient, MyDropAPIError, extract_public_api_key
+from services.mydrop_api import (
+    InvalidMyDropYmlLinkError,
+    extract_public_api_key,
+    namespace_supplier_code,
+    normalize_mydrop_yml_link,
+)
 # Перевикористовуємо вже наявну (production) логіку націнки з PriceRule,
 # щоб товари з API і товари зі старого XML рахувались за ОДНАКОВИМИ
 # правилами. services/product_service.py не залежить від джерела даних
@@ -182,6 +187,16 @@ async def sync_supplier_products(
     # другого конекта і без 1149 зайвих SELECT у price_rules.
     await _load_price_rules(db_session)
 
+    ns_prefix = f"sup{supplier_id}-"
+    await db_session.execute(
+        update(Product)
+        .where(
+            Product.supplier_id == supplier_id,
+            ~Product.supplier_sku.startswith(ns_prefix),
+        )
+        .values(supplier_sku=literal(ns_prefix) + Product.supplier_sku)
+    )
+
     # --- Крок 2-3: Запис у БД (СТРОГО послідовно, товар за товаром).
     # SQLite не вміє конкурентний запис — жодного asyncio.gather тут немає
     # і не повинно з'явитись. commit — пакетами по _COMMIT_EVERY товарів,
@@ -195,15 +210,18 @@ async def sync_supplier_products(
                 stats["errors"] += 1
                 continue
 
-            sku = str(raw_product.get("sku") or raw_product.get("id") or "").strip()
+            original_sku = str(raw_product.get("sku") or raw_product.get("id") or "").strip()
+            original_id = str(raw_product.get("id") or "").strip()
             title = str(raw_product.get("title") or "").strip()
-            if not sku or not title:
+            if not original_sku or not title:
                 logger.warning(
                     "sync_supplier_products: товар без sku/title пропущено (supplier #%s, id=%s).",
                     supplier_id, raw_product.get("id"),
                 )
                 stats["errors"] += 1
                 continue
+
+            sku = namespace_supplier_code(supplier_id, original_sku)
 
             description = str(raw_product.get("description") or "")
             images = raw_product.get("images") or []
@@ -295,10 +313,30 @@ async def sync_supplier_products(
                     continue
 
                 size_id = size.get("id")
-                offer_id = (
-                    f"mydrop_{supplier_id}_{sku}_{size_id}" if size_id is not None
-                    else f"mydrop_{supplier_id}_{sku}"
+                original_offer = (
+                    str(size_id).strip() if size_id is not None and str(size_id).strip()
+                    else (original_id or original_sku)
                 )
+                offer_id = namespace_supplier_code(supplier_id, original_offer)
+                old_offer_id = (
+                    f"mydrop_{supplier_id}_{original_sku}_{size_id}"
+                    if size_id is not None
+                    else f"mydrop_{supplier_id}_{original_sku}"
+                )
+                if old_offer_id != offer_id:
+                    already = (
+                        await db_session.execute(
+                            select(ProductVariant.id).where(
+                                ProductVariant.supplier_offer_id == offer_id
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if already is None:
+                        await db_session.execute(
+                            update(ProductVariant)
+                            .where(ProductVariant.supplier_offer_id == old_offer_id)
+                            .values(supplier_offer_id=offer_id)
+                        )
 
                 base_price_raw = size.get("drop_price", drop_price)
                 try:
@@ -462,21 +500,28 @@ async def import_supplier_catalog_and_process_ai(supplier_id: int) -> Dict[str, 
             )
             return result
 
+        try:
+            canonical_yml, extracted = normalize_mydrop_yml_link(
+                supplier.yml_link or supplier.xml_url or supplier.mydrop_api_key or ""
+            )
+        except InvalidMyDropYmlLinkError:
+            extracted = extract_public_api_key(supplier.yml_link or supplier.xml_url or "")
+            canonical_yml = None
+        if extracted:
+            if canonical_yml:
+                supplier.yml_link = canonical_yml
+                supplier.xml_url = canonical_yml
+            supplier.mydrop_api_key = extracted
+            supplier.type = SupplierType.mydrop
+
         api_key, yml_url = _resolve_catalog_source(supplier)
+        await db.commit()
         if not api_key and not yml_url:
             logger.warning(
                 "import_supplier_catalog: у постачальника #%s немає yml_link / mydrop_api_key — імпорт пропущено.",
                 supplier_id,
             )
             return result
-
-        extracted = extract_public_api_key(supplier.yml_link or supplier.xml_url or "")
-        if extracted and not supplier.mydrop_api_key:
-            supplier.mydrop_api_key = extracted
-        yml_text = (supplier.yml_link or supplier.xml_url or "").lower()
-        if "mydrop" in yml_text or extracted:
-            supplier.type = SupplierType.mydrop
-        await db.commit()
 
         stats = await sync_supplier_products(
             supplier_id,

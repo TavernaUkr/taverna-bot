@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { hapticImpact } from "@/lib/haptics";
+import { vibrate } from "@/hooks/useTelegramUI";
 import { VariantSelectionModal } from "@/components/product/VariantSelectionModal";
 import { useFloatingToolsOptional } from "@/components/floating/FloatingToolsContext";
 import type { BackendProductOption, BackendProductVariant } from "@/lib/backendApi";
@@ -200,7 +201,7 @@ function ProductFeedSlide({
 
   const handleAddToCart = (event: React.MouseEvent) => {
     event.stopPropagation();
-    hapticImpact("medium");
+    vibrate("light");
     if (hasOptions) {
       setIsVariantModalOpen(true);
       return;

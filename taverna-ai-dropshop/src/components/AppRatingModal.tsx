@@ -13,6 +13,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { toast } from "sonner";
 import { hapticNotification } from "@/lib/haptics";
+import { useModalHistory } from "@/hooks/useModalHistory";
 import { cn } from "@/lib/utils";
 
 interface AppRatingModalProps {
@@ -30,6 +31,8 @@ export function AppRatingModal({ isOpen, onClose, type = "app", targetId, target
   const [comment, setComment] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+
+  useModalHistory(isOpen, onClose);
 
   const title = type === "app" ? "Оцінка додатку" : `Оцінка магазину${targetName ? ` "${targetName}"` : ""}`;
   const description = type === "app" 

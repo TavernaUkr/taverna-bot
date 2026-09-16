@@ -55,7 +55,7 @@ async def process_next_pending_product() -> None:
 
     processor = _get_processor()
     if not processor.is_ready:
-        logger.warning("AI-черга: GEMINI_API_KEY немає — крок пропущено.")
+        logger.warning("AI-черга: GEMINI_API_KEYS немає — крок пропущено.")
         return
 
     async with AsyncSessionLocal() as db:

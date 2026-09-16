@@ -2,14 +2,26 @@
 import asyncio
 import re
 import logging
-import google.generativeai as genai
 import json
 from config_reader import config
+from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
+try:
+    from google import genai
+    from google.genai import types
+    from google.genai import errors as genai_errors
+except ImportError:
+    genai = None  # type: ignore
+    types = None  # type: ignore
+    genai_errors = None  # type: ignore
+    logger.warning("google-genai не встановлено в цьому Python. AI-сервіси буде пропущено.")
+
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+DEFAULT_GEMINI_MODEL = "gemini-1.5-flash-latest"
+
 
 def _safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
     """
@@ -41,49 +53,148 @@ def _safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-# Налаштовуємо Gemini API
+
+def _is_quota_error(exc: Exception) -> bool:
+    """429 RESOURCE_EXHAUSTED — квота ключа, треба ротація."""
+    code = getattr(exc, "code", None)
+    client_error = getattr(genai_errors, "ClientError", None) if genai_errors else None
+    api_error = getattr(genai_errors, "APIError", None) if genai_errors else None
+    if code == 429:
+        return True
+    if client_error and isinstance(exc, client_error) and code == 429:
+        return True
+    if api_error and isinstance(exc, api_error) and code == 429:
+        return True
+    msg = str(exc).upper()
+    status_name = str(getattr(exc, "status", "") or "").upper()
+    combined = f"{msg} {status_name}"
+    return "429" in str(exc) or "RESOURCE_EXHAUSTED" in combined or "QUOTA" in combined
+
+
+def _is_capacity_error(exc: Exception) -> bool:
+    """429 / 503 — ліміт або тимчасова недоступність Gemini."""
+    if _is_quota_error(exc):
+        return True
+    code = getattr(exc, "code", None)
+    if code == 503:
+        return True
+    msg = str(exc)
+    return "503" in msg or "UNAVAILABLE" in msg.upper()
+
+
+def _has_gemini_keys() -> bool:
+    return bool(getattr(config, "GEMINI_API_KEYS", None))
+
+
+def get_gemini_client():
+    """google.genai.Client на поточному активному ключі. None, якщо ключів немає."""
+    if genai is None:
+        return None
+    manager = get_key_manager()
+    if not manager.has_keys():
+        return None
+    try:
+        api_key = manager.get_next_active_key()
+    except AllKeysExhaustedError:
+        logger.warning("Усі Gemini API ключі тимчасово вичерпані.")
+        return None
+    return genai.Client(api_key=api_key)
+
+
+async def _generate_content(
+    prompt: str,
+    *,
+    system_instruction: Optional[str] = None,
+    temperature: float = 0.7,
+    max_output_tokens: Optional[int] = None,
+    response_mime_type: Optional[str] = None,
+    model_name: str = DEFAULT_GEMINI_MODEL,
+) -> str:
+    if genai is None or types is None:
+        raise RuntimeError("Gemini client is not configured")
+    manager = get_key_manager()
+    if not manager.has_keys():
+        raise RuntimeError("Gemini client is not configured")
+
+    cfg_kwargs: Dict[str, Any] = {"temperature": temperature}
+    if system_instruction:
+        cfg_kwargs["system_instruction"] = system_instruction
+    if max_output_tokens is not None:
+        cfg_kwargs["max_output_tokens"] = max_output_tokens
+    if response_mime_type:
+        cfg_kwargs["response_mime_type"] = response_mime_type
+
+    last_error: Optional[Exception] = None
+    for _ in range(max(1, manager.key_count)):
+        try:
+            api_key = manager.get_next_active_key()
+        except AllKeysExhaustedError as e:
+            raise RuntimeError(str(e)) from e
+        client = genai.Client(api_key=api_key)
+        try:
+            response = await client.aio.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
+            return (response.text or "").strip()
+        except Exception as e:
+            if _is_quota_error(e):
+                manager.mark_key_exhausted(api_key)
+                last_error = e
+                logger.warning(
+                    "Gemini 429 на ключі ...%s — переходжу на наступний.",
+                    api_key[-4:],
+                )
+                continue
+            raise
+    raise last_error or AllKeysExhaustedError("Усі Gemini API ключі вичерпані.")
+
+
+# Налаштовуємо Gemini API (без витрати ключа з черги)
 try:
-    if config.gemini_api_key:
-        genai.configure(api_key=config.gemini_api_key.get_secret_value())
-        logger.info("Google Gemini API сконфігуровано.")
+    if genai is not None and get_key_manager().has_keys():
+        logger.info(
+            "Google Gemini API сконфігуровано (%s ключ(ів)).",
+            get_key_manager().key_count,
+        )
     else:
-        logger.warning("GEMINI_API_KEY не знайдено. AI-сервіси буде пропущено.")
+        logger.warning("GEMINI_API_KEYS не знайдено. AI-сервіси буде пропущено.")
 except Exception as e:
     logger.error(f"Помилка конфігурації Gemini: {e}")
+
 
 async def rewrite_text_with_ai(text_to_rewrite: str, product_name: str) -> str:
     """
     Асинхронно переписує опис товару (для автопостингу).
     """
-    if not config.gemini_api_key:
+    if not _has_gemini_keys():
         logger.warning("Рерайтинг пропущено (немає API key).")
         return text_to_rewrite
 
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-latest",
+        prompt = f"Назва товару: '{product_name}'. Оригінальний опис для рерайту:\n---\n{text_to_rewrite}"
+        rewritten_text = await _generate_content(
+            prompt,
             system_instruction=(
                 "Ти – професійний копірайтер для Телеграм-магазину 'TAVERNA'. "
                 "Твоє завдання – переписати опис товару. Стиль: впевнений, професійний, з акцентом на якість. "
                 "Структуруй текст, використовуй марковані списки (▪️ або ✅). "
                 "Використовуй доречні емодзі (🛡️, 💪, 🔥). "
                 "НЕ додавай ціну, артикул, посилання або заклики до дії. Тільки опис."
-            )
+            ),
+            temperature=0.7,
+            max_output_tokens=4096,
         )
         
-        prompt = f"Назва товару: '{product_name}'. Оригінальний опис для рерайту:\n---\n{text_to_rewrite}"
-        
-        response = await model.generate_content_async(
-            prompt,
-            generation_config=genai.types.GenerationConfig(temperature=0.7, max_output_tokens=4096)
-        )
-        
-        rewritten_text = response.text.strip()
         logger.info(f"✅ Gemini успішно переписав текст для '{product_name}'")
         return rewritten_text
         
     except Exception as e:
-        logger.error(f"❌ Помилка під час запиту до Gemini API (rewrite): {e}", exc_info=True)
+        if _is_capacity_error(e):
+            logger.error(f"❌ Gemini 429/503 під час rewrite: {e}")
+        else:
+            logger.error(f"❌ Помилка під час запиту до Gemini API (rewrite): {e}", exc_info=True)
         return text_to_rewrite
 
 # ---
@@ -97,7 +208,7 @@ async def extract_product_attributes_with_ai(
     "AI-Класифікатор". Витягує структуровані дані (атрибути та опції)
     з хаотичного тексту поста постачальника (URL/Telegram).
     """
-    if not config.gemini_api_key:
+    if not _has_gemini_keys():
         logger.warning("Видобування атрибутів пропущено (немає API key).")
         return None
 
@@ -158,28 +269,27 @@ async def extract_product_attributes_with_ai(
 """
     
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-latest",
+        text = await _generate_content(
+            raw_text,
             system_instruction=system_prompt,
-            generation_config=genai.types.GenerationConfig(
-                response_mime_type="application/json", # Просимо Gemini *гарантувати* JSON
-                temperature=0.0 # Нам потрібна точність, а не креативність
-            )
+            temperature=0.0,
+            response_mime_type="application/json",
         )
         
-        response = await model.generate_content_async(raw_text)
-        
         # Витягуємо чистий JSON
-        json_data = _safe_json_loads(response.text)
+        json_data = _safe_json_loads(text)
         if not isinstance(json_data, dict):
-            logger.warning(f"Gemini повернув невалідний JSON (extract). Raw: {response.text[:500]}")
+            logger.warning(f"Gemini повернув невалідний JSON (extract). Raw: {text[:500]}")
             return None
 
         logger.info(f"✅ Gemini успішно витягнув атрибути: {json_data}")
         return json_data
         
     except Exception as e:
-        logger.error(f"❌ Помилка під час запиту до Gemini API (extract): {e}", exc_info=True)
+        if _is_capacity_error(e):
+            logger.error(f"❌ Gemini 429/503 під час extract: {e}")
+        else:
+            logger.error(f"❌ Помилка під час запиту до Gemini API (extract): {e}", exc_info=True)
         return None
 
 async def classify_main_category_with_ai(texts: List[str]) -> Optional[str]:
@@ -187,7 +297,7 @@ async def classify_main_category_with_ai(texts: List[str]) -> Optional[str]:
     Визначає головну категорію магазину/потоку товарів.
     Повертає коротку категорію (наприклад: "Одяг", "Електроніка", "Взуття", "Тактичне спорядження", "Дім і сад").
     """
-    if not config.gemini_api_key:
+    if not _has_gemini_keys():
         logger.warning("Категоризацію пропущено (немає API key).")
         return None
 
@@ -207,17 +317,13 @@ async def classify_main_category_with_ai(texts: List[str]) -> Optional[str]:
 """
 
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-latest",
+        text = await _generate_content(
+            joined,
             system_instruction=system_prompt,
-            generation_config=genai.types.GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0.0
-            )
+            temperature=0.0,
+            response_mime_type="application/json",
         )
-
-        response = await model.generate_content_async(joined)
-        data = _safe_json_loads(response.text)
+        data = _safe_json_loads(text)
         if not isinstance(data, dict):
             return "General"
 
@@ -229,7 +335,10 @@ async def classify_main_category_with_ai(texts: List[str]) -> Optional[str]:
         return category
 
     except Exception as e:
-        logger.error(f"❌ Помилка під час запиту до Gemini API (classify): {e}", exc_info=True)
+        if _is_capacity_error(e):
+            logger.error(f"❌ Gemini 429/503 під час classify: {e}")
+        else:
+            logger.error(f"❌ Помилка під час запиту до Gemini API (classify): {e}", exc_info=True)
         return None
 
 async def batch_extract_product_attributes_with_ai(

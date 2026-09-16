@@ -24,6 +24,20 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth (Telegram Mini App)"])
 
 
+# Telegram Web інколи тримає Mini App відкритим довше години.
+_INIT_DATA_MAX_AGE = timedelta(hours=24)
+
+
+def _hmac_hex(bot_token: str, pairs: Dict[str, str]) -> str:
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    secret_key = hmac.new(
+        b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256
+    ).digest()
+    return hmac.new(
+        secret_key, data_check_string.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
 def validate_init_data(init_data: str) -> Optional[Dict[str, Any]]:
     """
     Валідація initData за офіційною документацією Telegram Mini Apps.
@@ -36,10 +50,16 @@ def validate_init_data(init_data: str) -> Optional[Dict[str, Any]]:
     Повертає dict поля `user` або None, якщо підпис невалідний / дані застарілі.
     https://core.telegram.org/bots/webapps#validating-data-received-via-the-mini-app
     """
+    user, _reason = parse_and_validate_init_data(init_data)
+    return user
+
+
+def parse_and_validate_init_data(init_data: str) -> tuple[Optional[Dict[str, Any]], str]:
+    """Повертає (user, '') або (None, код причини: empty/missing_hash/expired/bad_hash/error)."""
     try:
         if not init_data or not str(init_data).strip():
             logger.warning("Invalid initData: empty payload")
-            return None
+            return None, "empty"
 
         bot_token = config.BOT_TOKEN
         parsed_data = dict(parse_qsl(init_data, keep_blank_values=True))
@@ -47,35 +67,34 @@ def validate_init_data(init_data: str) -> Optional[Dict[str, Any]]:
         hash_to_check = parsed_data.pop("hash", None)
         if not hash_to_check:
             logger.warning("Invalid initData: 'hash' field is missing")
-            return None
+            return None, "missing_hash"
 
         auth_date_ts = int(parsed_data.get("auth_date", 0) or 0)
         auth_date = datetime.fromtimestamp(auth_date_ts, timezone.utc)
-        if datetime.now(timezone.utc) - auth_date > timedelta(hours=1):
-            logger.warning("Invalid initData: Data is older than 1 hour")
-            return None
+        if datetime.now(timezone.utc) - auth_date > _INIT_DATA_MAX_AGE:
+            logger.warning("Invalid initData: Data is older than 24 hours")
+            return None, "expired"
 
-        data_check_string = "\n".join(
-            f"{k}={v}" for k, v in sorted(parsed_data.items())
-        )
-        secret_key = hmac.new(
-            b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256
-        ).digest()
-        calculated_hash = hmac.new(
-            secret_key, data_check_string.encode("utf-8"), hashlib.sha256
-        ).hexdigest()
+        hash_ok = hmac.compare_digest(_hmac_hex(bot_token, parsed_data), hash_to_check)
+        if not hash_ok and "signature" in parsed_data:
+            without_signature = {k: v for k, v in parsed_data.items() if k != "signature"}
+            hash_ok = hmac.compare_digest(
+                _hmac_hex(bot_token, without_signature), hash_to_check
+            )
 
-        if not hmac.compare_digest(calculated_hash, hash_to_check):
+        if not hash_ok:
             logger.error("CRITICAL: Invalid initData hash. Possible attack.")
-            return None
+            return None, "bad_hash"
 
         if "user" in parsed_data:
-            return json.loads(parsed_data["user"])
-        return {}
+            return json.loads(parsed_data["user"]), ""
+        return {}, ""
     except Exception as e:
         logger.error("Помилка валідації initData: %s", e, exc_info=True)
-        # Fallback на спільну реалізацію в auth_service (той самий алгоритм)
-        return _shared_validate_init_data(init_data)
+        fallback = _shared_validate_init_data(init_data)
+        if fallback is not None:
+            return fallback, ""
+        return None, "error"
 
 
 def _compose_full_name(
@@ -106,6 +125,10 @@ def _user_to_response(user: User) -> TelegramAuthUserResponse:
         last_name=user.last_name,
         role=role,
         created_at=user.created_at,
+        haptic_enabled=True if user.haptic_enabled is None else bool(user.haptic_enabled),
+        notifications_enabled=(
+            True if user.notifications_enabled is None else bool(user.notifications_enabled)
+        ),
     )
 
 
@@ -126,6 +149,7 @@ async def auth_via_telegram(
     """
     init_data = request_data.resolved_init_data()
     if not init_data:
+        logger.info("Mini App auth: порожній initData \u2192 гість")
         return TelegramAuthResponse(
             user=TelegramAuthUserResponse(
                 id=0,
@@ -141,12 +165,18 @@ async def auth_via_telegram(
             is_guest=True,
         )
 
-    user_data = validate_init_data(init_data)
+    user_data, reason = parse_and_validate_init_data(init_data)
     if user_data is None:
-        logger.warning("Спроба Mini App-авторизації з невалідним initData.")
+        logger.warning("Спроба Mini App-авторизації з невалідним initData: %s", reason)
+        detail_map = {
+            "expired": "Підпис Telegram застарів. Закрийте Mini App і відкрийте знову з бота.",
+            "missing_hash": "Немає підпису Telegram. Відкрийте Mini App кнопкою в боті.",
+            "empty": "Немає підпису Telegram. Відкрийте Mini App кнопкою в боті.",
+            "bad_hash": "Telegram не підтвердив підпис. Відкрийте Mini App саме з цього бота.",
+        }
         raise HTTPException(
             status_code=401,
-            detail="Invalid initData: Hash mismatch or expired",
+            detail=detail_map.get(reason, "Invalid initData: Hash mismatch or expired"),
         )
 
     telegram_id = user_data.get("id")

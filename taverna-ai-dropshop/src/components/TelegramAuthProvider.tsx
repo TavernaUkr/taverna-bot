@@ -55,6 +55,7 @@ interface TelegramAuthContextType {
   setDevRoleOverride: (role: TestRole | null) => void;
   authenticate: (options?: { forceTelegram?: boolean }) => Promise<any>;
   logout: () => Promise<void>;
+  applyProfileSettings: (updates: { haptic_enabled?: boolean; notifications_enabled?: boolean }) => void;
   updateProfile: (updates: any) => Promise<any>;
   addAddress: (address: any) => Promise<any>;
   updateAddress: (id: string, updates: any) => Promise<any>;
@@ -88,6 +89,7 @@ export function useTelegramAuthContext() {
       setDevRoleOverride: () => {},
       authenticate: async () => null,
       logout: async () => {},
+      applyProfileSettings: () => {},
       updateProfile: async () => null,
       addAddress: async () => null,
       updateAddress: async () => null,
@@ -327,9 +329,14 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
 
   const handleConfirmAuth = async () => {
     setPendingAuth(true);
-    await auth.authenticate({ forceTelegram: true });
-    setPendingAuth(false);
-    setShowConfirmDialog(false);
+    try {
+      await auth.authenticate({ forceTelegram: true });
+    } catch (err) {
+      console.error("Auth confirm error:", err);
+    } finally {
+      setPendingAuth(false);
+      setShowConfirmDialog(false);
+    }
   };
 
   const handleDenyAuth = () => {
@@ -364,6 +371,7 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
       setDevRoleOverride,
       authenticate: auth.authenticate,
       logout: auth.logout,
+      applyProfileSettings: auth.applyProfileSettings,
       updateProfile: auth.updateProfile,
       addAddress: auth.addAddress,
       updateAddress: auth.updateAddress,

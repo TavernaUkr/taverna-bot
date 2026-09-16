@@ -19,7 +19,7 @@ from sqlalchemy.orm import selectinload
 from database.db import get_db
 from database.models import Order, OrderItem, OrderStatus, PaymentStatus, ProductVariant, Supplier, SupplierType
 from api_models import OrderCreate, OrderCreateResponse
-from services.mydrop_api import create_order_in_mydrop, MyDropAPIError
+from services.mydrop_api import create_order_in_mydrop, denamespace_supplier_code, MyDropAPIError
 from config_reader import config
 
 logger = logging.getLogger(__name__)
@@ -233,7 +233,7 @@ async def _sync_order_to_mydrop(order: Order, order_items: List[OrderItem], db: 
 
     mydrop_items = [
         {
-            "supplier_sku": item.sku,
+            "supplier_sku": denamespace_supplier_code(supplier.id, item.sku),
             "product_name": item.product_name,
             "quantity": item.quantity,
             "price": item.price_per_item,

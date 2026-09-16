@@ -27,6 +27,7 @@ import {
   fetchMySupplier,
   requestSupplierDeletion,
 } from "@/lib/backendApi";
+import { SupplierImportProgress } from "@/components/supplier/SupplierImportProgress";
 
 interface ShopInfo {
   id: string;
@@ -257,8 +258,8 @@ export default function MyShops() {
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div>
-              <h1 className="font-bold text-lg text-foreground">Керування магазинами</h1>
-              <p className="text-xs text-muted-foreground">
+              <h1 className="font-bold text-lg text-slate-900 dark:text-white">Керування магазинами</h1>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
                 {isShopManager ? "Магазини, якими ви керуєте" : "Ваші магазини та партнерства"}
               </p>
             </div>
@@ -279,6 +280,8 @@ export default function MyShops() {
         </div>
       </div>
 
+      {(isSupplier || isAdmin) && <SupplierImportProgress variant="inline" />}
+
       <div className="p-4 space-y-4 pb-24">
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
@@ -290,8 +293,8 @@ export default function MyShops() {
               <Store className="h-8 w-8 text-muted-foreground/50" />
             </div>
             <div>
-              <h4 className="font-semibold text-foreground">Магазинів ще немає</h4>
-              <p className="text-sm text-muted-foreground mt-1">
+              <h4 className="font-semibold text-slate-900 dark:text-white">Магазинів ще немає</h4>
+              <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
                 {isShopManager
                   ? "Вас ще не призначено менеджером жодного магазину"
                   : "Зареєструйте свій перший магазин"}
@@ -505,13 +508,15 @@ export default function MyShops() {
       >
         <DialogContent className="sm:max-w-[400px] mx-4">
           <DialogHeader>
-            <DialogTitle>Видалити магазин</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-slate-900 dark:text-white">Видалити магазин</DialogTitle>
+            <DialogDescription className="text-slate-500 dark:text-slate-400">
               Магазин не зникне одразу. Адміністратор отримає заявку і перевірить її вручну.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-2">
-            <Label htmlFor="deletion-reason">Вкажіть причину видалення (обов'язково)</Label>
+            <Label htmlFor="deletion-reason" className="text-slate-800 dark:text-slate-200">
+              Вкажіть причину видалення (обов'язково)
+            </Label>
             <Textarea
               id="deletion-reason"
               value={deleteReason}

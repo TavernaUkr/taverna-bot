@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ShoppingCart, Search, Heart, Gift, Info, Trophy, Wallet, Globe, Flag, ArrowUpRight, Eye, Users, Megaphone, MoreHorizontal, MessageCircle, ShieldAlert, DollarSign } from "lucide-react";
+import { ShoppingCart, Search, Heart, Gift, Info, Trophy, Wallet, Globe, Flag, ArrowUpRight, Eye, Users, Megaphone, MoreHorizontal, ShieldAlert, DollarSign } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import tavernaLogo from "@/assets/taverna-logo.png";
 import { AppInfoModal } from "./AppInfoModal";
@@ -8,14 +8,6 @@ import { RegionSelectorModal } from "./RegionSelectorModal";
 import { WalletBadgeCloud, WalletCloudActions, type WalletCloudAction, type WalletCloudVariant } from "./wallet/WalletBadgeCloud";
 import { ReferralSheet } from "./referrals/ReferralSheet";
 import { RotatingHintCloud, type RotatingHintItem } from "./header/HintChip";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -58,7 +50,6 @@ export const Header = ({
   const [isLangOpen, setIsLangOpen] = useState(false);
   const [isRegionOpen, setIsRegionOpen] = useState(false);
   const [isReferralsOpen, setIsReferralsOpen] = useState(false);
-  const [isGuestSupportOpen, setIsGuestSupportOpen] = useState(false);
   const { effectiveRole } = useTelegramAuthContext() as any;
   const { wallet } = useWallet();
 
@@ -90,20 +81,15 @@ export const Header = ({
 
   const [heartPulse, setHeartPulse] = useState(false);
 
-  const colorActions: WalletCloudAction[] = isAdmin
-    ? [{ id: "danger", label: "Небезпечна зона", icon: ShieldAlert, tone: "danger", onClick: () => navigate("/admin-dashboard?zone=danger") }]
-    : isManager || isModerator || isSupplier
-      ? [{ id: "chats", label: "Чати", icon: MessageCircle, tone: "chat", onClick: () => navigate("/manager-chats") }]
-      : [{
-          id: "support",
-          label: "Підтримка",
-          icon: MessageCircle,
-          tone: "danger",
-          onClick: () => {
-            if (isGuest) setIsGuestSupportOpen(true);
-            else navigate("/support?contact=1");
-          },
-        }];
+  const killSwitchActions: WalletCloudAction[] = isAdmin
+    ? [{
+        id: "danger",
+        label: "Технічні роботи",
+        icon: ShieldAlert,
+        tone: "danger",
+        onClick: () => navigate("/admin-dashboard?zone=danger"),
+      }]
+    : [];
 
   const underWalletActions: WalletCloudAction[] = isSupplier
     ? [{ id: "payout", label: "Вивести", icon: ArrowUpRight, tone: "success", onClick: () => navigate("/wallet?action=payout") }]
@@ -139,7 +125,7 @@ export const Header = ({
               <Info className="h-2.5 w-2.5 text-primary-foreground" />
             </div>
           </button>
-          <div className="flex flex-col justify-center leading-none min-w-0 shrink-0">
+          <div className="flex flex-col justify-center leading-none min-w-0 shrink">
             <span className="font-brand italic text-[20px] text-brand-royal tracking-[-0.02em] whitespace-nowrap">
               Taverna
             </span>
@@ -148,9 +134,9 @@ export const Header = ({
             </span>
           </div>
 
-          <div className="ml-auto grid grid-cols-[repeat(5,34px)] gap-x-1 gap-y-1.5 items-start min-w-0">
+          <div className="ml-auto grid grid-cols-[repeat(5,34px)] gap-x-1 gap-y-1.5 items-start shrink-0">
             <div className="col-start-1 row-start-1">
-              <WalletCloudActions actions={colorActions} />
+              <WalletCloudActions actions={killSwitchActions} />
             </div>
             <button
               onClick={() => navigate(isGuest ? "/login" : "/wallet")}
@@ -277,25 +263,6 @@ export const Header = ({
       <LanguageSelectorModal isOpen={isLangOpen} onClose={() => setIsLangOpen(false)} />
       <RegionSelectorModal isOpen={isRegionOpen} onClose={() => setIsRegionOpen(false)} />
       <ReferralSheet open={isReferralsOpen} onOpenChange={setIsReferralsOpen} />
-      <Dialog open={isGuestSupportOpen} onOpenChange={setIsGuestSupportOpen}>
-        <DialogContent className="sm:max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Зв'язок з підтримкою</DialogTitle>
-            <DialogDescription>
-              Щоб написати в підтримку, спочатку зареєструйтесь.
-            </DialogDescription>
-          </DialogHeader>
-          <Button
-            className="w-full"
-            onClick={() => {
-              setIsGuestSupportOpen(false);
-              navigate("/login?mode=signup&next=/support&reason=support");
-            }}
-          >
-            Зареєструватися
-          </Button>
-        </DialogContent>
-      </Dialog>
     </>);
 
 };

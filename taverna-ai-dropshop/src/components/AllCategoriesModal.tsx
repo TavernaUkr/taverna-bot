@@ -8,7 +8,7 @@ import { fetchBackendCategories, fetchBackendFilters, BackendApiError, type Back
 import { getCategoryGradient } from "@/lib/categoryColors";
 import { encodeSubCategoryParam, groupSubcategories } from "@/utils/categoryParser";
 import { SmartSubcategoryList } from "@/components/catalog/SmartSubcategoryList";
-import { useRegisterBack } from "@/hooks/useAppBack";
+import { useModalHistory } from "@/hooks/useModalHistory";
 import {
   PimFilterPills,
   FALLBACK_SEASONS,
@@ -152,6 +152,19 @@ export const AllCategoriesModal = ({ isOpen, onClose, onSelectCategory }: AllCat
   const [liveSubs, setLiveSubs] = useState<BackendCategorySub[] | null>(null);
   const [isFiltersLoading, setIsFiltersLoading] = useState(false);
 
+  const closeLayer = () => {
+    if (selectedCategory) {
+      setSelectedCategory(null);
+      setPillSeasons([]);
+      setPillNiches([]);
+      setLiveSubs(null);
+      return;
+    }
+    onClose();
+  };
+
+  useModalHistory(isOpen, closeLayer);
+
   // Меню будуємо з GET /api/v1/products/categories — лише AI-тексти
   // (Одяг, Взуття...) з підкатегоріями, без сирих MyDrop ID.
   useEffect(() => {
@@ -235,17 +248,6 @@ export const AllCategoriesModal = ({ isOpen, onClose, onSelectCategory }: AllCat
       cancelled = true;
     };
   }, [isOpen, selectedCategory, pillSeasons, pillNiches]);
-
-  useRegisterBack(isOpen, () => {
-    if (selectedCategory) {
-      setSelectedCategory(null);
-      setPillSeasons([]);
-      setPillNiches([]);
-      setLiveSubs(null);
-      return;
-    }
-    onClose();
-  });
 
   if (!isOpen) return null;
 

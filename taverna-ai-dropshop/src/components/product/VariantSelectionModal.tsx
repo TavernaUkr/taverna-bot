@@ -10,6 +10,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { ProductVariantSelector } from "./ProductVariantSelector";
 import { hapticImpact } from "@/lib/haptics";
+import { vibrate } from "@/hooks/useTelegramUI";
+import { useModalHistory } from "@/hooks/useModalHistory";
 import { toast } from "sonner";
 import type { BackendProductOption, BackendProductVariant } from "@/lib/backendApi";
 
@@ -48,6 +50,8 @@ export function VariantSelectionModal({
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
   const [selectedColor, setSelectedColor] = useState<string | null>(null);
   const [quantity, setQuantity] = useState(1);
+
+  useModalHistory(isOpen, onClose);
 
   // Опції "Розмір" і "Колір" шукаємо в масиві options (той самий підхід,
   // що і в ProductDetail.tsx / useProducts.tsx) — це ЄДИНЕ місце, звідки
@@ -148,7 +152,7 @@ export function VariantSelectionModal({
       return;
     }
 
-    hapticImpact("medium");
+    vibrate("success");
     // Сам toast "додано до кошика" показує батьківський onAddToCart (той
     // самий handleAddToCart у Index.tsx/SearchResults.tsx, який вже це
     // робить після успішного addItem) — тут його НЕ дублюємо.

@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { hapticSelection } from "@/lib/haptics";
+import { useModalHistory } from "@/hooks/useModalHistory";
 import type { WalletLimit } from "@/hooks/useWallet";
 
 export const TOPUP_PROVIDERS: { id: string; label: string; hint: string }[] = [
@@ -34,6 +35,8 @@ export function TopUpSheet({ open, onOpenChange, limits, mode, onTopUp, onCheckT
   const [amount, setAmount] = useState("500");
   const [provider, setProvider] = useState("telegram_wallet");
   const [isBusy, setIsBusy] = useState(false);
+
+  useModalHistory(open, () => onOpenChange(false));
 
   const isProviderLive = (id: string) =>
     mode === "sandbox" || limits.find((l) => l.provider === id)?.is_active !== false;

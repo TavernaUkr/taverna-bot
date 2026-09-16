@@ -88,8 +88,8 @@ def validate_init_data(init_data: str) -> Optional[Dict[str, Any]]:
 
         auth_date_ts = int(parsed_data.get("auth_date", 0) or 0)
         auth_date = datetime.fromtimestamp(auth_date_ts, timezone.utc)
-        if datetime.now(timezone.utc) - auth_date > timedelta(hours=1):
-            logger.warning("Invalid initData: Data is older than 1 hour")
+        if datetime.now(timezone.utc) - auth_date > timedelta(hours=24):
+            logger.warning("Invalid initData: Data is older than 24 hours")
             return None
 
         data_check_string = "\n".join(
@@ -105,8 +105,19 @@ def validate_init_data(init_data: str) -> Optional[Dict[str, Any]]:
         ).hexdigest()
 
         if not hmac.compare_digest(calculated_hash, hash_to_check):
-            logger.error("CRITICAL: Invalid initData hash. Possible attack.")
-            return None
+            if "signature" in parsed_data:
+                without_signature = {
+                    k: v for k, v in parsed_data.items() if k != "signature"
+                }
+                data_check_string = "\n".join(
+                    f"{k}={v}" for k, v in sorted(without_signature.items())
+                )
+                calculated_hash = hmac.new(
+                    secret_key, data_check_string.encode("utf-8"), hashlib.sha256
+                ).hexdigest()
+            if not hmac.compare_digest(calculated_hash, hash_to_check):
+                logger.error("CRITICAL: Invalid initData hash. Possible attack.")
+                return None
 
         if "user" in parsed_data:
             return json.loads(parsed_data["user"])

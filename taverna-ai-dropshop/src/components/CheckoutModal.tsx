@@ -29,6 +29,7 @@ import {
 import { DeliveryEstimate } from './checkout/DeliveryEstimate';
 import { WalletPayment } from './checkout/WalletPayment';
 import { useWallet } from '@/hooks/useWallet';
+import { useModalHistory } from '@/hooks/useModalHistory';
 
 const PROMO_STORAGE_KEY = "taverna_active_promo";
 
@@ -410,6 +411,8 @@ export function CheckoutModal({ isOpen, onClose, items, onOrderComplete }: Check
       setOrderNotes('');
     }
   }, [isOpen, isAuthenticated, profile, isMultiSupplier, savedAddresses]);
+
+  useModalHistory(isOpen, onClose);
 
   if (!isOpen) return null;
 

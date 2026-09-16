@@ -71,7 +71,7 @@ async def main() -> None:
 
     processor = ProductAIProcessor()
     if not processor.is_ready:
-        print("❌ GEMINI_API_KEY відсутній або Gemini не ініціалізувався. Перевір .env.")
+        print("❌ GEMINI_API_KEYS відсутній або Gemini не ініціалізувався. Перевір .env.")
         sys.exit(1)
 
     stats = {"ok": 0, "fail": 0, "empty": 0}

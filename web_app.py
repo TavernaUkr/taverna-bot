@@ -39,7 +39,7 @@ from services import (
     payout_service, publisher_service,
     omnichannel_service as ads_service # <-- ОНОВЛЕНО
 )
-from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession, ensure_supplier_status_timestamps
+from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession, ensure_supplier_status_timestamps, ensure_user_settings_columns
 from services.ai_queue_worker import start_ai_product_queue
 from database.models import * # (Імпортуємо все)
 from config_reader import config
@@ -49,6 +49,7 @@ from handlers import (
 )
 from api.products import router as products_router  # Import products router
 from api.orders import router as orders_router  # Checkout з Mini App (POST /api/v1/orders/)
+from api.users import router as users_router  # PATCH /api/v1/users/me/settings
 from api.auth import router as twa_auth_router
 from api.suppliers import router as twa_suppliers_router
 from api.admin_suppliers import router as admin_suppliers_router
@@ -67,7 +68,7 @@ app.add_middleware(
         "http://localhost:5173",   # React dev-сервер (Vite, альтернативний порт)
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -79,6 +80,10 @@ async def startup_event():
         await ensure_supplier_status_timestamps()
     except Exception as e:
         logger.error("Не вдалося додати approved_at/deleted_at: %s", e, exc_info=True)
+    try:
+        await ensure_user_settings_columns()
+    except Exception as e:
+        logger.error("Не вдалося додати haptic_enabled/notifications_enabled: %s", e, exc_info=True)
     try:
         await start_ai_product_queue()
     except Exception as e:
@@ -464,6 +469,7 @@ app.include_router(supplier_dashboard_handlers.router)
 app.include_router(client_handlers.router)
 app.include_router(products_router)  # Include products router
 app.include_router(orders_router)  # Checkout з Mini App (POST /api/v1/orders/)
+app.include_router(users_router)  # PATCH /api/v1/users/me/settings
 
 # --- Віддача статичних файлів (Frontend) ---
 static_dir = Path(__file__).parent / "static"

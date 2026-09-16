@@ -5,7 +5,7 @@ import { VerifiedBadge } from "./ui/verified-badge";
 import { FindSimilarButton } from "./product/FindSimilarButton";
 import { VariantSelectionModal } from "./product/VariantSelectionModal";
 import { useState } from "react";
-import { hapticImpact } from "@/lib/haptics";
+import { vibrate } from "@/hooks/useTelegramUI";
 import type { BackendProductVariant, BackendProductOption } from "@/lib/backendApi";
 
 interface ProductCardProps {
@@ -121,7 +121,7 @@ export const ProductCard = ({
 
   const handleAddToCart = (e: React.MouseEvent) => {
     e.stopPropagation();
-    hapticImpact("medium");
+    vibrate("light");
     if (hasOptions) {
       // Товар має розміри/кольори — додавати "навмання" без variant_id
       // небезпечно (замовлення на бекенді його не приймуть). Відкриваємо
@@ -144,7 +144,7 @@ export const ProductCard = ({
 
   const handleToggleFavorite = (e: React.MouseEvent) => {
     e.stopPropagation();
-    hapticImpact("light");
+    vibrate("light");
     onToggleFavorite?.();
   };
 

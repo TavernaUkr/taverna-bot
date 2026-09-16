@@ -4,7 +4,7 @@ import {
   ArrowLeft, Users, Check, X, Loader2, DollarSign, ShoppingCart, Package,
   Shield, UserCog, RefreshCw,
   Crown, Tag, Gift, Brain, MessageSquare, Trophy, Store, Megaphone, Wallet,
-  Phone, Link2, Bot, Trash2, MessageCircle, History, AlertTriangle,
+  Phone, Link2, Bot, Trash2, MessageCircle, History, AlertTriangle, RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
@@ -15,6 +15,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
 import { useTelegramAuthContext } from '@/components/TelegramAuthProvider';
 import { hapticSelection } from '@/lib/haptics';
+import { vibrate } from '@/hooks/useTelegramUI';
 import { PromoCodesManager } from '@/components/admin/PromoCodesManager';
 import { BonusesManager } from '@/components/admin/BonusesManager';
 import { AIInsightsDashboard } from '@/components/admin/AIInsightsDashboard';
@@ -22,6 +23,7 @@ import { ManualSupplierForm } from '@/components/admin/ManualSupplierForm';
 import { SupportChatsViewer } from '@/components/admin/SupportChatsViewer';
 import { GiveawaysManager } from '@/components/admin/GiveawaysManager';
 import { AdminStoreManager } from '@/components/admin/AdminStoreManager';
+import { SupplierImportProgress } from '@/components/supplier/SupplierImportProgress';
 import { AdminStoreOrders } from '@/components/admin/AdminStoreOrders';
 import { OrdersManager } from '@/components/admin/OrdersManager';
 import { AIOrderReports } from '@/components/admin/AIOrderReports';
@@ -35,10 +37,12 @@ import {
   fetchPendingSupplierApplications,
   fetchSupplierDeletionRequests,
   fetchSupplierHistory,
+  fetchAdminStores,
   approveSupplierApplication,
   rejectSupplierApplication,
   deleteSupplierAccount,
   approveSupplierDeletion,
+  restoreSupplier,
   type BackendPendingSupplierApplication,
 } from '@/lib/backendApi';
 
@@ -172,7 +176,7 @@ export default function AdminDashboard() {
   const [historySuppliers, setHistorySuppliers] = useState<SupplierApplication[]>([]);
   const [applicationsSubTab, setApplicationsSubTab] = useState<'partnership' | 'deletion' | 'history'>('partnership');
   const [processingAppId, setProcessingAppId] = useState<string | null>(null);
-  const [processingAction, setProcessingAction] = useState<'approve' | 'reject' | 'delete' | 'approve-deletion' | null>(null);
+  const [processingAction, setProcessingAction] = useState<'approve' | 'reject' | 'delete' | 'approve-deletion' | 'restore' | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [orderStats, setOrderStats] = useState<OrderStats>({
     totalOrders: 0, totalRevenue: 0, totalMargin: 0,
@@ -260,10 +264,10 @@ export default function AdminDashboard() {
 
   const fetchOrderStats = async () => {
     try {
-      const [ordersResult, ticketsResult, suppliersResult] = await Promise.all([
+      const [ordersResult, ticketsResult, stores] = await Promise.all([
         supabase.from('orders').select('id, total, subtotal, status'),
         supabase.from('support_tickets').select('id').eq('status', 'open'),
-        supabase.from('suppliers').select('id'),
+        fetchAdminStores(adminTelegramId ? Number(adminTelegramId) : undefined).catch(() => []),
       ]);
       const orders = ordersResult.data || [];
       const tickets = ticketsResult.data || [];
@@ -274,7 +278,7 @@ export default function AdminDashboard() {
         totalMargin: Math.round(totalRevenue * 0.2),
         pendingOrders: orders.filter(o => o.status === 'pending').length,
         openTickets: tickets.length,
-        suppliersCount: (suppliersResult.data || []).length,
+        suppliersCount: stores.length,
       });
     } catch (err) {
       console.error('Error fetching stats:', err);
@@ -283,6 +287,7 @@ export default function AdminDashboard() {
 
   const handleApprove = async (id: number) => {
     if (processingAppId) return;
+    vibrate("success");
     const idStr = String(id);
     setProcessingAppId(idStr);
     setProcessingAction('approve');
@@ -305,6 +310,7 @@ export default function AdminDashboard() {
 
   const handleReject = async (id: number) => {
     if (processingAppId) return;
+    vibrate("error");
     const idStr = String(id);
     setProcessingAppId(idStr);
     setProcessingAction('reject');
@@ -388,6 +394,28 @@ export default function AdminDashboard() {
     }
   };
 
+  const handleRestore = async (id: number) => {
+    if (processingAppId) return;
+    const idStr = String(id);
+    setProcessingAppId(idStr);
+    setProcessingAction("restore");
+    try {
+      await restoreSupplier(
+        id,
+        adminTelegramId ? Number(adminTelegramId) : undefined
+      );
+      hapticSelection();
+      toast.success("Магазин і товари відновлено.");
+      fetchHistoryList();
+    } catch (err: any) {
+      console.error("Restore supplier error:", err);
+      toast.error(err?.message || "Не вдалося відновити магазин");
+    } finally {
+      setProcessingAppId(null);
+      setProcessingAction(null);
+    }
+  };
+
   const switchApplicationsTab = (tab: 'partnership' | 'deletion' | 'history') => {
     hapticSelection();
     setApplicationsSubTab(tab);
@@ -407,8 +435,8 @@ export default function AdminDashboard() {
           <div className="w-16 h-16 rounded-full bg-destructive/20 flex items-center justify-center mx-auto">
             <Shield className="h-8 w-8 text-destructive" />
           </div>
-          <h1 className="text-xl font-bold text-foreground">Доступ заборонено</h1>
-          <p className="text-muted-foreground">Ця сторінка доступна лише адміністраторам</p>
+          <h1 className="text-xl font-bold text-slate-900 dark:text-white">Доступ заборонено</h1>
+          <p className="text-slate-500 dark:text-slate-400">Ця сторінка доступна лише адміністраторам</p>
           <Button onClick={() => navigate('/')}>На головну</Button>
         </div>
       </div>
@@ -429,7 +457,7 @@ export default function AdminDashboard() {
                 <Crown className="h-5 w-5 text-warning" />
                 Адмін-панель
               </h1>
-              <p className="text-xs text-muted-foreground">Taverna · Повний контроль</p>
+              <p className="text-xs text-slate-600 dark:text-slate-300">Taverna · Повний контроль</p>
             </div>
           </div>
           <Button variant="outline" size="sm" onClick={() => {
@@ -462,6 +490,8 @@ export default function AdminDashboard() {
           <p className="text-[10px] text-muted-foreground">Магазинів</p>
         </CardContent></Card>
       </div>
+
+      <SupplierImportProgress isAdmin variant="inline" />
 
       {/* Alert badges */}
       <div className="px-4 flex gap-2 flex-wrap">
@@ -658,8 +688,8 @@ export default function AdminDashboard() {
                             <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
                               <Users className="h-8 w-8 text-muted-foreground" />
                             </div>
-                            <p className="font-medium text-foreground">Немає нових заявок</p>
-                            <p className="text-sm text-muted-foreground">Всі заявки оброблені</p>
+                            <p className="font-medium text-slate-900 dark:text-white">Немає нових заявок</p>
+                            <p className="text-sm text-slate-500 dark:text-slate-400">Всі заявки оброблені</p>
                           </div>
                         ) : (
                           pendingSuppliers.map((app) => {
@@ -786,8 +816,8 @@ export default function AdminDashboard() {
                             <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
                               <Trash2 className="h-8 w-8 text-muted-foreground" />
                             </div>
-                            <p className="font-medium text-foreground">Немає заявок на видалення</p>
-                            <p className="text-sm text-muted-foreground">Постачальники ще не просили закрити магазин</p>
+                            <p className="font-medium text-slate-900 dark:text-white">Немає заявок на видалення</p>
+                            <p className="text-sm text-slate-500 dark:text-slate-400">Постачальники ще не просили закрити магазин</p>
                           </div>
                         ) : (
                           deletionRequests.map((app) => {
@@ -869,8 +899,8 @@ export default function AdminDashboard() {
                             <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
                               <History className="h-8 w-8 text-muted-foreground" />
                             </div>
-                            <p className="font-medium text-foreground">Історія порожня</p>
-                            <p className="text-sm text-muted-foreground">Тут з'являться схвалені, відхилені та видалені магазини</p>
+                          <p className="font-medium text-slate-900 dark:text-white">Історія порожня</p>
+                          <p className="text-sm text-slate-500 dark:text-slate-400">Тут з'являться схвалені, відхилені та видалені магазини</p>
                           </div>
                         ) : (
                           historySuppliers.map((app) => (
@@ -885,7 +915,7 @@ export default function AdminDashboard() {
                                     {historyStatusLabel(app.status)}
                                   </Badge>
                                 </div>
-                                <div className="space-y-1 text-xs text-gray-500">
+                                <div className="space-y-1 text-xs text-gray-500 dark:text-gray-400">
                                   <p>📅 Створено: {formatDate(app.created_at)}</p>
                                   {app.approved_at ? (
                                     <p>✅ Схвалено: {formatDate(app.approved_at)}</p>
@@ -894,6 +924,22 @@ export default function AdminDashboard() {
                                     <p>🗑 Видалено: {formatDate(app.deleted_at)}</p>
                                   ) : null}
                                 </div>
+                                {app.status === "deleted" ? (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="w-full gap-1.5"
+                                    disabled={processingAppId === app.id}
+                                    onClick={() => handleRestore(Number(app.id))}
+                                  >
+                                    {processingAppId === app.id && processingAction === "restore" ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <RotateCcw className="h-3.5 w-3.5" />
+                                    )}
+                                    Відновити магазин
+                                  </Button>
+                                ) : null}
                               </CardContent>
                             </Card>
                           ))

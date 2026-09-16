@@ -8,6 +8,7 @@ import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { useNavigate } from "react-router-dom";
 import { hapticImpact } from "@/lib/haptics";
 import { useFloatingToolsOptional } from "@/components/floating/FloatingToolsContext";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 interface Message {
   id: string;
@@ -76,6 +77,8 @@ export const AIChatAssistant = () => {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
+
+  useModalHistory(isOpen, () => setIsOpen(false));
 
   useEffect(() => {
     setChatOpen?.(isOpen);

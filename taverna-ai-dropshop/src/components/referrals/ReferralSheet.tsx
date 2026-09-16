@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { hapticNotification, hapticSelection } from "@/lib/haptics";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 const FALLBACK_CODE = "TAV-8A2B5C";
 
@@ -37,6 +38,8 @@ export function ReferralSheet({ open, onOpenChange }: ReferralSheetProps) {
   const [copied, setCopied] = useState(false);
   const [referralCode, setReferralCode] = useState(FALLBACK_CODE);
   const [invitedCount, setInvitedCount] = useState(0);
+
+  useModalHistory(open, () => onOpenChange(false));
 
   useEffect(() => {
     if (!open || !profile?.id) return;

@@ -46,6 +46,10 @@ def create_token_response(user: User) -> TokenResponse:
         "username": user.username,
         "role": user.role.value,
         "loyalty_points": int(getattr(user, "loyalty_points", 0) or 0),
+        "haptic_enabled": True if getattr(user, "haptic_enabled", None) is None else bool(user.haptic_enabled),
+        "notifications_enabled": (
+            True if getattr(user, "notifications_enabled", None) is None else bool(user.notifications_enabled)
+        ),
     }
 
     # ✅ Валідовуємо через Pydantic

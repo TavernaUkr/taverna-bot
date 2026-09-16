@@ -1,6 +1,6 @@
 # services/ai_processor.py
 """
-PIM (Product Information Management) через Gemini REST:
+PIM (Product Information Management) через google.genai SDK:
 жорстка таксономія main_category / target_niche + динамічні атрибути + SEO-опис.
 """
 import asyncio
@@ -9,13 +9,67 @@ import logging
 import re
 from typing import Any, Dict, Optional
 
-import aiohttp
+try:
+    from google import genai
+    from google.genai import types
+    from google.genai import errors as genai_errors
+except ImportError:
+    genai = None  # type: ignore
+    types = None  # type: ignore
+    genai_errors = None  # type: ignore
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config_reader import config
 from database.models import Product, ProductAIStatus
+from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager
 
 logger = logging.getLogger(__name__)
+
+def _gemini_http_status(exc: Exception) -> Optional[int]:
+    """Дістає HTTP-код з google.genai.errors.ClientError / APIError."""
+    for attr in ("code", "status_code"):
+        raw = getattr(exc, attr, None)
+        try:
+            if raw is None:
+                continue
+            value = int(raw)
+            if value:
+                return value
+        except (TypeError, ValueError):
+            continue
+    msg = str(exc)
+    status_name = str(getattr(exc, "status", "") or "")
+    combined = f"{msg} {status_name}".upper()
+    if "429" in msg or "RESOURCE_EXHAUSTED" in combined or "QUOTA" in combined:
+        return 429
+    if "CLIENTCONNECTORDNSERROR" in combined:
+        return 429
+    if "503" in msg or "UNAVAILABLE" in combined:
+        return 503
+    return None
+
+
+def _exception_text(exc: BaseException) -> str:
+    parts = [str(exc), repr(exc), type(exc).__name__]
+    nested = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if isinstance(nested, BaseException):
+        parts.extend([str(nested), type(nested).__name__])
+    return " ".join(parts)
+
+
+def _is_sdk_quota_crash(exc: BaseException) -> bool:
+    """
+    google-genai може впасти AttributeError (ClientConnectorDNSError)
+    замість errors.ClientError 429 — тоді товар не має йти в failed.
+    """
+    error_str = _exception_text(exc)
+    return (
+        "ClientConnectorDNSError" in error_str
+        or "429" in error_str
+        or "503" in error_str
+    )
+
 
 class GeminiCapacityError(Exception):
     """Gemini 429 / 503 — товар треба повернути в чергу, не падати."""
@@ -305,35 +359,36 @@ def _extract_ai_fields(data: Dict[str, Any], source_text: str) -> Optional[Dict[
     return fields
 
 
-def _resolve_gemini_api_key(api_key: Optional[str] = None) -> str:
-    if api_key and str(api_key).strip():
-        return str(api_key).strip()
-    secret = getattr(config, "gemini_api_key", None)
-    if secret:
-        return secret.get_secret_value().strip()
-    return ""
-
-
 class ProductAIProcessor:
     """Бере сирий Product з БД, питає Gemini, оновлює поля в сесії (без commit)."""
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = _resolve_gemini_api_key(api_key)
+        if api_key and str(api_key).strip():
+            from services.gemini_key_manager import GeminiKeyManager
+            self._key_manager = GeminiKeyManager(
+                [str(api_key).strip(), *list(config.GEMINI_API_KEYS)]
+            )
+        else:
+            self._key_manager = get_key_manager()
         self.model_name = "gemini-3.6-flash"
         self.fallback_model = "gemini-3.6-flash"
 
-        if not self.api_key:
-            logger.warning("GEMINI_API_KEY не знайдено. AI-обробку товарів буде пропущено.")
+        if genai is None:
+            logger.warning("google-genai не встановлено. AI-обробку товарів буде пропущено.")
+            return
+        if not self._key_manager.has_keys():
+            logger.warning("GEMINI_API_KEYS не знайдено. AI-обробку товарів буде пропущено.")
             return
 
         logger.info(
-            "ProductAIProcessor: Gemini готовий (%s).",
+            "ProductAIProcessor: Gemini готовий (%s), ключів: %s.",
             self.model_name,
+            self._key_manager.key_count,
         )
 
     @property
     def is_ready(self) -> bool:
-        return bool(self.api_key)
+        return bool(genai is not None and self._key_manager and self._key_manager.has_keys())
 
     def _build_user_prompt(self, product: Product) -> str:
         raw_name = (product.name or "").strip()
@@ -358,37 +413,103 @@ class ProductAIProcessor:
             "якщо стать не застосовується.\n"
         )
 
+    def _raise_capacity_if_needed(self, exc: Exception) -> None:
+        """429/503 → GeminiCapacityError, щоб черга повернула товар у pending."""
+        status = _gemini_http_status(exc)
+        client_error = getattr(genai_errors, "ClientError", None) if genai_errors else None
+        server_error = getattr(genai_errors, "ServerError", None) if genai_errors else None
+        api_error = getattr(genai_errors, "APIError", None) if genai_errors else None
+        is_sdk_error = bool(
+            (client_error and isinstance(exc, client_error))
+            or (server_error and isinstance(exc, server_error))
+            or (api_error and isinstance(exc, api_error))
+        )
+        if status in (429, 503) or (is_sdk_error and status in (429, 503)):
+            raise GeminiCapacityError(
+                int(status or 429),
+                "API Quota/Rate Limit Exceeded",
+            ) from exc
+        if is_sdk_error and status is None:
+            msg = str(exc)
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg.upper() or "QUOTA" in msg.upper():
+                raise GeminiCapacityError(429, "API Quota/Rate Limit Exceeded") from exc
+            if "503" in msg or "UNAVAILABLE" in msg.upper():
+                raise GeminiCapacityError(503, "API Quota/Rate Limit Exceeded") from exc
+
+    def _is_client_error(self, exc: Exception) -> bool:
+        if not genai_errors:
+            return False
+        client_error = getattr(genai_errors, "ClientError", None)
+        server_error = getattr(genai_errors, "ServerError", None)
+        return bool(
+            (client_error and isinstance(exc, client_error))
+            or (server_error and isinstance(exc, server_error))
+        )
+
     async def _complete(self, model_name: str, user_prompt: str) -> str:
-        api_url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{model_name}:generateContent?key={self.api_key}"
-        )
-        full_prompt = (
-            f"System Instruction:\n{_SYSTEM_PROMPT}\n\nUser Input:\n{user_prompt}"
-        )
-        payload = {
-            "contents": [{"parts": [{"text": full_prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json"},
-        }
-        headers = {"Content-Type": "application/json"}
+        if genai is None or types is None or not self._key_manager:
+            raise Exception("Gemini client is not configured")
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(api_url, headers=headers, json=payload) as resp:
-                if resp.status in (429, 503):
-                    body_preview = (await resp.text())[:300]
-                    raise GeminiCapacityError(
-                        resp.status,
-                        f"Gemini {resp.status}: {body_preview}",
+        last_error: Optional[Exception] = None
+        attempts = max(1, self._key_manager.key_count)
+        for _ in range(attempts):
+            try:
+                active_key = self._key_manager.get_next_active_key()
+            except AllKeysExhaustedError as e:
+                raise GeminiCapacityError(429, str(e)) from e
+
+            client = genai.Client(api_key=active_key)
+            try:
+                response = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=_SYSTEM_PROMPT,
+                        response_mime_type="application/json",
+                    ),
+                )
+            except Exception as e:
+                error_str = str(e)
+                if (
+                    "ClientConnectorDNSError" in error_str
+                    or "429" in error_str
+                    or "503" in error_str
+                    or _is_sdk_quota_crash(e)
+                ):
+                    self._key_manager.mark_key_exhausted(active_key)
+                    logger.warning(
+                        "Gemini SDK/quota на ключі ...%s — ключ заблоковано. %s",
+                        active_key[-4:],
+                        error_str[:240],
                     )
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise Exception(f"Gemini API Error {resp.status}: {error_text}")
-                data = await resp.json()
+                    raise GeminiCapacityError(
+                        429,
+                        "API Quota Exceeded (Google SDK Bug)",
+                    ) from e
+                status = _gemini_http_status(e)
+                if status == 429:
+                    self._key_manager.mark_key_exhausted(active_key)
+                    last_error = e
+                    logger.warning(
+                        "Gemini 429 на ключі ...%s — переходжу на наступний.",
+                        active_key[-4:],
+                    )
+                    continue
+                self._raise_capacity_if_needed(e)
+                api_error = getattr(genai_errors, "APIError", None) if genai_errors else None
+                if api_error and isinstance(e, api_error):
+                    raise Exception(f"Gemini API Error {e.code}: {e.message or e}") from e
+                raise
 
-        try:
-            return data["candidates"][0]["content"]["parts"][0]["text"]
-        except (KeyError, IndexError, TypeError):
-            raise Exception(f"Gemini повернув неочікувану відповідь: {data}")
+            text = (response.text or "").strip()
+            if not text:
+                raise Exception(f"Gemini повернув порожню відповідь (модель {model_name})")
+            return text
+
+        raise GeminiCapacityError(
+            429,
+            "API Quota/Rate Limit Exceeded",
+        ) from last_error
 
     async def process_product(self, product: Product, db_session: AsyncSession) -> bool:
         """
@@ -470,6 +591,25 @@ class ProductAIProcessor:
             except GeminiCapacityError:
                 raise
             except Exception as e:
+                error_str = str(e)
+                if (
+                    "ClientConnectorDNSError" in error_str
+                    or "429" in error_str
+                    or "503" in error_str
+                    or _is_sdk_quota_crash(e)
+                ):
+                    raise GeminiCapacityError(
+                        429,
+                        "API Quota Exceeded (Google SDK Bug)",
+                    ) from e
+                if self._is_client_error(e):
+                    status = _gemini_http_status(e)
+                    if status in (429, 503):
+                        raise GeminiCapacityError(
+                            status,
+                            "API Quota/Rate Limit Exceeded",
+                        ) from e
+                self._raise_capacity_if_needed(e)
                 logger.error(
                     "❌ Gemini помилка для товару #%s (%s): %s",
                     product_id,

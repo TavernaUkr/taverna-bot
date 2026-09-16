@@ -30,6 +30,7 @@ from database.db import AsyncSessionLocal, get_db, AsyncSession
 from database.models import (
     Product,
     ProductAIStatus,
+    ProductStatus,
     Supplier,
     SupplierLegalType,
     SupplierStatus,
@@ -38,6 +39,7 @@ from database.models import (
     UserRole,
 )
 from api.auth import validate_init_data
+from services.mydrop_api import InvalidMyDropYmlLinkError, normalize_mydrop_yml_link
 from services.supplier_analyzer import SupplierAnalyzer
 
 logger = logging.getLogger(__name__)
@@ -156,6 +158,7 @@ async def _has_duplicates(
     edrpou_ipn: Optional[str],
     yml_link: Optional[str],
     exclude_id: Optional[int] = None,
+    mydrop_api_key: Optional[str] = None,
 ) -> bool:
     filters = []
     if edrpou_ipn:
@@ -173,6 +176,8 @@ async def _has_duplicates(
                 Supplier.xml_url == yml_link,
             ]
         )
+    if mydrop_api_key:
+        filters.append(Supplier.mydrop_api_key == mydrop_api_key)
     if not filters:
         return False
     stmt = select(Supplier.id).where(or_(*filters))
@@ -296,6 +301,36 @@ async def _supplier_ids_for_telegram(
     return list((await db.execute(stmt)).scalars().all())
 
 
+async def _queue_position_for_suppliers(
+    db: AsyncSession,
+    supplier_ids: list[int],
+) -> int:
+    """
+    Позиція постачальника серед унікальних supplier_id з pending-товарами.
+    0 = обробляється зараз (або черги немає). 1 = один постачальник попереду.
+    """
+    if not supplier_ids:
+        return 0
+    oldest_pending = func.min(Product.created_at)
+    stmt = (
+        select(Product.supplier_id, oldest_pending.label("oldest_pending"))
+        .where(
+            Product.ai_status == ProductAIStatus.pending,
+            Product.status != ProductStatus.deleted,
+        )
+        .group_by(Product.supplier_id)
+        .order_by(oldest_pending.asc(), Product.supplier_id.asc())
+    )
+    rows = (await db.execute(stmt)).all()
+    if not rows:
+        return 0
+    mine = {int(sid) for sid in supplier_ids}
+    for index, row in enumerate(rows):
+        if int(row.supplier_id) in mine:
+            return index
+    return 0
+
+
 def _enum_value(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -316,6 +351,17 @@ def _deletion_reason(supplier: Supplier) -> Optional[str]:
         return None
     after = notes.split(DELETION_NOTE_PREFIX, 1)[1].strip()
     return after.split("\n\n", 1)[0].strip() or None
+
+
+def _clear_deletion_request_notes(supplier: Supplier) -> None:
+    """Прибирає блок заявки на видалення з admin_notes (після restore)."""
+    notes = supplier.admin_notes or ""
+    if DELETION_NOTE_PREFIX not in notes:
+        return
+    after = notes.split(DELETION_NOTE_PREFIX, 1)[1]
+    parts = after.split("\n\n", 1)
+    remainder = parts[1].strip() if len(parts) > 1 else ""
+    supplier.admin_notes = remainder or None
 
 
 async def _product_stats(db: AsyncSession, supplier_id: int) -> tuple[int, int]:
@@ -475,6 +521,8 @@ async def get_my_import_progress(
             completed=0,
             estimated_minutes=0,
             is_importing=False,
+            queue_ahead=0,
+            queue_position=0,
         )
 
     total = (
@@ -520,6 +568,7 @@ async def get_my_import_progress(
     remaining = in_queue + queue_ahead
     estimated_minutes = math.ceil(remaining * SECONDS_PER_PRODUCT_AI / 60) if remaining else 0
     is_importing = in_queue > 0
+    queue_position = await _queue_position_for_suppliers(db, supplier_ids)
 
     return SupplierImportProgressResponse(
         total=total,
@@ -527,6 +576,7 @@ async def get_my_import_progress(
         estimated_minutes=estimated_minutes,
         is_importing=is_importing,
         queue_ahead=queue_ahead,
+        queue_position=queue_position,
     )
 
 
@@ -573,7 +623,10 @@ async def register_partner(
             status_code=401,
             detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
         )
-    yml_link = request_data.resolved_yml()
+    try:
+        yml_link, extracted_key = normalize_mydrop_yml_link(request_data.resolved_yml())
+    except InvalidMyDropYmlLinkError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     channel_link = request_data.resolved_channel()
     edrpou_ipn = request_data.resolved_edrpou_ipn()
     iban = request_data.resolved_iban()
@@ -602,16 +655,14 @@ async def register_partner(
             detail="Цей Telegram-акаунт уже має заявку або магазин.",
         )
 
-    has_duplicates = await _has_duplicates(db, edrpou_ipn, yml_link)
+    has_duplicates = await _has_duplicates(
+        db, edrpou_ipn, yml_link, mydrop_api_key=extracted_key,
+    )
     trial_ends_at = None
     if legal_type == SupplierLegalType.individual:
         trial_ends_at = datetime.now(timezone.utc) + timedelta(days=30)
 
-    catalog_type = (
-        SupplierType.mydrop
-        if yml_link and "mydrop" in yml_link.lower()
-        else SupplierType.independent
-    )
+    catalog_type = SupplierType.mydrop if extracted_key else SupplierType.independent
     unique_key = f"partner_{telegram_id}_{int(time.time())}"
 
     try:
@@ -625,6 +676,7 @@ async def register_partner(
             yml_link=yml_link,
             channel_link=channel_link,
             xml_url=yml_link,
+            mydrop_api_key=extracted_key,
             telegram_channel=channel_link,
             contact_telegram_id=telegram_id,
             contact_phone=phone,
@@ -658,6 +710,7 @@ async def register_partner(
 
     ai_payload = _payload_for_ai(request_data, store_name)
     ai_payload["telegram_id"] = telegram_id
+    ai_payload["yml_link"] = new_supplier.yml_link
     _schedule_background(
         _process_application_background(
             new_supplier.id,

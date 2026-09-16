@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
+import { vibrate } from "@/hooks/useTelegramUI";
 import { Card } from "@/components/ui/card";
 
 // Typed wrapper for the beta supabase.auth.oauth namespace.
@@ -51,6 +52,7 @@ export default function OAuthConsent() {
   }, [authorizationId]);
 
   async function decide(approve: boolean) {
+    vibrate(approve ? "success" : "error");
     setBusy(true);
     const { data, error } = approve
       ? await oauthNs().approveAuthorization(authorizationId)

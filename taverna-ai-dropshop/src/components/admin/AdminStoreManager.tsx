@@ -18,6 +18,7 @@ import {
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
+import { fetchAdminStores } from "@/lib/backendApi";
 
 interface AdminSupplier {
   id: string;
@@ -35,14 +36,13 @@ interface AdminSupplier {
   xml_url: string | null;
   description: string | null;
   product_count?: number;
+  user_id?: number | null;
+  telegram_id?: number | null;
 }
-
-const isUuid = (value: string | null | undefined) =>
-  !!value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 
 export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partners' | 'my' }) {
   const navigate = useNavigate();
-  const { realProfile, profile, effectiveRole } = useTelegramAuthContext();
+  const { realProfile, profile } = useTelegramAuthContext();
   const [suppliers, setSuppliers] = useState<AdminSupplier[]>([]);
   const [mySupplierIds, setMySupplierIds] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -53,65 +53,61 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
   const [managerTelegram, setManagerTelegram] = useState("");
   const [isSavingManager, setIsSavingManager] = useState(false);
 
-  const currentProfileId = realProfile?.id ?? (typeof profile?.id === 'string' ? profile.id : null);
+  const adminTelegramId =
+    profile?.telegram_id ||
+    (typeof window !== "undefined"
+      ? (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id
+      : null);
 
   useEffect(() => {
     fetchSuppliers();
-  }, [filter, currentProfileId, effectiveRole]);
+  }, [filter, adminTelegramId]);
 
   const fetchSuppliers = async () => {
     setIsLoading(true);
     try {
-      const { data: allRows, error } = await supabase
-        .from("suppliers")
-        .select("id, shop_name, company_name, contact_name, is_active, markup_percentage, created_at, logo_url, cover_image_url, manager_telegram, allow_bot_chat, tax_code, xml_url, description")
-        .order("created_at", { ascending: false });
+      const rows = await fetchAdminStores(
+        adminTelegramId ? Number(adminTelegramId) : undefined
+      );
+      const allSuppliers: AdminSupplier[] = rows.map((row) => ({
+        id: String(row.id),
+        shop_name: row.shop_name,
+        company_name: row.company_name || "",
+        contact_name: row.contact_name || "",
+        is_active: row.is_active,
+        markup_percentage: row.markup_percentage ?? null,
+        created_at: row.created_at || "",
+        logo_url: null,
+        cover_image_url: null,
+        manager_telegram: row.manager_telegram || null,
+        allow_bot_chat: null,
+        tax_code: null,
+        xml_url: row.xml_url || null,
+        description: row.description || null,
+        product_count: row.product_count || 0,
+        user_id: row.user_id ?? null,
+        telegram_id: row.telegram_id ?? null,
+      }));
 
-      if (error) throw error;
-
-      let allSuppliers: AdminSupplier[] = allRows || [];
       const myIdsSet = new Set<string>();
-
-      if (isUuid(currentProfileId)) {
-        const { data: links } = await supabase
-          .from("shop_manager_links")
-          .select("supplier_id")
-          .eq("profile_id", currentProfileId);
-
-        (links || []).forEach((link) => myIdsSet.add(link.supplier_id));
-      }
-
-      if (effectiveRole === 'admin') {
-        allSuppliers
-          .filter((supplier) => !supplier.manager_telegram)
-          .forEach((supplier) => myIdsSet.add(supplier.id));
-      }
+      const adminTg = adminTelegramId ? Number(adminTelegramId) : null;
+      allSuppliers.forEach((supplier) => {
+        const isAdminOwned =
+          supplier.user_id == null ||
+          (adminTg != null && Number(supplier.telegram_id) === adminTg);
+        if (isAdminOwned) myIdsSet.add(supplier.id);
+      });
 
       const myIds = Array.from(myIdsSet);
       setMySupplierIds(myIds);
 
       const filteredSuppliers = allSuppliers.filter((supplier) => {
-        if (filter === 'my') return myIdsSet.has(supplier.id);
-        if (filter === 'partners') return !myIdsSet.has(supplier.id);
+        if (filter === "my") return myIdsSet.has(supplier.id);
+        if (filter === "partners") return !myIdsSet.has(supplier.id);
         return true;
       });
 
-      const supplierIds = filteredSuppliers.map((s) => s.id);
-      if (supplierIds.length > 0) {
-        const { data: products } = await supabase
-          .from("products")
-          .select("supplier_id")
-          .in("supplier_id", supplierIds);
-
-        const countMap: Record<string, number> = {};
-        (products || []).forEach((product) => {
-          if (product.supplier_id) countMap[product.supplier_id] = (countMap[product.supplier_id] || 0) + 1;
-        });
-
-        setSuppliers(filteredSuppliers.map((supplier) => ({ ...supplier, product_count: countMap[supplier.id] || 0 })));
-      } else {
-        setSuppliers([]);
-      }
+      setSuppliers(filteredSuppliers);
     } catch (err) {
       console.error("Error fetching suppliers:", err);
       toast.error("Помилка завантаження магазинів");
@@ -248,7 +244,7 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">{suppliers.length} магазинів</p>
+        <p className="text-sm text-slate-600 dark:text-slate-300">{suppliers.length} магазинів</p>
       </div>
 
       <Card className="border-primary/20 bg-primary/5">
@@ -257,7 +253,7 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
             {isMyStores ? <Crown className="h-4 w-4 text-primary mt-0.5 flex-shrink-0" /> :
              isPartners ? <Users className="h-4 w-4 text-primary mt-0.5 flex-shrink-0" /> :
              <Shield className="h-4 w-4 text-primary mt-0.5 flex-shrink-0" />}
-            <p className="text-xs text-muted-foreground">{infoText}</p>
+            <p className="text-xs text-slate-600 dark:text-slate-300">{infoText}</p>
           </div>
         </CardContent>
       </Card>
@@ -266,13 +262,23 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
         <div className="space-y-3 pr-4">
           {suppliers.length === 0 ? (
             <div className="text-center py-12">
-              <Store className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-              <p className="text-muted-foreground">
-                {isMyStores ? "У вас немає власних магазинів" : isPartners ? "Немає партнерських магазинів" : "Немає магазинів"}
+              <Store className="h-12 w-12 text-slate-400 dark:text-slate-500 mx-auto mb-4" />
+              <p className="font-semibold text-slate-900 dark:text-white">
+                {isMyStores ? "У вас немає власних магазинів" : isPartners ? "Немає партнерських магазинів" : "Магазинів ще немає"}
               </p>
               {isMyStores && (
-                <p className="text-xs text-muted-foreground mt-1">
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
                   Створіть магазин через вкладку «+ Додати»
+                </p>
+              )}
+              {isPartners && (
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                  Партнерські магазини з'являться тут після реєстрації або передачі прав
+                </p>
+              )}
+              {!isMyStores && !isPartners && (
+                <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+                  Зареєструйте свій перший магазин
                 </p>
               )}
             </div>
@@ -393,7 +399,7 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
                 <AlertTriangle className="h-4 w-4 text-destructive mt-0.5 flex-shrink-0" />
                 <div>
                   <p className="text-xs font-medium text-destructive">Увага! Ця дія незворотна</p>
-                  <p className="text-xs text-muted-foreground mt-1">
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
                     Після передачі ви втратите право керування цим магазином. 
                     Новий власник отримає повний контроль.
                   </p>

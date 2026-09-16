@@ -4,6 +4,7 @@ import { Label } from "@/components/ui/label";
 import { toast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";
 import { Check } from "lucide-react";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 const languages = [
   { code: "uk", label: "Українська", flag: "🇺🇦" },
@@ -26,6 +27,7 @@ interface LanguageSelectorModalProps {
 
 export function LanguageSelectorModal({ isOpen, onClose }: LanguageSelectorModalProps) {
   const [selected, setSelected] = useState(() => localStorage.getItem("app-language") || "uk");
+  useModalHistory(isOpen, onClose);
 
   useEffect(() => {
     setSelected(localStorage.getItem("app-language") || "uk");

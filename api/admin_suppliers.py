@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 from typing import List, Optional
 from uuid import uuid4
+import math
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import delete, func, inspect, select, text, update
@@ -13,8 +14,10 @@ from api.auth import validate_init_data
 from api_models import (
     AdminApproveDeletionResponse,
     AdminDirectCreateSupplierRequest,
+    AdminStoreListItem,
     AdminSupplierDeleteResponse,
     PendingSupplierApplicationResponse,
+    SupplierImportProgressResponse,
 )
 from config_reader import config
 from database.db import get_db, AsyncSession
@@ -38,8 +41,16 @@ from database.models import (
     product_variant_option_values,
     supplier_channels,
 )
-from api.suppliers import _deletion_reason, _deletion_requested
-from services.mydrop_api import extract_public_api_key
+from api.suppliers import (
+    SECONDS_PER_PRODUCT_AI,
+    _clear_deletion_request_notes,
+    _deletion_reason,
+    _deletion_requested,
+)
+from services.mydrop_api import (
+    InvalidMyDropYmlLinkError,
+    normalize_mydrop_yml_link,
+)
 from services.mydrop_sync import schedule_supplier_catalog_import
 
 logger = logging.getLogger(__name__)
@@ -109,6 +120,25 @@ def _to_application(
     )
 
 
+def _to_store_item(supplier: Supplier, product_count: int = 0) -> AdminStoreListItem:
+    status_value = supplier.status.value if getattr(supplier.status, "value", None) else str(supplier.status)
+    return AdminStoreListItem(
+        id=supplier.id,
+        shop_name=supplier.store_name or supplier.name or "-",
+        company_name=supplier.legal_name,
+        contact_name=supplier.legal_name,
+        is_active=status_value == SupplierStatus.active.value,
+        created_at=supplier.created_at,
+        manager_telegram=supplier.manager_telegram,
+        xml_url=supplier.yml_link or supplier.xml_url,
+        description=supplier.store_description,
+        product_count=product_count,
+        user_id=supplier.user_id,
+        telegram_id=int(supplier.contact_telegram_id) if supplier.contact_telegram_id else None,
+        status="approved" if status_value == SupplierStatus.active.value else status_value,
+    )
+
+
 def _assert_admin(
     telegram_id: Optional[int],
     authorization: Optional[str],
@@ -147,8 +177,13 @@ async def _ensure_shop_record(db: AsyncSession, supplier: Supplier) -> None:
     if not (supplier.name or "").strip():
         supplier.name = shop_name
 
-    def _maybe_insert_legacy_shop(sync_conn) -> None:
-        insp = inspect(sync_conn)
+    def _maybe_insert_legacy_shop(sync_session) -> None:
+        # db.run_sync() передає Session, а inspect() працює лише з Connection/Engine.
+        try:
+            bind = sync_session.connection()
+        except Exception:
+            bind = sync_session.get_bind()
+        insp = inspect(bind)
         tables = set(insp.get_table_names())
         target = next((name for name in _SHOP_TABLE_CANDIDATES if name in tables), None)
         if not target:
@@ -160,7 +195,7 @@ async def _ensure_shop_record(db: AsyncSession, supplier: Supplier) -> None:
 
         cols = {col["name"] for col in insp.get_columns(target)}
         if "supplier_id" in cols:
-            exists = sync_conn.execute(
+            exists = sync_session.execute(
                 text(f"SELECT 1 FROM {target} WHERE supplier_id = :sid LIMIT 1"),
                 {"sid": supplier.id},
             ).first()
@@ -189,7 +224,7 @@ async def _ensure_shop_record(db: AsyncSession, supplier: Supplier) -> None:
         col_sql = ", ".join(values.keys())
         bind_sql = ", ".join(f":{key}" for key in values)
         try:
-            sync_conn.execute(
+            sync_session.execute(
                 text(f"INSERT INTO {target} ({col_sql}) VALUES ({bind_sql})"),
                 values,
             )
@@ -200,7 +235,13 @@ async def _ensure_shop_record(db: AsyncSession, supplier: Supplier) -> None:
                 target, supplier.id, e,
             )
 
-    await db.run_sync(_maybe_insert_legacy_shop)
+    try:
+        await db.run_sync(_maybe_insert_legacy_shop)
+    except Exception as e:
+        logger.warning(
+            "Перевірка legacy Store/Shop для постачальника #%s пропущена: %s",
+            supplier.id, e,
+        )
 
 
 def _user_role_value(user: User) -> str:
@@ -266,6 +307,38 @@ async def _mark_all_supplier_products_deleted(db: AsyncSession, supplier_id: int
         )
     )
     return int(result.rowcount or 0)
+
+
+async def _restore_all_supplier_products(db: AsyncSession, supplier_id: int) -> int:
+    """
+    Повертає soft-deleted товари в каталог і знову ставить
+    необроблені (cancelled / без AI) у чергу Gemini як pending.
+    """
+    restored = await db.execute(
+        update(Product)
+        .where(
+            Product.supplier_id == supplier_id,
+            Product.status == ProductStatus.deleted,
+        )
+        .values(status=ProductStatus.active)
+    )
+    queued = await db.execute(
+        update(Product)
+        .where(
+            Product.supplier_id == supplier_id,
+            Product.ai_status == ProductAIStatus.cancelled,
+            Product.is_ai_processed.is_(False),
+        )
+        .values(ai_status=ProductAIStatus.pending)
+    )
+    queued_count = int(queued.rowcount or 0)
+    if queued_count:
+        logger.info(
+            "Restore #%s: повернуто %s товарів у AI-чергу (cancelled → pending).",
+            supplier_id,
+            queued_count,
+        )
+    return int(restored.rowcount or 0)
 
 
 async def _hard_delete_supplier(db: AsyncSession, supplier: Supplier) -> bool:
@@ -386,6 +459,97 @@ async def list_supplier_history(
     return [_to_application(item) for item in rows]
 
 
+@router.get("/suppliers/all", response_model=List[AdminStoreListItem])
+async def list_all_active_stores(
+    db: AsyncSession = Depends(get_db),
+    telegram_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Усі магазини платформи для адмінки (без фільтра по user_id / telegram_id).
+    Активні та вимкнені; видалені й заявки не показуємо.
+    """
+    _assert_admin(telegram_id, authorization)
+
+    stmt = (
+        select(Supplier)
+        .where(
+            Supplier.status.in_((SupplierStatus.active, SupplierStatus.disabled)),
+        )
+        .order_by(Supplier.created_at.desc())
+    )
+    rows = list((await db.execute(stmt)).scalars().all())
+    if not rows:
+        return []
+
+    supplier_ids = [item.id for item in rows]
+    count_rows = (
+        await db.execute(
+            select(Product.supplier_id, func.count(Product.id))
+            .where(
+                Product.supplier_id.in_(supplier_ids),
+                Product.status != ProductStatus.deleted,
+            )
+            .group_by(Product.supplier_id)
+        )
+    ).all()
+    counts = {int(sid): int(cnt) for sid, cnt in count_rows}
+    return [_to_store_item(item, counts.get(item.id, 0)) for item in rows]
+
+
+@router.get("/suppliers/import-progress", response_model=SupplierImportProgressResponse)
+async def admin_global_import_progress(
+    db: AsyncSession = Depends(get_db),
+    telegram_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Глобальна AI-черга: усі pending/processing товари в системі."""
+    _assert_admin(telegram_id, authorization)
+
+    total = int(
+        (
+            await db.execute(
+                select(func.count(Product.id)).where(
+                    Product.status != ProductStatus.deleted,
+                    Product.ai_status != ProductAIStatus.cancelled,
+                )
+            )
+        ).scalar()
+        or 0
+    )
+    completed = int(
+        (
+            await db.execute(
+                select(func.count(Product.id)).where(
+                    Product.status != ProductStatus.deleted,
+                    Product.ai_status == ProductAIStatus.completed,
+                )
+            )
+        ).scalar()
+        or 0
+    )
+    in_queue = int(
+        (
+            await db.execute(
+                select(func.count(Product.id)).where(
+                    Product.status != ProductStatus.deleted,
+                    Product.ai_status.in_((ProductAIStatus.pending, ProductAIStatus.processing)),
+                )
+            )
+        ).scalar()
+        or 0
+    )
+    estimated_minutes = math.ceil(in_queue * SECONDS_PER_PRODUCT_AI / 60) if in_queue else 0
+    return SupplierImportProgressResponse(
+        total=total,
+        completed=completed,
+        estimated_minutes=estimated_minutes,
+        is_importing=in_queue > 0,
+        queue_ahead=in_queue,
+        queue_position=0,
+    )
+
+
 @router.post("/suppliers/{supplier_id}/approve-deletion", response_model=AdminApproveDeletionResponse)
 async def approve_supplier_deletion(
     supplier_id: int,
@@ -435,6 +599,50 @@ async def approve_supplier_deletion(
     )
 
 
+@router.post("/suppliers/{supplier_id}/restore", response_model=PendingSupplierApplicationResponse)
+async def restore_supplier(
+    supplier_id: int,
+    db: AsyncSession = Depends(get_db),
+    telegram_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Soft Undelete: повертає видалений магазин і його товари.
+    Статус у БД — active (у відповіді адмінки це 'approved').
+    """
+    _assert_admin(telegram_id, authorization)
+
+    supplier = await db.get(Supplier, supplier_id)
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Постачальника не знайдено")
+
+    status_value = supplier.status.value if hasattr(supplier.status, "value") else str(supplier.status)
+    if status_value != SupplierStatus.deleted.value:
+        raise HTTPException(status_code=409, detail="Магазин не видалено — відновлювати нічого.")
+
+    supplier.status = SupplierStatus.active
+    supplier.is_verified = True
+    supplier.deleted_at = None
+    _clear_deletion_request_notes(supplier)
+
+    if supplier.user_id:
+        user = await db.get(User, supplier.user_id)
+        if user and _user_role_value(user) == UserRole.client.value:
+            user.role = UserRole.supplier
+
+    products_restored = await _restore_all_supplier_products(db, supplier_id)
+    await _ensure_shop_record(db, supplier)
+    await db.commit()
+    await db.refresh(supplier)
+
+    logger.info(
+        "Адмін відновив магазин #%s, products_restored=%s",
+        supplier_id,
+        products_restored,
+    )
+    return _to_application(supplier)
+
+
 @router.post("/suppliers/direct-create", response_model=PendingSupplierApplicationResponse, status_code=201)
 async def direct_create_supplier(
     request_data: AdminDirectCreateSupplierRequest,
@@ -452,16 +660,16 @@ async def direct_create_supplier(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    yml_link = request_data.resolved_yml()
+    try:
+        yml_link, extracted_key = normalize_mydrop_yml_link(request_data.resolved_yml())
+    except InvalidMyDropYmlLinkError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     description = request_data.resolved_description()
     edrpou_ipn = request_data.resolved_edrpou_ipn()
     iban = request_data.resolved_iban()
     channel_link = request_data.resolved_channel()
     legal_name = request_data.resolved_legal_name()
-    extracted_key = extract_public_api_key(yml_link) if yml_link else None
-    catalog_type = SupplierType.mydrop if (
-        (yml_link and "mydrop" in yml_link.lower()) or extracted_key
-    ) else SupplierType.independent
+    catalog_type = SupplierType.mydrop if extracted_key else SupplierType.independent
 
     legal_type = None
     raw_legal = (request_data.supplier_type or "").strip().lower()
@@ -529,9 +737,20 @@ async def approve_supplier_application(
     supplier.is_verified = True
     supplier.status = SupplierStatus.active
     supplier.approved_at = datetime.utcnow()
-    extracted_key = extract_public_api_key(supplier.yml_link or supplier.xml_url or "")
-    if extracted_key and not supplier.mydrop_api_key:
+    try:
+        canonical_yml, extracted_key = normalize_mydrop_yml_link(
+            supplier.yml_link or supplier.xml_url or supplier.mydrop_api_key or ""
+        )
+    except InvalidMyDropYmlLinkError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if extracted_key:
+        supplier.yml_link = canonical_yml
+        supplier.xml_url = canonical_yml
         supplier.mydrop_api_key = extracted_key
+        supplier.type = SupplierType.mydrop
+    elif canonical_yml:
+        supplier.yml_link = canonical_yml
+        supplier.xml_url = canonical_yml
     if supplier.user_id:
         user = await db.get(User, supplier.user_id)
         if user and user.role != UserRole.admin:

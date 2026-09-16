@@ -26,7 +26,7 @@ async def check_for_cosmic_price(product_name: str, supplier_price: float) -> (b
     (План 22) Використовує Gemini для "пошуку" середньої ринкової ціни.
     Повертає (is_cosmic, analysis_text).
     """
-    if not config.gemini_api_key or supplier_price == 0 or not product_name:
+    if not getattr(config, "GEMINI_API_KEYS", None) or supplier_price == 0 or not product_name:
         return False, "Перевірку ціни пропущено (немає API, ціни, або назви)."
 
     try:
@@ -40,19 +40,14 @@ async def check_for_cosmic_price(product_name: str, supplier_price: float) -> (b
 Якщо дроп-ціна *вище* роздрібної, або *дорівнює* їй - це "космічна" ціна.
 Поверни JSON: {{ "market_retail_price_avg": int, "is_cosmic": bool, "analysis": "твій короткий коментар українською" }}
 """
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash-latest",
-            system_instruction=system_prompt,
-            generation_config=genai.types.GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0.1
-            )
-        )
-        
         prompt = f"Назва Товару: '{product_name}', Дроп-Ціна: {supplier_price} UAH"
-        response = await model.generate_content_async(prompt)
-        
-        data = json.loads(response.text)
+        text = await gemini_service._generate_content(
+            prompt,
+            system_instruction=system_prompt,
+            temperature=0.1,
+            response_mime_type="application/json",
+        )
+        data = json.loads(text or "{}")
         is_cosmic = data.get("is_cosmic", False)
         analysis = data.get("analysis", "AI-аналіз ціни завершено.")
         

@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { useTelegramAuth } from "@/hooks/useTelegramAuth";
 import { registerPartner } from "@/lib/backendApi";
 import { Button } from "@/components/ui/button";
+import { vibrate } from "@/hooks/useTelegramUI";
 
 type SupplierType = "individual" | "company";
 
@@ -208,7 +209,10 @@ const SupplierRegistration = () => {
             </div>
             
             <Button
-              onClick={authenticate}
+              onClick={() => {
+                vibrate("light");
+                authenticate();
+              }}
               size="lg"
               className="w-full gap-2"
             >

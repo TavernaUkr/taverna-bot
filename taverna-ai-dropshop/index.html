@@ -3,6 +3,49 @@
   <head>
     <meta charset="UTF-8" />
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+      html, body, #root {
+        background-color: var(--tg-theme-bg-color, #f7f7f7);
+        color: var(--tg-theme-text-color, #1c2128);
+      }
+      html.dark, html.dark body, html.dark #root {
+        background-color: var(--tg-theme-bg-color, #101216);
+        color: var(--tg-theme-text-color, #f0f2f4);
+      }
+    </style>
+    <script>
+      (function () {
+        try {
+          var stored = "";
+          try { stored = localStorage.getItem("app-theme") || ""; } catch (e0) {}
+          var mode = String(stored).trim().toLowerCase();
+          var tg = window.Telegram && window.Telegram.WebApp;
+          if (tg && typeof tg.ready === "function") tg.ready();
+          if (tg && typeof tg.expand === "function") tg.expand();
+          var isDark;
+          if (mode === "dark" || mode === "темна") isDark = true;
+          else if (mode === "light" || mode === "світла") isDark = false;
+          else isDark = !!(tg && tg.colorScheme === "dark");
+          var root = document.documentElement;
+          if (isDark) root.classList.add("dark");
+          else root.classList.remove("dark");
+          root.style.colorScheme = isDark ? "dark" : "light";
+          if (tg && typeof tg.setHeaderColor === "function") tg.setHeaderColor("bg_color");
+          if (tg && typeof tg.setBackgroundColor === "function") tg.setBackgroundColor("bg_color");
+          var initData = (tg && tg.initData) || "";
+          if (!initData) {
+            var hash = String(window.location.hash || "").replace(/^#/, "");
+            var params = new URLSearchParams(hash);
+            var fromHash = params.get("tgWebAppData") || "";
+            if (fromHash) initData = fromHash;
+          }
+          window.__TAVERNA_INIT_DATA__ = initData;
+          if (initData) {
+            try { sessionStorage.setItem("taverna_tg_init_data", initData); } catch (e2) {}
+          }
+        } catch (e) {}
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700;800&display=swap" rel="stylesheet">

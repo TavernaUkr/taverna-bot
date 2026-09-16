@@ -131,7 +131,11 @@ async function fetchWithTimeout(
     return await fetch(url, {
       method: "GET",
       ...restInit,
-      headers: { Accept: "application/json", ...extraHeaders },
+      headers: {
+        Accept: "application/json",
+        "ngrok-skip-browser-warning": "1",
+        ...extraHeaders,
+      },
       signal: controller.signal,
     });
   } finally {
@@ -401,6 +405,8 @@ export interface BackendTelegramUser {
   last_name?: string | null;
   role: string;
   created_at?: string | null;
+  haptic_enabled?: boolean;
+  notifications_enabled?: boolean;
 }
 
 export interface BackendTelegramAuthResponse {
@@ -488,6 +494,48 @@ async function backendPost<T>(
   return (await response.json()) as T;
 }
 
+async function backendPatch<T>(
+  url: string,
+  body: unknown,
+  errorPrefix: string,
+  extraHeaders?: Record<string, string>
+): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        ...(extraHeaders || {}),
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (networkError) {
+    if (networkError instanceof DOMException && networkError.name === "AbortError") {
+      throw new BackendApiError(`${errorPrefix}: бекенд не відповів за ${REQUEST_TIMEOUT_MS / 1000}с.`);
+    }
+    throw new BackendApiError(
+      `${errorPrefix}: немає з'єднання з FastAPI на ${API_BASE_URL}.`
+    );
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const errJson = await response.json();
+      if (errJson?.detail) {
+        detail = typeof errJson.detail === "string" ? ` (${errJson.detail})` : ` (${JSON.stringify(errJson.detail)})`;
+      }
+    } catch {
+      // тіло відповіді не JSON
+    }
+    throw new BackendApiError(`${errorPrefix}: помилка ${response.status}${detail}`, response.status);
+  }
+
+  return (await response.json()) as T;
+}
+
 async function backendDelete<T>(
   url: string,
   errorPrefix: string,
@@ -538,6 +586,38 @@ export async function authTelegramMiniApp(
   );
 }
 
+export const USER_SETTINGS_ENDPOINT = `${API_BASE_URL}/api/v1/users/me/settings`;
+
+export interface BackendUserSettingsUpdate {
+  haptic_enabled?: boolean;
+  notifications_enabled?: boolean;
+}
+
+/** PATCH /api/v1/users/me/settings — вібрація та сповіщення Mini App. */
+export async function updateMyUserSettings(
+  settings: BackendUserSettingsUpdate
+): Promise<BackendUserSettingsUpdate> {
+  const initData =
+    typeof window !== "undefined"
+      ? String(
+          (window as any).Telegram?.WebApp?.initData ||
+            (window as any).__TAVERNA_INIT_DATA__ ||
+            sessionStorage.getItem("taverna_tg_init_data") ||
+            ""
+        )
+      : "";
+  const headers: Record<string, string> = {};
+  if (initData) {
+    headers.Authorization = `Bearer ${initData}`;
+  }
+  return backendPatch<BackendUserSettingsUpdate>(
+    USER_SETTINGS_ENDPOINT,
+    settings,
+    "Не вдалося зберегти налаштування",
+    headers
+  );
+}
+
 /** POST /api/v1/suppliers/register — заявка «Стати партнером». */
 export async function registerPartner(
   payload: BackendPartnerRegisterPayload,
@@ -581,6 +661,24 @@ export interface BackendSupplierImportProgress {
   estimated_minutes: number;
   is_importing: boolean;
   queue_ahead?: number;
+  queue_position?: number;
+}
+
+export interface BackendAdminStore {
+  id: number;
+  shop_name: string;
+  company_name?: string | null;
+  contact_name?: string | null;
+  is_active: boolean;
+  markup_percentage?: number | null;
+  created_at?: string | null;
+  manager_telegram?: string | null;
+  xml_url?: string | null;
+  description?: string | null;
+  product_count: number;
+  user_id?: number | null;
+  telegram_id?: number | null;
+  status: string;
 }
 
 export interface BackendPendingSupplierApplication {
@@ -653,6 +751,26 @@ export async function fetchSupplierImportProgress(): Promise<BackendSupplierImpo
   );
 }
 
+export async function fetchAdminStores(
+  telegramId?: number | null
+): Promise<BackendAdminStore[]> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendGet<BackendAdminStore[]>(
+    `${API_BASE_URL}/api/v1/admin/suppliers/all${params}`,
+    adminTelegramHeaders()
+  );
+}
+
+export async function fetchAdminImportProgress(
+  telegramId?: number | null
+): Promise<BackendSupplierImportProgress> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendGet<BackendSupplierImportProgress>(
+    `${API_BASE_URL}/api/v1/admin/suppliers/import-progress${params}`,
+    adminTelegramHeaders()
+  );
+}
+
 export async function fetchPendingSupplierApplications(
   telegramId?: number | null
 ): Promise<BackendPendingSupplierApplication[]> {
@@ -679,6 +797,19 @@ export async function fetchSupplierHistory(
   const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
   return backendGet<BackendPendingSupplierApplication[]>(
     `${API_BASE_URL}/api/v1/admin/suppliers/history${params}`,
+    adminTelegramHeaders()
+  );
+}
+
+export async function restoreSupplier(
+  supplierId: number,
+  telegramId?: number | null
+): Promise<BackendPendingSupplierApplication> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendPost<BackendPendingSupplierApplication>(
+    `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/restore${params}`,
+    {},
+    "Не вдалося відновити магазин",
     adminTelegramHeaders()
   );
 }

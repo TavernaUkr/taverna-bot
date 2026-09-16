@@ -34,8 +34,8 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, unquote, urlparse
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 import aiofiles
 import aiohttp
@@ -51,6 +51,17 @@ MYDROP_BASE_URL = "https://backend.mydrop.com.ua"
 
 # --- Каталог постачальника: публічна YML/Prom-вигрузка, без авторизації ---
 PRODUCTS_EXPORT_YML_PATH = "/vendor/api/export/products/prom/yml"
+
+# Жорсткі параметри вигрузки: не довіряємо галочкам у кабінеті постачальника.
+MYDROP_YML_EXPORT_PARAMS = {
+    "price_field": "drop_price",
+    "stock_sync": "true",
+    "static_sizes": "true",
+}
+INVALID_MYDROP_YML_MESSAGE = (
+    "Недійсне посилання MyDrop. Не знайдено public_api_key."
+)
+_PUBLIC_API_KEY_RE = re.compile(r"public_api_key=([^&\s#]+)", re.IGNORECASE)
 
 # --- Створення замовлення: НАШ кабінет дропшипера (майстер-ключ з .env) ---
 ORDERS_PATH = "/dropshipper/api/orders"
@@ -87,7 +98,89 @@ def extract_public_api_key(yml_or_key: Optional[str]) -> Optional[str]:
         values = parse_qs(parsed.query).get("public_api_key") or []
         if values and str(values[0]).strip():
             return unquote(str(values[0]).strip())
+        match = _PUBLIC_API_KEY_RE.search(raw)
+        if match and match.group(1).strip():
+            return unquote(match.group(1).strip())
         return None
+    match = _PUBLIC_API_KEY_RE.search(raw)
+    if match and match.group(1).strip():
+        return unquote(match.group(1).strip())
+    return raw
+
+
+class InvalidMyDropYmlLinkError(ValueError):
+    """YML-лінк виглядає як MyDrop, але в ньому немає public_api_key."""
+
+    def __init__(self, message: str = INVALID_MYDROP_YML_MESSAGE):
+        super().__init__(message)
+
+
+def is_mydrop_yml_link(yml_or_key: Optional[str]) -> bool:
+    """True, якщо рядок — MyDrop-лінк, параметр public_api_key або сам ключ."""
+    raw = (yml_or_key or "").strip()
+    if not raw:
+        return False
+    lowered = raw.lower()
+    if "mydrop" in lowered or "public_api_key=" in lowered:
+        return True
+    parsed = urlparse(raw)
+    return parsed.scheme not in ("http", "https")
+
+
+def build_canonical_mydrop_yml_url(public_api_key: str) -> str:
+    """Ідеальне посилання вигрузки з обов'язковими прапорцями MyDrop."""
+    key = (public_api_key or "").strip()
+    query = urlencode({"public_api_key": key, **MYDROP_YML_EXPORT_PARAMS})
+    return f"{MYDROP_BASE_URL}{PRODUCTS_EXPORT_YML_PATH}?{query}"
+
+
+def normalize_mydrop_yml_link(
+    yml_link: Optional[str],
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Перехоплює yml_link постачальника і, якщо це MyDrop, переписує на канонічний URL.
+
+    Повертає (url_для_БД, public_api_key).
+    Кидає InvalidMyDropYmlLinkError, якщо лінк MyDrop, але ключа немає.
+    Інші фіди (Prom тощо) лишаються як є.
+    """
+    raw = (yml_link or "").strip() or None
+    if not raw:
+        return None, None
+    key = extract_public_api_key(raw)
+    if key:
+        return build_canonical_mydrop_yml_url(key), key
+    if is_mydrop_yml_link(raw):
+        raise InvalidMyDropYmlLinkError()
+    return raw, None
+
+
+def namespace_supplier_code(supplier_id: int, original: Optional[str]) -> str:
+    """Унікальний артикул/ID у нашій БД: sup{supplier_id}-{оригінал}."""
+    raw = str(original or "").strip()
+    prefix = f"sup{supplier_id}-"
+    if not raw:
+        return ""
+    if raw.startswith(prefix):
+        return raw
+    return f"{prefix}{raw}"
+
+
+def denamespace_supplier_code(supplier_id: int, stored: Optional[str]) -> str:
+    """Прибирає префікс sup{id}- перед відправкою артикулу в MyDrop."""
+    raw = str(stored or "").strip()
+    prefix = f"sup{supplier_id}-"
+    if raw.startswith(prefix):
+        return raw[len(prefix):]
+    return raw
+
+
+def strip_supplier_namespace(stored: Optional[str]) -> str:
+    """Прибирає префікс sup{id}- без знання supplier_id (замовлення в MyDrop)."""
+    raw = str(stored or "").strip()
+    match = re.match(r"^sup\d+-(.+)$", raw)
+    if match:
+        return match.group(1)
     return raw
 
 
@@ -455,7 +548,7 @@ class MyDropAPIClient:
         if not public_api_key:
             raise MyDropAPIError("Відсутній публічний ключ вигрузки (public_api_key) постачальника.")
 
-        params = {"public_api_key": public_api_key}
+        params = {"public_api_key": public_api_key, **MYDROP_YML_EXPORT_PARAMS}
         slash_path = f"{PRODUCTS_EXPORT_YML_PATH}/"
 
         try:
@@ -780,7 +873,7 @@ class MyDropAPIClient:
             title = str(item.get("product_name") or "").strip()
             if not title:
                 raise MyDropAPIError(f"product_title обов'язковий для MyDrop (Dropshipper API): {item}")
-            sku = str(item.get("supplier_sku") or "").strip()
+            sku = strip_supplier_namespace(item.get("supplier_sku") or "")
 
             try:
                 price = float(item.get("price") or 0)

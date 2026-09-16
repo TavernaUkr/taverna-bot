@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     groq_api_key: Optional[SecretStr] = None
     openrouter_api_key: Optional[SecretStr] = None
     gemini_api_key: Optional[SecretStr] = None
+    gemini_api_keys: str = ""
     
     # --- Google Drive ---
     service_account_json: Optional[str] = None
@@ -132,6 +133,26 @@ class Settings(BaseSettings):
                 if uid not in ids:
                     ids.append(uid)
         return ids
+
+    @property
+    def GEMINI_API_KEYS(self) -> list[str]:
+        """
+        Список ключів Gemini: GEMINI_API_KEYS=key1,key2,...
+        Старе поле GEMINI_API_KEY теж підхоплюється, якщо є.
+        """
+        keys: list[str] = []
+        seen = set()
+        raw = (self.gemini_api_keys or "").replace(";", ",")
+        for part in raw.split(","):
+            key = part.strip().strip('"').strip("'")
+            if key and key not in seen:
+                seen.add(key)
+                keys.append(key)
+        if self.gemini_api_key:
+            single = self.gemini_api_key.get_secret_value().strip()
+            if single and single not in seen:
+                keys.append(single)
+        return keys
 
 try:
     config = Settings()

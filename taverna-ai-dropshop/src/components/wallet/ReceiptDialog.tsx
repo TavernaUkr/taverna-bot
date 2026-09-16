@@ -2,6 +2,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button";
 import { Share2, Check } from "lucide-react";
 import type { WalletTransaction } from "@/hooks/useWallet";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 const TYPE_LABEL: Record<string, string> = {
   topup: "Поповнення",
@@ -31,6 +32,7 @@ interface ReceiptDialogProps {
 }
 
 export function ReceiptDialog({ transaction, onOpenChange }: ReceiptDialogProps) {
+  useModalHistory(Boolean(transaction), () => onOpenChange(false));
   if (!transaction) return null;
   const r = (transaction.receipt || {}) as Record<string, any>;
 

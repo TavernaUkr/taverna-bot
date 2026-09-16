@@ -20,7 +20,8 @@ import {
   AlertTriangle,
   ArrowLeft,
   Shield,
-  Store
+  Store,
+  BookOpen
 } from "lucide-react";
 import { Header } from "@/components/Header";
 import { BottomNavigation } from "@/components/BottomNavigation";
@@ -47,8 +48,13 @@ import { SearchModal } from "@/components/SearchModal";
 import { CartModal } from "@/components/CartModal";
 import { WishlistModal } from "@/components/WishlistModal";
 import { AppRatingModal } from "@/components/AppRatingModal";
+import { CustomerGuideModal } from "@/components/CustomerGuideModal";
+import { SupplierGuideModal } from "@/components/SupplierGuideModal";
+import { ModeratorGuideModal } from "@/components/guides/ModeratorGuideModal";
+import { ManagerGuideModal } from "@/components/guides/ManagerGuideModal";
 import { toast } from "sonner";
 import { hapticSelection, hapticNotification } from "@/lib/haptics";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 declare global {
   interface Window {
@@ -114,7 +120,7 @@ type ModalView = "main" | "complaints" | "ratings";
 const Support = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { isAuthenticated } = useTelegramAuthContext();
+  const { isAuthenticated, roles } = useTelegramAuthContext();
   const { getOrCreateTicket, isLoading: ticketLoading } = useSupportTickets();
   const [activeTab, setActiveTab] = useState("support");
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -123,6 +129,23 @@ const Support = () => {
   const [isSupportModalOpen, setIsSupportModalOpen] = useState(false);
   const [modalView, setModalView] = useState<ModalView>("main");
   const [isAppRatingOpen, setIsAppRatingOpen] = useState(false);
+  const [showCustomerGuide, setShowCustomerGuide] = useState(false);
+  const [showSupplierGuide, setShowSupplierGuide] = useState(false);
+  const [showModeratorGuide, setShowModeratorGuide] = useState(false);
+  const [showManagerGuide, setShowManagerGuide] = useState(false);
+
+  const isAdmin = roles.includes("admin");
+  const canSeeSupplierGuide = roles.includes("supplier") || isAdmin;
+  const canSeeModeratorGuide = roles.includes("moderator") || isAdmin;
+  const canSeeManagerGuide = roles.includes("shop_manager") || isAdmin;
+
+  useModalHistory(isSupportModalOpen, () => {
+    if (modalView !== "main") {
+      setModalView("main");
+      return;
+    }
+    setIsSupportModalOpen(false);
+  });
 
   useEffect(() => {
     if (searchParams.get("contact") !== "1") return;
@@ -233,14 +256,16 @@ const Support = () => {
                 return (
                   <AccordionItem key={item.id} value={item.id} className="bg-card rounded-xl border border-border px-4">
                     <AccordionTrigger className="hover:no-underline py-4">
-                      <div className="flex items-center gap-3 text-left">
+                      <div className="flex items-center gap-3 text-left min-w-0 w-full max-w-full overflow-hidden">
                         <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
                           <IconComponent className="h-4 w-4 text-primary" />
                         </div>
-                        <span className="font-medium text-sm">{item.question}</span>
+                        <span className="font-medium text-sm text-gray-900 dark:text-white break-words whitespace-normal">
+                          {item.question}
+                        </span>
                       </div>
                     </AccordionTrigger>
-                    <AccordionContent className="pb-4 pl-11 text-sm text-muted-foreground">
+                    <AccordionContent className="pb-4 pl-11 text-sm text-gray-700 dark:text-gray-300 break-words whitespace-normal">
                       {item.answer}
                     </AccordionContent>
                   </AccordionItem>
@@ -373,6 +398,84 @@ const Support = () => {
             </div>
           </TabsContent>
         </Tabs>
+
+        <div className="mt-6 space-y-2">
+          <h2 className="text-sm font-semibold text-foreground px-1">Інструкції</h2>
+          <button
+            type="button"
+            onClick={() => {
+              hapticSelection();
+              setShowCustomerGuide(true);
+            }}
+            className="w-full flex items-center gap-3 p-4 rounded-xl bg-card border border-border hover:border-primary/50 transition-colors text-left"
+          >
+            <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center">
+              <HelpCircle className="h-5 w-5 text-primary" />
+            </div>
+            <div className="flex-1">
+              <p className="font-medium text-foreground">Як користуватись</p>
+              <p className="text-xs text-muted-foreground">Інструкція для покупців і гостей</p>
+            </div>
+            <ChevronRight className="h-5 w-5 text-muted-foreground" />
+          </button>
+          {canSeeSupplierGuide && (
+          <button
+            type="button"
+            onClick={() => {
+              hapticSelection();
+              setShowSupplierGuide(true);
+            }}
+            className="w-full flex items-center gap-3 p-4 rounded-xl bg-card border border-border hover:border-primary/50 transition-colors text-left"
+          >
+            <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center">
+              <BookOpen className="h-5 w-5 text-primary" />
+            </div>
+            <div className="flex-1">
+              <p className="font-medium text-foreground">Інструкція постачальника</p>
+              <p className="text-xs text-muted-foreground">Черга, націнки, реклама</p>
+            </div>
+            <ChevronRight className="h-5 w-5 text-muted-foreground" />
+          </button>
+          )}
+          {canSeeModeratorGuide && (
+          <button
+            type="button"
+            onClick={() => {
+              hapticSelection();
+              setShowModeratorGuide(true);
+            }}
+            className="w-full flex items-center gap-3 p-4 rounded-xl bg-card border border-border hover:border-primary/50 transition-colors text-left"
+          >
+            <div className="w-10 h-10 rounded-lg bg-orange-500/10 flex items-center justify-center">
+              <Shield className="h-5 w-5 text-orange-500" />
+            </div>
+            <div className="flex-1">
+              <p className="font-medium text-foreground">Інструкція модератора</p>
+              <p className="text-xs text-muted-foreground">Скарги, повернення, чати</p>
+            </div>
+            <ChevronRight className="h-5 w-5 text-muted-foreground" />
+          </button>
+          )}
+          {canSeeManagerGuide && (
+          <button
+            type="button"
+            onClick={() => {
+              hapticSelection();
+              setShowManagerGuide(true);
+            }}
+            className="w-full flex items-center gap-3 p-4 rounded-xl bg-card border border-border hover:border-primary/50 transition-colors text-left"
+          >
+            <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center">
+              <Store className="h-5 w-5 text-primary" />
+            </div>
+            <div className="flex-1">
+              <p className="font-medium text-foreground">Інструкція менеджера</p>
+              <p className="text-xs text-muted-foreground">Замовлення магазину та чати клієнтів</p>
+            </div>
+            <ChevronRight className="h-5 w-5 text-muted-foreground" />
+          </button>
+          )}
+        </div>
 
         {/* Contact Support Button */}
         <div className="mt-6">
@@ -583,6 +686,22 @@ const Support = () => {
       </Dialog>
 
       <AppRatingModal isOpen={isAppRatingOpen} onClose={() => setIsAppRatingOpen(false)} type="app" />
+      <CustomerGuideModal
+        isOpen={showCustomerGuide}
+        onClose={() => setShowCustomerGuide(false)}
+      />
+      <SupplierGuideModal
+        isOpen={showSupplierGuide}
+        onClose={() => setShowSupplierGuide(false)}
+      />
+      <ModeratorGuideModal
+        isOpen={showModeratorGuide}
+        onClose={() => setShowModeratorGuide(false)}
+      />
+      <ManagerGuideModal
+        isOpen={showManagerGuide}
+        onClose={() => setShowManagerGuide(false)}
+      />
 
       <BottomNavigation activeTab={activeTab} onTabChange={handleTabChange} />
 

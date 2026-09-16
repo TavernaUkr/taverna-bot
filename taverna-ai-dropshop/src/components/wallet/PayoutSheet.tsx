@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { useModalHistory } from "@/hooks/useModalHistory";
 import type { WalletLimit, WalletState } from "@/hooks/useWallet";
 import { calcPayoutFees, PLATFORM_PAYOUT_FEE_PERCENT, PLATFORM_PAYOUT_FEE_MIN } from "@/lib/payoutFees";
 import {
@@ -46,6 +47,8 @@ export function PayoutSheet({ open, onOpenChange, wallet, limits, sources = [], 
   const [destination, setDestination] = useState(wallet.tg_wallet_address || "");
   const [isBusy, setIsBusy] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
+
+  useModalHistory(open, () => onOpenChange(false));
 
   const multi = sources.length > 0;
 

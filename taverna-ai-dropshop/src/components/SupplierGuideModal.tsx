@@ -20,6 +20,8 @@ import {
   Send
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { useModalHistory } from "@/hooks/useModalHistory";
+import { GuideNumberedSteps } from "@/components/guides/GuideNumberedSteps";
 
 interface SupplierGuideModalProps {
   isOpen: boolean;
@@ -27,18 +29,19 @@ interface SupplierGuideModalProps {
 }
 
 export const SupplierGuideModal = ({ isOpen, onClose }: SupplierGuideModalProps) => {
+  useModalHistory(isOpen, onClose);
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-lg max-h-[90vh] p-0 gap-0">
-        <DialogHeader className="p-4 pb-0">
-          <DialogTitle className="flex items-center gap-2">
+      <DialogContent className="w-[95vw] max-w-lg max-h-[90vh] p-0 gap-0 overflow-hidden">
+        <DialogHeader className="p-4 pb-0 w-full max-w-full overflow-hidden">
+          <DialogTitle className="flex items-center gap-2 text-gray-900 dark:text-white">
             <Bot className="h-5 w-5 text-primary" />
             Гід для партнерів Taverna
           </DialogTitle>
         </DialogHeader>
 
-        <ScrollArea className="max-h-[75vh]">
-          <div className="p-4 pt-2">
+        <ScrollArea className="max-h-[75vh] w-full max-w-full overflow-hidden">
+          <div className="p-4 pt-2 w-full max-w-full overflow-hidden break-words whitespace-normal">
             <Tabs defaultValue="bot" className="w-full">
               <TabsList className="w-full grid grid-cols-4 mb-4">
                 <TabsTrigger value="bot" className="text-xs">
@@ -60,9 +63,33 @@ export const SupplierGuideModal = ({ isOpen, onClose }: SupplierGuideModalProps)
                 <div className="space-y-3">
                   <h3 className="font-semibold text-foreground flex items-center gap-2">
                     <Sparkles className="h-4 w-4 text-accent" />
+                    Як почати роботу?
+                  </h3>
+                  <GuideNumberedSteps
+                    steps={[
+                      {
+                        title: "Підключіть фіди",
+                        text: "Додайте XML/MyDrop/Prom.ua у кабінеті партнера. Товари потраплять на перевірку.",
+                      },
+                      {
+                        title: "Перевірте AI-описи",
+                        text: "Gemini згенерує опис і категорію. Відредагуйте перед публікацією, якщо потрібно.",
+                      },
+                      {
+                        title: "Черга постингу",
+                        text: "Новий партнер стає першим у черзі. Після публікації ви переходите в кінець.",
+                      },
+                      {
+                        title: "Замовлення",
+                        text: "Нові замовлення приходять у кабінет. Підтвердіть наявність і відправте ТТН.",
+                      },
+                    ]}
+                  />
+
+                  <h3 className="font-semibold text-foreground flex items-center gap-2 pt-1">
+                    <Sparkles className="h-4 w-4 text-accent" />
                     Що вміє наш бот?
                   </h3>
-                  
                   <div className="space-y-3">
                     <div className="p-3 bg-muted rounded-xl">
                       <div className="flex items-start gap-3">

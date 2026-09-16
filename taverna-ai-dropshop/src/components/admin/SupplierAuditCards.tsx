@@ -5,6 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "@/hooks/use-toast";
+import { vibrate } from "@/hooks/useTelegramUI";
 import { cn } from "@/lib/utils";
 
 type Risk = "low" | "medium" | "high";
@@ -94,6 +95,7 @@ export function SupplierAuditCards() {
 
   const decide = (approved: boolean) => {
     if (!current) return;
+    vibrate(approved ? "success" : "error");
     setExitDir(approved ? 1 : -1);
     setQueue((q) => q.slice(1));
     toast({

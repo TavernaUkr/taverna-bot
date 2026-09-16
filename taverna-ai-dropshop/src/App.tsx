@@ -33,6 +33,7 @@ import NotFound from "./pages/NotFound";
 import OAuthConsent from "./pages/OAuthConsent";
 import Login from "./pages/Login";
 import { AppBackProvider } from "@/hooks/useAppBack";
+import { TelegramUIBridge } from "@/hooks/useTelegramUI";
 import Ratings from "./pages/Ratings";
 import { FloatingDevRoleSwitcher } from "@/components/dev/FloatingDevRoleSwitcher";
 import { FloatingToolsProvider } from "@/components/floating/FloatingToolsContext";
@@ -87,6 +88,7 @@ function AnimatedRoutes() {
 
   return (
     <AppBackProvider>
+      <TelegramUIBridge>
       <TelegramStartParamRouter />
       <AnimatePresence mode="wait">
         <motion.div
@@ -96,7 +98,7 @@ function AnimatedRoutes() {
           exit="exit"
           variants={pageVariants}
           transition={pageTransition}
-          className="min-h-screen pb-safe w-full max-w-[100vw]"
+          className="min-h-screen pb-safe w-full max-w-[100vw] bg-tg-bg text-tg-text"
         >
           <Routes location={location}>
             <Route path="/" element={<Index />} />
@@ -136,6 +138,7 @@ function AnimatedRoutes() {
           </Routes>
         </motion.div>
       </AnimatePresence>
+      </TelegramUIBridge>
     </AppBackProvider>
   );
 }

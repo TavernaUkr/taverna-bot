@@ -158,6 +158,38 @@ async def ensure_supplier_status_timestamps() -> None:
         await conn.run_sync(_ensure)
 
 
+async def ensure_user_settings_columns() -> None:
+    """Live-режим: haptic_enabled / notifications_enabled на users, якщо колонок ще немає."""
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        insp = inspect(sync_conn)
+        if "users" not in set(insp.get_table_names()):
+            return
+        cols = {col["name"] for col in insp.get_columns("users")}
+        dialect = sync_conn.dialect.name
+        bool_default = "TRUE" if dialect == "postgresql" else "1"
+        if dialect == "postgresql":
+            sync_conn.execute(text("SET lock_timeout = '3s'"))
+        try:
+            if "haptic_enabled" not in cols:
+                sync_conn.execute(text(
+                    f"ALTER TABLE users ADD COLUMN haptic_enabled BOOLEAN DEFAULT {bool_default}"
+                ))
+                logger.info("Додано колонку users.haptic_enabled.")
+            if "notifications_enabled" not in cols:
+                sync_conn.execute(text(
+                    f"ALTER TABLE users ADD COLUMN notifications_enabled BOOLEAN DEFAULT {bool_default}"
+                ))
+                logger.info("Додано колонку users.notifications_enabled.")
+        except Exception as e:
+            logger.warning("Не вдалося додати колонки налаштувань users: %s", e)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
 async def get_db() -> AsyncSession:
     """
     FastAPI "Dependency" для отримання сесії БД.
@@ -188,3 +220,4 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await ensure_supplier_status_timestamps()
+    await ensure_user_settings_columns()

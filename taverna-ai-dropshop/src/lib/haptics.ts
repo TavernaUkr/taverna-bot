@@ -1,4 +1,5 @@
 // Telegram WebApp Haptic Feedback utility
+import { isHapticEnabledNow } from "@/hooks/useTelegramUI";
 
 type ImpactStyle = "light" | "medium" | "heavy" | "rigid" | "soft";
 type NotificationType = "error" | "success" | "warning";
@@ -12,9 +13,10 @@ export function triggerHapticFeedback(
   style?: ImpactStyle | NotificationType
 ) {
   try {
+    if (!isHapticEnabledNow()) return;
     // @ts-ignore - Telegram WebApp types
     const haptic = window.Telegram?.WebApp?.HapticFeedback;
-    
+
     if (!haptic) return;
 
     switch (type) {
@@ -36,7 +38,7 @@ export function triggerHapticFeedback(
 /**
  * Trigger impact feedback (for button presses, interactions)
  */
-export const hapticImpact = (style: ImpactStyle = "medium") => 
+export const hapticImpact = (style: ImpactStyle = "medium") =>
   triggerHapticFeedback("impact", style);
 
 /**
@@ -48,5 +50,5 @@ export const hapticNotification = (type: NotificationType = "success") =>
 /**
  * Trigger selection feedback (for selection changes)
  */
-export const hapticSelection = () => 
+export const hapticSelection = () =>
   triggerHapticFeedback("selection");

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft,
   Shield,
@@ -30,6 +30,7 @@ import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
 import { useTelegramAuthContext } from '@/components/TelegramAuthProvider';
 import { hapticSelection } from '@/lib/haptics';
+import { vibrate } from '@/hooks/useTelegramUI';
 import { DisputesManager } from '@/components/moderator/DisputesManager';
 import { IndividualBonusManager } from '@/components/moderator/IndividualBonusManager';
 import { TechSupportQueue } from '@/components/moderator/TechSupportQueue';
@@ -73,6 +74,7 @@ interface ModeratorStats {
 
 export default function ModeratorPanel() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { isLoading: authLoading, rolesLoading, isAuthenticated, roles } = useTelegramAuthContext();
   const [activeTab, setActiveTab] = useState('reports');
   const [reports, setReports] = useState<Report[]>([]);
@@ -91,6 +93,11 @@ export default function ModeratorPanel() {
   const hasModeratorAccess =
     isPreviewDevEnvironment() ||
     (isAuthenticated && (roles.includes('admin') || roles.includes('moderator')));
+
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (tab) setActiveTab(tab);
+  }, [searchParams]);
 
   useEffect(() => {
     if (hasModeratorAccess) {
@@ -154,6 +161,7 @@ export default function ModeratorPanel() {
   };
 
   const handleResolveReport = async (reportId: string, status: 'resolved' | 'dismissed') => {
+    vibrate(status === 'resolved' ? "success" : "error");
     setProcessingId(reportId);
     try {
       const { error } = await supabase

@@ -116,6 +116,8 @@ class User(Base):
     password_hash = Column(String(255), nullable=True)
     role = Column(Enum(UserRole), default=UserRole.client, nullable=False)
     loyalty_points = Column(Integer, default=0)
+    haptic_enabled = Column(Boolean, default=True)
+    notifications_enabled = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     orders = relationship("Order", back_populates="user")

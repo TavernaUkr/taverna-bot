@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import { hapticNotification } from "@/lib/haptics";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 interface ConnectWalletSheetProps {
   open: boolean;
@@ -25,6 +26,8 @@ export function ConnectWalletSheet({
   const [address, setAddress] = useState("");
   const [currency, setCurrency] = useState<"TON" | "USDT">("USDT");
   const [isBusy, setIsBusy] = useState(false);
+
+  useModalHistory(open, () => onOpenChange(false));
 
   const handleConnect = async () => {
     setIsBusy(true);

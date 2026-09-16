@@ -1,5 +1,6 @@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Info, Users, ShoppingBag, Shield, MessageCircle, ExternalLink } from "lucide-react";
+import { useModalHistory } from "@/hooks/useModalHistory";
 
 interface AppInfoModalProps {
   isOpen: boolean;
@@ -7,6 +8,7 @@ interface AppInfoModalProps {
 }
 
 export const AppInfoModal = ({ isOpen, onClose }: AppInfoModalProps) => {
+  useModalHistory(isOpen, onClose);
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-md max-h-[85vh] overflow-y-auto">

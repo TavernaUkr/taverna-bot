@@ -1,44 +1,45 @@
 # services/supplier_analyzer.py
-"""AI-модерація заявок постачальників (Gemini REST). Не чіпає логіку товарів."""
+"""AI-модерація заявок постачальників (google.genai SDK). Не чіпає логіку товарів."""
 import asyncio
 import logging
-from typing import Any, Dict, Optional
+from typing import Optional
 
-import aiohttp
+try:
+    from google import genai
+    from google.genai import types
+    from google.genai import errors as genai_errors
+except ImportError:
+    genai = None  # type: ignore
+    types = None  # type: ignore
+    genai_errors = None  # type: ignore
 
 from config_reader import config
+from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager
 
 logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini-3.6-flash"
 GEMINI_FALLBACK_MODEL = "gemini-3.6-flash"
 
-BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-)
-
-
-def _resolve_gemini_api_key() -> str:
-    secret = getattr(config, "gemini_api_key", None)
-    if secret:
-        return secret.get_secret_value().strip()
-    return ""
-
 
 class SupplierAnalyzer:
     """Короткий security-звіт по заявці магазину для CEO."""
 
     def __init__(self, api_key: Optional[str] = None):
-        self.api_key = (api_key or "").strip() or _resolve_gemini_api_key()
+        self._key_manager = get_key_manager()
         self.model_name = GEMINI_MODEL
         self.fallback_model = GEMINI_FALLBACK_MODEL
-        if not self.api_key:
-            logger.warning("GEMINI_API_KEY не знайдено. AI-скоринг заявок буде пропущено.")
+        if api_key and str(api_key).strip():
+            from services.gemini_key_manager import GeminiKeyManager
+            self._key_manager = GeminiKeyManager(
+                [str(api_key).strip(), *list(config.GEMINI_API_KEYS)]
+            )
+        if genai is None or not self._key_manager.has_keys():
+            logger.warning("GEMINI_API_KEYS не знайдено або google-genai не встановлено. AI-скоринг заявок буде пропущено.")
 
     @property
     def is_ready(self) -> bool:
-        return bool(self.api_key)
+        return bool(genai is not None and self._key_manager.has_keys())
 
     def _build_prompt(self, supplier_data: dict, has_duplicates: bool) -> str:
         return (
@@ -48,39 +49,48 @@ class SupplierAnalyzer:
         )
 
     async def _complete(self, model_name: str, prompt: str) -> str:
-        api_url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{model_name}:generateContent?key={self.api_key}"
-        )
-        payload: Dict[str, Any] = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 800},
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": BROWSER_USER_AGENT,
-        }
-        async with aiohttp.ClientSession(headers={"User-Agent": BROWSER_USER_AGENT}) as session:
-            async with session.post(api_url, headers=headers, json=payload) as resp:
-                if resp.status == 429:
-                    raise Exception("429 Rate Limit")
-                if resp.status == 503:
-                    raise Exception("503 High Demand")
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    raise Exception(f"Gemini API Error {resp.status}: {error_text}")
-                data = await resp.json()
-        try:
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except (KeyError, IndexError, TypeError):
-            raise Exception(f"Gemini повернув неочікувану відповідь: {data}")
+        if genai is None or types is None or not self._key_manager.has_keys():
+            raise Exception("Gemini client is not configured")
+        last_error: Optional[Exception] = None
+        for _ in range(max(1, self._key_manager.key_count)):
+            try:
+                active_key = self._key_manager.get_next_active_key()
+            except AllKeysExhaustedError as e:
+                raise Exception("429 Rate Limit") from e
+            client = genai.Client(api_key=active_key)
+            try:
+                response = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.2,
+                        max_output_tokens=800,
+                    ),
+                )
+            except Exception as e:
+                api_error = getattr(genai_errors, "APIError", None) if genai_errors else None
+                code = getattr(e, "code", None)
+                if (api_error and isinstance(e, api_error) and code == 429) or "429" in str(e):
+                    self._key_manager.mark_key_exhausted(active_key)
+                    last_error = e
+                    continue
+                if api_error and isinstance(e, api_error):
+                    if e.code == 503:
+                        raise Exception("503 High Demand") from e
+                    raise Exception(f"Gemini API Error {e.code}: {e.message or e}") from e
+                raise
+            text = (response.text or "").strip()
+            if not text:
+                raise Exception("Gemini повернув порожню відповідь")
+            return text
+        raise Exception("429 Rate Limit") from last_error
 
     async def analyze_supplier(self, supplier_data: dict, has_duplicates: bool) -> str:
         """Повертає текстовий звіт. 503 — до 3 спроб з паузою 5с."""
         if not self.is_ready:
             dup = "так" if has_duplicates else "ні"
             return (
-                "AI-аналіз пропущено (немає GEMINI_API_KEY).\n"
+                "AI-аналіз пропущено (немає GEMINI_API_KEYS).\n"
                 f"Дублікати в БД: {dup}.\n"
                 "Потрібна ручна перевірка заявки адміністратором."
             )
