@@ -154,6 +154,8 @@ class PartnerRegisterRequest(BaseModel):
     store_name: Optional[str] = None
     yml_link: Optional[str] = None
     xml_url: Optional[str] = None
+    source_type: Optional[str] = "xml"  # "xml" або "telegram"
+    telegram_channel_link: Optional[str] = None
     channel_link: Optional[str] = None
     telegram_channel: Optional[str] = None
     telegram_id: Optional[int] = None
@@ -181,11 +183,29 @@ class PartnerRegisterRequest(BaseModel):
             raise ValueError("name is required")
         return value
 
+    def resolved_source_type(self) -> str:
+        raw = (self.source_type or "xml").strip().lower()
+        if raw in ("telegram", "tg", "channel"):
+            return "telegram"
+        return "xml"
+
     def resolved_yml(self) -> Optional[str]:
+        if self.resolved_source_type() == "telegram":
+            return None
         value = (self.yml_link or self.xml_url or "").strip()
         return value or None
 
+    def resolved_telegram_channel_link(self) -> Optional[str]:
+        value = (self.telegram_channel_link or "").strip()
+        if value:
+            return value
+        if self.resolved_source_type() == "telegram":
+            return (self.channel_link or self.telegram_channel or "").strip() or None
+        return None
+
     def resolved_channel(self) -> Optional[str]:
+        if self.resolved_source_type() == "telegram":
+            return self.resolved_telegram_channel_link()
         value = (self.channel_link or self.telegram_channel or "").strip()
         return value or None
 
@@ -336,6 +356,8 @@ class PendingSupplierApplicationResponse(BaseModel):
     description: Optional[str] = None
     xml_url: Optional[str] = None
     yml_link: Optional[str] = None
+    source_type: Optional[str] = "xml"
+    telegram_channel_link: Optional[str] = None
     channel_link: Optional[str] = None
     manager_telegram: Optional[str] = None
     iban: Optional[str] = None
@@ -344,6 +366,7 @@ class PendingSupplierApplicationResponse(BaseModel):
     is_verified: bool = False
     telegram_id: Optional[int] = None
     ai_score_report: Optional[str] = None
+    scoring_result: Optional[str] = None
     trial_ends_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
@@ -394,6 +417,8 @@ class AdminDirectCreateSupplierRequest(BaseModel):
     store_name: Optional[str] = None
     yml_link: Optional[str] = None
     xml_url: Optional[str] = None
+    source_type: Optional[str] = "xml"  # "xml" або "telegram"
+    telegram_channel_link: Optional[str] = None
     description: Optional[str] = None
     store_description: Optional[str] = None
     edrpou_ipn: Optional[str] = None
@@ -418,9 +443,25 @@ class AdminDirectCreateSupplierRequest(BaseModel):
             raise ValueError("shop_name is required")
         return value
 
+    def resolved_source_type(self) -> str:
+        raw = (self.source_type or "xml").strip().lower()
+        if raw in ("telegram", "tg", "channel"):
+            return "telegram"
+        return "xml"
+
     def resolved_yml(self) -> Optional[str]:
+        if self.resolved_source_type() == "telegram":
+            return None
         value = (self.yml_link or self.xml_url or "").strip()
         return value or None
+
+    def resolved_telegram_channel_link(self) -> Optional[str]:
+        value = (self.telegram_channel_link or "").strip()
+        if value:
+            return value
+        if self.resolved_source_type() == "telegram":
+            return (self.channel_link or self.telegram_channel_url or "").strip() or None
+        return None
 
     def resolved_description(self) -> Optional[str]:
         value = (self.store_description or self.description or "").strip()
@@ -439,6 +480,8 @@ class AdminDirectCreateSupplierRequest(BaseModel):
         return value or None
 
     def resolved_channel(self) -> Optional[str]:
+        if self.resolved_source_type() == "telegram":
+            return self.resolved_telegram_channel_link()
         value = (self.channel_link or self.telegram_channel_url or "").strip()
         return value or None
 
@@ -473,6 +516,15 @@ class AdminManualAddRequest(BaseModel):
 
 class AdminTransferRequest(BaseModel):
     new_owner_telegram_id: int
+
+
+class SupplierTransferRequest(BaseModel):
+    """Адмін передає магазин користувачу за Telegram username."""
+    new_owner_username: str = Field(min_length=1)
+
+
+class SupplierTransferResponse(BaseModel):
+    message: str = "Права успішно передано"
 
 class AdminForcePostRequest(BaseModel):
     product_id: int
@@ -647,6 +699,12 @@ class OrderCreateResponse(BaseModel):
     status: OrderStatus
 
 
+class SupplierCreate(BaseModel):
+    """Вхідні дані для створення постачальника з типом джерела товарів."""
+    source_type: Optional[str] = "xml"  # "xml" або "telegram"
+    telegram_channel_link: Optional[str] = None
+
+
 class SupplierResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -659,6 +717,8 @@ class SupplierResponse(BaseModel):
 
     xml_url: Optional[str] = None
     shop_url: Optional[str] = None
+    source_type: Optional[str] = "xml"
+    telegram_channel_link: Optional[str] = None
 
     supplier_address: Optional[str] = None
     contact_phone: Optional[str] = None

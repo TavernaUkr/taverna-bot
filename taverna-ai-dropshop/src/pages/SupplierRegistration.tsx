@@ -6,8 +6,10 @@ import { z } from "zod";
 import { ArrowLeft, Building, User, Mail, Phone, FileText, Globe, ChevronRight, Send, Loader2, CheckCircle, AlertCircle, LogIn, Landmark } from "lucide-react";
 import { toast } from "sonner";
 import { useTelegramAuth } from "@/hooks/useTelegramAuth";
-import { registerPartner } from "@/lib/backendApi";
+import { useToast } from "@/hooks/use-toast";
+import { isDuplicateSourceError, registerPartner } from "@/lib/backendApi";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { vibrate } from "@/hooks/useTelegramUI";
 
 type SupplierType = "individual" | "company";
@@ -34,7 +36,8 @@ const supplierSchema = z.object({
     .min(2, "Назва магазину має містити мінімум 2 символи")
     .max(100, "Назва магазину не може перевищувати 100 символів"),
   xmlUrl: z.string().url("Невірний формат URL").optional().or(z.literal('')),
-  telegramChannel: z.string().optional(),
+  sourceType: z.enum(["xml", "telegram"]).default("xml"),
+  telegramChannelLink: z.string().optional(),
   telegram: z.string().optional(),
   managerTelegram: z.string().optional(),
   description: z.string().max(1000, "Опис не може перевищувати 1000 символів").optional(),
@@ -47,19 +50,31 @@ const supplierSchema = z.object({
     .max(100, "ПІБ занадто довге"),
   paymentBankName: z.string().optional(),
   agreeToTerms: z.literal(true, { errorMap: () => ({ message: "Необхідно прийняти умови" }) }),
+}).superRefine((data, ctx) => {
+  if (data.sourceType !== "telegram") {
+    return;
+  }
+  if (!(data.telegramChannelLink || "").trim()) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["telegramChannelLink"],
+      message: "Вкажіть Telegram-канал (наприклад @my_shoes_drop)",
+    });
+  }
 });
 
 type SupplierFormData = z.infer<typeof supplierSchema>;
 
 const SupplierRegistration = () => {
   const navigate = useNavigate();
+  const { toast: uiToast } = useToast();
   const { isAuthenticated, isLoading: authLoading, profile, authenticate } = useTelegramAuth();
   const [step, setStep] = useState(1);
   const [supplierType, setSupplierType] = useState<SupplierType | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<'idle' | 'success' | 'error'>('idle');
   
-  const { register, handleSubmit, trigger, formState: { errors }, setValue } = useForm<SupplierFormData>({
+  const { register, handleSubmit, trigger, formState: { errors }, setValue, watch } = useForm<SupplierFormData>({
     resolver: zodResolver(supplierSchema),
     mode: "onBlur",
     defaultValues: {
@@ -67,8 +82,11 @@ const SupplierRegistration = () => {
       email: profile?.email || '',
       phone: profile?.phone || '',
       telegram: profile?.telegram_username || '',
+      sourceType: "xml",
+      telegramChannelLink: "",
     }
   });
+  const sourceType = watch("sourceType") || "xml";
 
   // Pre-fill form when profile loads
   useEffect(() => {
@@ -93,6 +111,10 @@ const SupplierRegistration = () => {
       const initData: string = tg?.initData || "";
       const telegramId = profile?.telegram_id || tg?.initDataUnsafe?.user?.id;
 
+      const isTelegram = data.sourceType === "telegram";
+      const xmlLink = isTelegram ? null : (data.xmlUrl || null);
+      const telegramLink = isTelegram ? (data.telegramChannelLink || "").trim() || null : null;
+
       const formData = {
         supplier_type: supplierType === "company" ? "business" : "individual",
         full_name: data.fullName,
@@ -106,10 +128,12 @@ const SupplierRegistration = () => {
         name: data.shopName,
         store_name: data.shopName,
         shop_name: data.shopName,
-        yml_link: data.xmlUrl || null,
-        xml_url: data.xmlUrl || null,
-        channel_link: data.telegramChannel || null,
-        telegram_channel: data.telegramChannel || null,
+        source_type: data.sourceType,
+        yml_link: xmlLink,
+        xml_url: xmlLink,
+        telegram_channel_link: telegramLink,
+        channel_link: telegramLink,
+        telegram_channel: telegramLink,
         description: data.description || null,
         store_description: data.description || null,
         iban: data.paymentIban,
@@ -132,6 +156,14 @@ const SupplierRegistration = () => {
 
     } catch (error) {
       console.error('Submit error:', error);
+      if (isDuplicateSourceError(error)) {
+        setSubmitStatus('idle');
+        uiToast({
+          variant: "destructive",
+          title: "Помилка! Магазин з таким посиланням або каналом вже існує!",
+        });
+        return;
+      }
       setSubmitStatus('error');
       toast.error('Помилка відправки', {
         description: error instanceof Error ? error.message : 'Спробуйте пізніше',
@@ -536,6 +568,36 @@ const SupplierRegistration = () => {
               </div>
 
               <div className="space-y-2">
+                <label className="text-sm font-medium text-foreground">Джерело товарів *</label>
+                <input type="hidden" {...register("sourceType")} />
+                <div className="grid grid-cols-2 gap-1 p-1 bg-muted rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => setValue("sourceType", "xml", { shouldValidate: true })}
+                    className={`py-2.5 px-3 rounded-lg text-sm font-medium transition-colors ${
+                      sourceType === "xml"
+                        ? "bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    XML/MyDrop
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setValue("sourceType", "telegram", { shouldValidate: true })}
+                    className={`py-2.5 px-3 rounded-lg text-sm font-medium transition-colors ${
+                      sourceType === "telegram"
+                        ? "bg-background text-foreground shadow-sm"
+                        : "text-muted-foreground"
+                    }`}
+                  >
+                    Telegram Канал
+                  </button>
+                </div>
+              </div>
+
+              {sourceType !== "telegram" && (
+              <div className="space-y-2">
                 <label className="text-sm font-medium text-foreground">
                   Посилання на XML-фід (MyDrop, Prom, тощо)
                 </label>
@@ -551,19 +613,34 @@ const SupplierRegistration = () => {
                 <p className="text-xs text-muted-foreground">
                   AI автоматично проаналізує ваші товари, категорії та ціни
                 </p>
+                {errors.xmlUrl && (
+                  <p className="text-xs text-destructive">{errors.xmlUrl.message}</p>
+                )}
               </div>
+              )}
 
+              {sourceType === "telegram" && (
               <div className="space-y-2">
                 <label className="text-sm font-medium text-foreground">
-                  Telegram-канал з товарами (якщо є)
+                  Telegram-канал з товарами *
                 </label>
                 <input
-                  {...register("telegramChannel")}
+                  {...register("telegramChannelLink")}
                   type="text"
-                  placeholder="@your_shop_channel"
+                  placeholder="Наприклад: @my_shoes_drop"
                   className="w-full px-4 py-3 bg-muted border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
                 />
+                {errors.telegramChannelLink && (
+                  <p className="text-xs text-destructive">{errors.telegramChannelLink.message}</p>
+                )}
+                <Alert className="bg-accent/10 border-accent/20">
+                  <AlertCircle className="h-4 w-4 text-accent" />
+                  <AlertDescription className="text-xs text-muted-foreground">
+                    Бот автоматично читатиме ваші пости, розпізнаватиме ціни та розміри за допомогою ШІ і додаватиме товари в каталог. Бот має бути доданий в канал!
+                  </AlertDescription>
+                </Alert>
               </div>
+              )}
 
               <div className="space-y-2">
                 <label className="text-sm font-medium text-foreground">Опис вашого магазину</label>
@@ -653,7 +730,7 @@ const SupplierRegistration = () => {
                 Що відбудеться після відправки?
               </h4>
               <ul className="text-xs text-muted-foreground space-y-1">
-                <li>• AI проаналізує ваш XML-фід та товари</li>
+                <li>• {sourceType === "telegram" ? "AI проаналізує пости вашого Telegram-каналу" : "AI проаналізує ваш XML-фід та товари"}</li>
                 <li>• Перевіримо унікальність асортименту</li>
                 <li>• Адміністратор отримає звіт у Telegram</li>
                 <li>• Ви отримаєте сповіщення про рішення</li>

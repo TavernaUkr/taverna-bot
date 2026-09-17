@@ -107,6 +107,17 @@ export class BackendApiError extends Error {
   }
 }
 
+/** 400 від бекенду: XML-посилання або Telegram-канал уже зайняті іншим магазином. */
+export function isDuplicateSourceError(error: unknown): boolean {
+  if (!(error instanceof BackendApiError) || error.status !== 400) return false;
+  const msg = (error.message || "").toLowerCase();
+  return (
+    msg.includes("вже зареєстровано") ||
+    msg.includes("вже існує") ||
+    msg.includes("duplicate")
+  );
+}
+
 // Скільки максимум чекати відповідь бекенду, перш ніж вважати запит "завислим".
 // Без цього таймауту fetch() може висіти невизначено довго (наприклад, якщо
 // порт мовчки "тримає" з'єднання), а UI — вічно показувати skeleton-лоадери.
@@ -447,6 +458,8 @@ export interface BackendPartnerRegisterPayload {
   shop_name?: string;
   yml_link?: string | null;
   xml_url?: string | null;
+  source_type?: "xml" | "telegram" | null;
+  telegram_channel_link?: string | null;
   channel_link?: string | null;
   telegram_channel?: string | null;
   telegram_id?: number;
@@ -787,6 +800,8 @@ export interface BackendPendingSupplierApplication {
   description?: string | null;
   xml_url?: string | null;
   yml_link?: string | null;
+  source_type?: string | null;
+  telegram_channel_link?: string | null;
   channel_link?: string | null;
   manager_telegram?: string | null;
   iban?: string | null;
@@ -795,6 +810,7 @@ export interface BackendPendingSupplierApplication {
   is_verified: boolean;
   telegram_id?: number | null;
   ai_score_report?: string | null;
+  scoring_result?: string | null;
   trial_ends_at?: string | null;
   created_at?: string | null;
   approved_at?: string | null;
@@ -988,6 +1004,8 @@ export interface BackendDirectCreateSupplierPayload {
   shop_name: string;
   yml_link?: string | null;
   xml_url?: string | null;
+  source_type?: "xml" | "telegram" | null;
+  telegram_channel_link?: string | null;
   description?: string | null;
   manager_telegram?: string | null;
   channel_link?: string | null;
@@ -1009,6 +1027,25 @@ export async function directCreateSupplier(
     `${ADMIN_DIRECT_CREATE_SUPPLIER_ENDPOINT}${params}`,
     payload,
     "Не вдалося створити магазин",
+    adminTelegramHeaders()
+  );
+}
+
+export interface BackendSupplierTransferResponse {
+  message: string;
+}
+
+/** POST /api/v1/admin/suppliers/{id}/transfer — передати магазин за @username. */
+export async function transferSupplierOwnership(
+  supplierId: number,
+  newOwnerUsername: string,
+  telegramId?: number | null
+): Promise<BackendSupplierTransferResponse> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendPost<BackendSupplierTransferResponse>(
+    `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/transfer${params}`,
+    { new_owner_username: newOwnerUsername },
+    "Не вдалося передати права",
     adminTelegramHeaders()
   );
 }

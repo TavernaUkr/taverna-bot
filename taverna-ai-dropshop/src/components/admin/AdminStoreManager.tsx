@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Store, Settings, Loader2, UserPlus, Send, Shield, Eye, ArrowRightLeft,
+  Store, Settings, Loader2, UserPlus, Send, Shield, Eye,
   Bot, Package, Crown, AlertTriangle, Users, Wallet
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -17,8 +17,9 @@ import {
 } from "@/components/ui/dialog";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { useToast } from "@/hooks/use-toast";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
-import { fetchAdminStores } from "@/lib/backendApi";
+import { BackendApiError, fetchAdminStores, transferSupplierOwnership } from "@/lib/backendApi";
 
 interface AdminSupplier {
   id: string;
@@ -42,12 +43,13 @@ interface AdminSupplier {
 
 export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partners' | 'my' }) {
   const navigate = useNavigate();
-  const { realProfile, profile } = useTelegramAuthContext();
+  const { toast: uiToast } = useToast();
+  const { profile } = useTelegramAuthContext();
   const [suppliers, setSuppliers] = useState<AdminSupplier[]>([]);
   const [mySupplierIds, setMySupplierIds] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [transferDialog, setTransferDialog] = useState<{ supplier: AdminSupplier } | null>(null);
-  const [transferTelegramId, setTransferTelegramId] = useState("");
+  const [transferUsername, setTransferUsername] = useState("");
   const [isTransferring, setIsTransferring] = useState(false);
   const [editManagerDialog, setEditManagerDialog] = useState<{ supplier: AdminSupplier } | null>(null);
   const [managerTelegram, setManagerTelegram] = useState("");
@@ -118,71 +120,41 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
   };
 
   const handleTransferOwnership = async () => {
-    if (!transferDialog || !transferTelegramId.trim()) {
-      toast.error("Вкажіть Telegram ID нового власника");
+    if (!transferDialog || !transferUsername.trim()) {
+      uiToast({
+        variant: "destructive",
+        title: "Вкажіть @username користувача Telegram",
+      });
       return;
     }
 
     setIsTransferring(true);
     try {
-      const { data: profiles } = await supabase
-        .from("profiles")
-        .select("id, telegram_id, first_name, last_name")
-        .eq("telegram_id", parseInt(transferTelegramId))
-        .limit(1);
-
-      if (!profiles?.length) {
-        toast.error("Користувача з таким Telegram ID не знайдено. Попросіть його спочатку відкрити додаток.");
-        setIsTransferring(false);
-        return;
-      }
-
-      const targetProfile = profiles[0];
-
-      // Add supplier role to user
-      await supabase
-        .from("user_roles")
-        .upsert(
-          { user_id: targetProfile.id, role: "supplier" as any },
-          { onConflict: "user_id,role" }
-        );
-
-      // Update supplier: set manager_telegram to mark as transferred
-      await supabase
-        .from("suppliers")
-        .update({
-          manager_telegram: `@tg_${transferTelegramId}`,
-          updated_at: new Date().toISOString(),
-        } as any)
-        .eq("id", transferDialog.supplier.id);
-
-      // Remove admin's shop_manager_link for this store (admin loses management)
-      if (realProfile?.id) {
-        await supabase
-          .from("shop_manager_links")
-          .delete()
-          .eq("supplier_id", transferDialog.supplier.id)
-          .eq("profile_id", realProfile.id);
-      }
-
-      // Create shop_manager_link for new owner
-      await supabase
-        .from("shop_manager_links")
-        .upsert(
-          { supplier_id: transferDialog.supplier.id, profile_id: targetProfile.id, assigned_by: realProfile?.id || null },
-          { onConflict: "supplier_id,profile_id" } as any
-        );
-
-      toast.success(
-        `Магазин "${transferDialog.supplier.shop_name}" передано користувачу ${targetProfile.first_name || ""} ${targetProfile.last_name || ""}`
+      await transferSupplierOwnership(
+        Number(transferDialog.supplier.id),
+        transferUsername.trim(),
+        adminTelegramId ? Number(adminTelegramId) : undefined
       );
-
+      uiToast({
+        title: "Права передано",
+        className: "bg-green-600 text-white border-green-700",
+      });
       setTransferDialog(null);
-      setTransferTelegramId("");
-      fetchSuppliers();
+      setTransferUsername("");
+      await fetchSuppliers();
     } catch (err: any) {
       console.error("Transfer error:", err);
-      toast.error(err.message || "Помилка передачі магазину");
+      if (err instanceof BackendApiError && err.status === 404) {
+        uiToast({
+          variant: "destructive",
+          title: "Користувача не знайдено",
+        });
+        return;
+      }
+      uiToast({
+        variant: "destructive",
+        title: err.message || "Помилка передачі магазину",
+      });
     } finally {
       setIsTransferring(false);
     }
@@ -343,9 +315,14 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
                               onClick={() => { setEditManagerDialog({ supplier }); setManagerTelegram(supplier.manager_telegram || ""); }}>
                               <UserPlus className="h-3.5 w-3.5" />
                             </Button>
-                            <Button variant="outline" size="sm" className="gap-1.5 text-xs"
-                              onClick={() => { setTransferDialog({ supplier }); setTransferTelegramId(""); }}>
-                              <ArrowRightLeft className="h-3.5 w-3.5" />
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="gap-1.5 text-xs border-indigo-300 text-indigo-600 hover:bg-indigo-50 hover:text-indigo-700 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-900/30"
+                              onClick={() => { setTransferDialog({ supplier }); setTransferUsername(""); }}
+                            >
+                              <UserPlus className="h-3.5 w-3.5" />
+                              Передати права
                             </Button>
                             <Button variant="outline" size="sm" className="gap-1.5 text-xs"
                               onClick={() => navigate(`/wallet/${supplier.id}`)}>
@@ -381,15 +358,15 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
       </ScrollArea>
 
       {/* Transfer Ownership Dialog */}
-      <Dialog open={!!transferDialog} onOpenChange={() => setTransferDialog(null)}>
+      <Dialog open={!!transferDialog} onOpenChange={() => { if (!isTransferring) setTransferDialog(null); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <ArrowRightLeft className="h-5 w-5 text-primary" />
-              Передача магазину
+              <UserPlus className="h-5 w-5 text-indigo-600" />
+              Передача прав на магазин
             </DialogTitle>
             <DialogDescription>
-              Передайте право власності магазину «{transferDialog?.supplier.shop_name}» іншому користувачу.
+              Введіть @username користувача Telegram, якому хочете передати цей магазин. Користувач повинен мати аккаунт у боті.
             </DialogDescription>
           </DialogHeader>
 
@@ -400,52 +377,33 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
                 <div>
                   <p className="text-xs font-medium text-destructive">Увага! Ця дія незворотна</p>
                   <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                    Після передачі ви втратите право керування цим магазином. 
+                    Після передачі ви втратите право керування цим магазином.
                     Новий власник отримає повний контроль.
                   </p>
                 </div>
               </div>
             </div>
 
-            <div className="p-3 bg-muted/50 rounded-lg">
-              <p className="text-xs text-muted-foreground">
-                <strong>Як отримати Telegram ID:</strong><br />
-                Попросіть нового власника відкрити бота @taverna_ukr_bot — він отримає свій ID.
-              </p>
-            </div>
-
             <div className="space-y-2">
-              <Label>Telegram ID нового власника</Label>
+              <Label>Telegram username</Label>
               <Input
-                value={transferTelegramId}
-                onChange={e => setTransferTelegramId(e.target.value.replace(/\D/g, ""))}
-                placeholder="123456789"
-                type="text"
-                inputMode="numeric"
+                value={transferUsername}
+                onChange={e => setTransferUsername(e.target.value)}
+                placeholder="@username"
+                autoComplete="off"
               />
-            </div>
-
-            <div className="p-3 bg-primary/5 rounded-lg">
-              <p className="text-xs text-muted-foreground"><strong>Що відбудеться:</strong></p>
-              <ul className="text-xs text-muted-foreground mt-1 space-y-0.5 list-disc pl-4">
-                <li>Новому власнику надається роль «supplier»</li>
-                <li>Магазин переходить до розділу «Партнери»</li>
-                <li>Ви втрачаєте право керування цим магазином</li>
-                <li>Новий власник зможе призначати свого менеджера</li>
-              </ul>
             </div>
           </div>
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setTransferDialog(null)}>Скасувати</Button>
+            <Button variant="outline" onClick={() => setTransferDialog(null)} disabled={isTransferring}>Скасувати</Button>
             <Button
-              variant="destructive"
               onClick={handleTransferOwnership}
-              disabled={isTransferring || !transferTelegramId.trim()}
-              className="gap-2"
+              disabled={isTransferring || !transferUsername.trim()}
+              className="gap-2 bg-indigo-600 hover:bg-indigo-700 text-white"
             >
               {isTransferring ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              Передати назавжди
+              Передати
             </Button>
           </DialogFooter>
         </DialogContent>

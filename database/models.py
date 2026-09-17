@@ -151,6 +151,9 @@ class Supplier(Base):
     api_key = Column(String(255), nullable=True)
     xml_url = Column(Text, nullable=True) 
     shop_url = Column(Text, nullable=True)
+    # xml = YML/XML-фідер; telegram = пости з каналу постачальника
+    source_type = Column(String, default="xml")
+    telegram_channel_link = Column(String, nullable=True)  # t.me/my_channel або @my_channel
 
     # --- MyDrop REST API (заміна XML-парсингу) ---
     mydrop_api_key = Column(String(255), nullable=True)  # X-API-KEY постачальника з кабінету MyDrop

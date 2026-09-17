@@ -5,6 +5,7 @@
 """
 import asyncio
 import html
+import json
 import logging
 import math
 import time
@@ -40,6 +41,7 @@ from database.models import (
 )
 from api.auth import validate_init_data
 from services.mydrop_api import InvalidMyDropYmlLinkError, normalize_mydrop_yml_link
+from services.supplier_analyzer import SupplierAnalyzer, analyze_telegram_channel
 from services.ai_queue_worker import (
     BLOCKED_SUPPLIER_STATUSES,
     build_ai_queue_view,
@@ -147,6 +149,8 @@ def _payload_for_ai(request_data: PartnerRegisterRequest, store_name: str) -> Di
         "email": request_data.email,
         "phone": request_data.phone,
         "yml_link": request_data.resolved_yml(),
+        "source_type": request_data.resolved_source_type(),
+        "telegram_channel_link": request_data.resolved_telegram_channel_link(),
         "channel_link": request_data.resolved_channel(),
         "manager_telegram": request_data.manager_telegram,
         "store_description": request_data.resolved_description(),
@@ -190,6 +194,85 @@ async def _has_duplicates(
     return (await db.execute(stmt)).scalar_one_or_none() is not None
 
 
+DUPLICATE_SOURCE_DETAIL = (
+    "Магазин з таким посиланням або каналом вже зареєстровано в системі."
+)
+
+
+def _normalize_yml_key(value: Optional[str]) -> Optional[str]:
+    raw = (value or "").strip().rstrip("/").lower()
+    return raw or None
+
+
+def _normalize_tg_key(value: Optional[str]) -> Optional[str]:
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    raw = raw.replace("https://", "").replace("http://", "").replace("www.", "")
+    lower = raw.lower()
+    for prefix in ("t.me/", "telegram.me/", "telegram.dog/"):
+        if lower.startswith(prefix):
+            raw = raw[len(prefix):]
+            lower = raw.lower()
+            break
+    if lower.startswith("s/"):
+        raw = raw[2:]
+        lower = raw.lower()
+    return raw.strip("/@").lower() or None
+
+
+async def assert_source_not_duplicate(
+    db: AsyncSession,
+    source_type: str,
+    *,
+    yml_link: Optional[str] = None,
+    telegram_channel_link: Optional[str] = None,
+    exclude_id: Optional[int] = None,
+) -> None:
+    """Стоп-кран: той самий XML або Telegram-канал не можна зареєструвати двічі."""
+    source = (source_type or "xml").strip().lower()
+    stmt = select(Supplier).where(Supplier.status != SupplierStatus.deleted)
+    if exclude_id is not None:
+        stmt = stmt.where(Supplier.id != exclude_id)
+
+    if source == "telegram":
+        needle = _normalize_tg_key(telegram_channel_link)
+        if not needle:
+            return
+        stmt = stmt.where(
+            or_(
+                Supplier.telegram_channel_link.isnot(None),
+                Supplier.channel_link.isnot(None),
+                Supplier.telegram_channel.isnot(None),
+            )
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+        for row in rows:
+            for raw in (
+                getattr(row, "telegram_channel_link", None),
+                row.channel_link,
+                row.telegram_channel,
+            ):
+                if _normalize_tg_key(raw) == needle:
+                    raise HTTPException(status_code=400, detail=DUPLICATE_SOURCE_DETAIL)
+        return
+
+    needle = _normalize_yml_key(yml_link)
+    if not needle:
+        return
+    stmt = stmt.where(
+        or_(
+            Supplier.yml_link.isnot(None),
+            Supplier.xml_url.isnot(None),
+        )
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    for row in rows:
+        for raw in (row.yml_link, row.xml_url):
+            if _normalize_yml_key(raw) == needle:
+                raise HTTPException(status_code=400, detail=DUPLICATE_SOURCE_DETAIL)
+
+
 async def _notify_admins_after_ai(supplier: Supplier) -> None:
     store = supplier.store_name or supplier.name or "-"
     legal = _legal_type_label(supplier.supplier_type)
@@ -224,8 +307,18 @@ async def _process_application_background(
 ) -> None:
     """Окрема сесія БД: request-сесія вже закрита після відповіді клієнту."""
     analyzer = SupplierAnalyzer()
+    source_type = str(supplier_data.get("source_type") or "xml").strip().lower()
+    channel_link = (
+        supplier_data.get("telegram_channel_link")
+        or supplier_data.get("channel_link")
+        or ""
+    )
     try:
-        report = await analyzer.analyze_supplier(supplier_data, has_duplicates)
+        if source_type == "telegram":
+            result = await analyze_telegram_channel(str(channel_link or ""))
+            report = json.dumps(result, ensure_ascii=False, indent=2)
+        else:
+            report = await analyzer.analyze_supplier(supplier_data, has_duplicates)
     except Exception as e:
         logger.error("AI-скоринг заявки #%s впав: %s", supplier_id, e, exc_info=True)
         report = (
@@ -592,6 +685,13 @@ async def register_partner(
         yml_link, extracted_key = normalize_mydrop_yml_link(request_data.resolved_yml())
     except InvalidMyDropYmlLinkError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    source_type = request_data.resolved_source_type()
+    telegram_channel_link = request_data.resolved_telegram_channel_link()
+    if source_type == "telegram" and not telegram_channel_link:
+        raise HTTPException(
+            status_code=400,
+            detail="Для джерела Telegram вкажіть посилання на канал (наприклад @my_shoes_drop).",
+        )
     channel_link = request_data.resolved_channel()
     edrpou_ipn = request_data.resolved_edrpou_ipn()
     iban = request_data.resolved_iban()
@@ -623,6 +723,12 @@ async def register_partner(
     has_duplicates = await _has_duplicates(
         db, edrpou_ipn, yml_link, mydrop_api_key=extracted_key,
     )
+    await assert_source_not_duplicate(
+        db,
+        source_type,
+        yml_link=yml_link,
+        telegram_channel_link=telegram_channel_link,
+    )
     trial_ends_at = None
     if legal_type == SupplierLegalType.individual:
         trial_ends_at = datetime.now(timezone.utc) + timedelta(days=30)
@@ -639,6 +745,8 @@ async def register_partner(
             status=SupplierStatus.pending_ai_analysis,
             supplier_type=legal_type,
             yml_link=yml_link,
+            source_type=source_type,
+            telegram_channel_link=telegram_channel_link,
             channel_link=channel_link,
             xml_url=yml_link,
             mydrop_api_key=extracted_key,

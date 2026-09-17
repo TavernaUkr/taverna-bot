@@ -158,6 +158,31 @@ async def ensure_supplier_status_timestamps() -> None:
         await conn.run_sync(_ensure)
 
 
+async def ensure_supplier_telegram_source_columns() -> None:
+    """Live-режим: source_type / telegram_channel_link на suppliers, якщо колонок ще немає."""
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        insp = inspect(sync_conn)
+        if "suppliers" not in set(insp.get_table_names()):
+            return
+        cols = {col["name"] for col in insp.get_columns("suppliers")}
+        if "source_type" not in cols:
+            sync_conn.execute(text(
+                "ALTER TABLE suppliers ADD COLUMN source_type VARCHAR DEFAULT 'xml'"
+            ))
+            logger.info("Додано колонку suppliers.source_type.")
+        if "telegram_channel_link" not in cols:
+            sync_conn.execute(text(
+                "ALTER TABLE suppliers ADD COLUMN telegram_channel_link VARCHAR"
+            ))
+            logger.info("Додано колонку suppliers.telegram_channel_link.")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
 async def ensure_user_settings_columns() -> None:
     """Live-режим: haptic_enabled / notifications_enabled на users, якщо колонок ще немає."""
     if engine is None:
@@ -221,3 +246,4 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
     await ensure_supplier_status_timestamps()
     await ensure_user_settings_columns()
+    await ensure_supplier_telegram_source_columns()

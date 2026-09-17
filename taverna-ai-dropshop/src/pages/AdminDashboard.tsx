@@ -57,6 +57,8 @@ interface SupplierApplication {
   tax_id: string;
   description: string | null;
   xml_url: string | null;
+  source_type?: string | null;
+  telegram_channel_link?: string | null;
   manager_telegram?: string | null;
   status: string;
   created_at: string;
@@ -68,6 +70,7 @@ interface SupplierApplication {
   profile_id: string | null;
   telegram_id: number | null;
   ai_score_report?: string | null;
+  scoring_result?: string | null;
   deletion_reason?: string | null;
 }
 
@@ -130,6 +133,82 @@ function managerTelegramUrl(raw?: string | null): string | null {
   return value ? `https://t.me/${value}` : null;
 }
 
+interface TelegramAiScore {
+  is_dropship: boolean;
+  niche: string;
+  price_range: string;
+  description_quality: string;
+  admin_summary: string;
+}
+
+function parseTelegramAiScore(raw?: string | null): TelegramAiScore | null {
+  if (!raw) return null;
+  const text = raw.trim();
+  if (!text) return null;
+  try {
+    const first = text.indexOf("{");
+    const last = text.lastIndexOf("}");
+    const candidate = first !== -1 && last > first ? text.slice(first, last + 1) : text;
+    const parsed = JSON.parse(candidate);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (!("is_dropship" in parsed) || !("niche" in parsed)) return null;
+    return {
+      is_dropship: Boolean(parsed.is_dropship),
+      niche: String(parsed.niche ?? "—"),
+      price_range: String(parsed.price_range ?? "—"),
+      description_quality: String(parsed.description_quality ?? "—"),
+      admin_summary: String(parsed.admin_summary ?? ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function TelegramScoreDashboard({ score }: { score: TelegramAiScore }) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-slate-950/80 backdrop-blur-md p-3 space-y-3 shadow-lg shadow-indigo-500/10">
+      <p className="text-sm font-semibold text-indigo-200 flex items-center gap-1.5">
+        <Bot className="h-4 w-4" />
+        🤖 AI-аналіз каналу
+      </p>
+      <div className="grid grid-cols-3 gap-2">
+        <div className="rounded-lg bg-white/5 border border-white/10 p-2 min-w-0">
+          <p className="text-[10px] text-slate-400 leading-tight">🏷️ Ніша</p>
+          <p className="text-xs font-medium text-white mt-1 break-words">{score.niche || "—"}</p>
+        </div>
+        <div className="rounded-lg bg-white/5 border border-white/10 p-2 min-w-0">
+          <p className="text-[10px] text-slate-400 leading-tight">💰 Ціни</p>
+          <p className="text-xs font-medium text-white mt-1 break-words">{score.price_range || "—"}</p>
+        </div>
+        <div className="rounded-lg bg-white/5 border border-white/10 p-2 min-w-0">
+          <p className="text-[10px] text-slate-400 leading-tight">📦 Дропшипінг</p>
+          <span
+            className={`mt-1 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+              score.is_dropship
+                ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/30"
+                : "bg-red-500/20 text-red-300 border border-red-400/30"
+            }`}
+          >
+            {score.is_dropship ? "Підтверджено" : "Ризик"}
+          </span>
+        </div>
+      </div>
+      <div>
+        <p className="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Опис</p>
+        <p className="text-sm text-slate-400 leading-relaxed break-words">
+          {score.description_quality || "—"}
+        </p>
+      </div>
+      {score.admin_summary ? (
+        <div className="bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 p-3 rounded-lg">
+          <p className="text-[10px] uppercase tracking-wide text-indigo-400 mb-1">🤖 Висновок AI</p>
+          <p className="text-sm leading-relaxed break-words">{score.admin_summary}</p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function mapSupplierApplication(r: BackendPendingSupplierApplication): SupplierApplication {
   return {
     id: String(r.id),
@@ -142,6 +221,8 @@ function mapSupplierApplication(r: BackendPendingSupplierApplication): SupplierA
     tax_id: r.tax_id || "",
     description: r.description,
     xml_url: r.xml_url || r.yml_link,
+    source_type: r.source_type || "xml",
+    telegram_channel_link: r.telegram_channel_link || r.channel_link,
     manager_telegram: r.manager_telegram,
     status: r.status,
     created_at: r.created_at || new Date().toISOString(),
@@ -152,7 +233,8 @@ function mapSupplierApplication(r: BackendPendingSupplierApplication): SupplierA
     suggested_categories: null,
     profile_id: null,
     telegram_id: r.telegram_id ?? null,
-    ai_score_report: r.ai_score_report,
+    ai_score_report: r.ai_score_report || r.scoring_result,
+    scoring_result: r.scoring_result || r.ai_score_report,
     deletion_reason: r.deletion_reason,
   };
 }
@@ -699,6 +781,12 @@ export default function AdminDashboard() {
                         ) : (
                           pendingSuppliers.map((app) => {
                             const xmlUrl = app.xml_url;
+                            const isTelegram = app.source_type === "telegram";
+                            const channelUrl = managerTelegramUrl(app.telegram_channel_link);
+                            const telegramScore = isTelegram
+                              ? parseTelegramAiScore(app.ai_score_report || app.scoring_result)
+                              : null;
+                            const rawReport = app.ai_score_report || app.scoring_result;
                             return (
                             <Card key={app.id} className="overflow-hidden border-border">
                               <CardContent className="p-4 space-y-4">
@@ -741,9 +829,33 @@ export default function AdminDashboard() {
                                   </div>
                                   <div className="flex justify-between gap-3 items-start">
                                     <span className="text-muted-foreground shrink-0 flex items-center gap-1">
-                                      <Link2 className="h-3.5 w-3.5" /> XML
+                                      {isTelegram ? (
+                                        <MessageCircle className="h-3.5 w-3.5 text-sky-400 fill-sky-400/30" />
+                                      ) : (
+                                        <Link2 className="h-3.5 w-3.5" />
+                                      )}
+                                      {isTelegram ? "Telegram" : "XML"}
                                     </span>
-                                    {xmlUrl ? (
+                                    {isTelegram ? (
+                                      app.telegram_channel_link ? (
+                                        channelUrl ? (
+                                        <a
+                                          href={channelUrl}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          className="text-sky-400 text-right text-xs break-all underline underline-offset-2 hover:text-sky-300"
+                                        >
+                                          {app.telegram_channel_link}
+                                        </a>
+                                        ) : (
+                                          <span className="text-sky-400 text-right text-xs break-all">
+                                            {app.telegram_channel_link}
+                                          </span>
+                                        )
+                                      ) : (
+                                        <span className="text-foreground">—</span>
+                                      )
+                                    ) : xmlUrl ? (
                                       <a
                                         href={xmlUrl}
                                         target="_blank"
@@ -758,15 +870,19 @@ export default function AdminDashboard() {
                                   </div>
                                 </div>
 
+                                {telegramScore ? (
+                                  <TelegramScoreDashboard score={telegramScore} />
+                                ) : (
                                 <div className="rounded-xl border border-violet-400/30 bg-violet-500/10 p-3 space-y-2">
                                   <p className="text-sm font-semibold text-violet-700 dark:text-violet-300 flex items-center gap-1.5">
                                     <Bot className="h-4 w-4" />
                                     🤖 AI-аналіз
                                   </p>
                                   <p className="text-sm text-foreground/90 whitespace-pre-wrap break-words leading-relaxed max-h-64 overflow-y-auto">
-                                    {app.ai_score_report || "AI-звіт ще готується. Оновіть список через хвилину."}
+                                    {rawReport || "AI-звіт ще готується. Оновіть список через хвилину."}
                                   </p>
                                 </div>
+                                )}
 
                                 <div className="grid grid-cols-2 gap-2 pt-1">
                                   <Button

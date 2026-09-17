@@ -2,13 +2,14 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft, Store, Plus, Package, Settings,
-  Loader2, Star, ShoppingCart, MessageSquare, Megaphone, Send, Wallet, Trash2,
+  Loader2, Star, ShoppingCart, MessageSquare, Megaphone, Send, Wallet, Trash2, UserPlus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
@@ -21,11 +22,13 @@ import {
 import { supabase } from "@/integrations/supabase/client";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { toast } from "sonner";
+import { useToast } from "@/hooks/use-toast";
 import { hapticSelection } from "@/lib/haptics";
 import {
   BackendApiError,
   fetchMySupplier,
   requestSupplierDeletion,
+  transferSupplierOwnership,
 } from "@/lib/backendApi";
 
 interface ShopInfo {
@@ -84,6 +87,7 @@ const isLovableDevEnvironment = () => {
 
 export default function MyShops() {
   const navigate = useNavigate();
+  const { toast: uiToast } = useToast();
   const { effectiveRole, profile } = useTelegramAuthContext();
   const [shops, setShops] = useState<ShopInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -91,6 +95,9 @@ export default function MyShops() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteReason, setDeleteReason] = useState("");
   const [isSubmittingDeletion, setIsSubmittingDeletion] = useState(false);
+  const [transferShop, setTransferShop] = useState<ShopInfo | null>(null);
+  const [transferUsername, setTransferUsername] = useState("");
+  const [isTransferring, setIsTransferring] = useState(false);
 
   const isSupplier = effectiveRole === "supplier";
   const isShopManager = effectiveRole === "shop_manager";
@@ -107,8 +114,8 @@ export default function MyShops() {
     fetchShops();
   }, [effectiveRole, profile?.id]);
 
-  const fetchShops = async () => {
-    setIsLoading(true);
+  const fetchShops = async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setIsLoading(true);
     try {
       const allShops: ShopInfo[] = [];
 
@@ -215,6 +222,63 @@ export default function MyShops() {
     hapticSelection();
     setDeleteReason("");
     setDeleteOpen(true);
+  };
+
+  const openTransferDialog = (shop: ShopInfo) => {
+    hapticSelection();
+    setTransferShop(shop);
+    setTransferUsername("");
+  };
+
+  const submitTransfer = async () => {
+    if (!transferShop) return;
+    const username = transferUsername.trim();
+    if (!username) {
+      uiToast({
+        variant: "destructive",
+        title: "Вкажіть @username користувача Telegram",
+      });
+      return;
+    }
+
+    const telegramId =
+      (profile as { telegram_id?: number | null } | null)?.telegram_id ||
+      (typeof window !== "undefined"
+        ? (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id
+        : null);
+
+    setIsTransferring(true);
+    try {
+      await transferSupplierOwnership(
+        Number(transferShop.id),
+        username,
+        telegramId ? Number(telegramId) : undefined
+      );
+      uiToast({
+        title: "Права передано",
+        className: "bg-green-600 text-white border-green-700",
+      });
+      setTransferShop(null);
+      setTransferUsername("");
+      setShops((prev) => prev.filter((shop) => shop.id !== transferShop.id));
+      await fetchShops({ silent: true });
+    } catch (error) {
+      if (error instanceof BackendApiError && error.status === 404) {
+        uiToast({
+          variant: "destructive",
+          title: "Користувача не знайдено",
+        });
+        return;
+      }
+      const message =
+        error instanceof BackendApiError ? error.message : "Не вдалося передати права";
+      uiToast({
+        variant: "destructive",
+        title: message,
+      });
+    } finally {
+      setIsTransferring(false);
+    }
   };
 
   const submitDeletion = async () => {
@@ -436,16 +500,29 @@ export default function MyShops() {
                 </div>
 
                 {shop.role === "owner" && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="w-full h-9 mt-2 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30 border border-red-200 dark:border-red-800"
-                    disabled={shop.deletion_requested}
-                    onClick={openDeleteDialog}
-                  >
-                    <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-                    {shop.deletion_requested ? "Заявку надіслано" : "Видалити магазин"}
-                  </Button>
+                  <div className="flex gap-2 mt-2">
+                    {isAdmin && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="flex-1 h-9 border-indigo-300 text-indigo-600 hover:bg-indigo-50 hover:text-indigo-700 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-900/30"
+                        onClick={() => openTransferDialog(shop)}
+                      >
+                        <UserPlus className="h-3.5 w-3.5 mr-1.5" />
+                        Передати права
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className={`${isAdmin ? "flex-1" : "w-full"} h-9 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30 border border-red-200 dark:border-red-800`}
+                      disabled={shop.deletion_requested}
+                      onClick={openDeleteDialog}
+                    >
+                      <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+                      {shop.deletion_requested ? "Заявку надіслано" : "Видалити магазин"}
+                    </Button>
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -539,6 +616,63 @@ export default function MyShops() {
                 <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
               ) : null}
               Надіслати запит на видалення
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={!!transferShop}
+        onOpenChange={(open) => {
+          if (!isTransferring && !open) {
+            setTransferShop(null);
+            setTransferUsername("");
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-[400px] mx-4">
+          <DialogHeader>
+            <DialogTitle className="text-slate-900 dark:text-white">
+              Передача прав на магазин
+            </DialogTitle>
+            <DialogDescription className="text-slate-500 dark:text-slate-400">
+              Введіть @username користувача Telegram, якому хочете передати цей магазин. Користувач повинен мати аккаунт у боті.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="transfer-username" className="text-slate-800 dark:text-slate-200">
+              Telegram username
+            </Label>
+            <Input
+              id="transfer-username"
+              value={transferUsername}
+              onChange={(event) => setTransferUsername(event.target.value)}
+              placeholder="@username"
+              autoComplete="off"
+            />
+          </div>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setTransferShop(null);
+                setTransferUsername("");
+              }}
+              disabled={isTransferring}
+            >
+              Скасувати
+            </Button>
+            <Button
+              className="bg-indigo-600 hover:bg-indigo-700 text-white"
+              onClick={submitTransfer}
+              disabled={isTransferring || !transferUsername.trim()}
+            >
+              {isTransferring ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : (
+                <UserPlus className="h-4 w-4 mr-1.5" />
+              )}
+              Передати
             </Button>
           </DialogFooter>
         </DialogContent>

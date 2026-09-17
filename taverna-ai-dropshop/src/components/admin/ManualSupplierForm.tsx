@@ -1,24 +1,30 @@
 import { useState } from "react";
-import { Store, Loader2, Package, Link2, Bot, Info } from "lucide-react";
+import { Store, Loader2, Package, Link2, Bot, Info, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { toast } from "sonner";
+import { useToast } from "@/hooks/use-toast";
 import { hapticNotification } from "@/lib/haptics";
-import { directCreateSupplier } from "@/lib/backendApi";
+import { directCreateSupplier, isDuplicateSourceError } from "@/lib/backendApi";
 
 interface ManualSupplierFormProps {
   onSuccess?: () => void;
 }
 
 export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
+  const { toast: uiToast } = useToast();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isMyDrop, setIsMyDrop] = useState(false);
+  const [sourceType, setSourceType] = useState<"xml" | "telegram">("xml");
   const [formData, setFormData] = useState({
     shop_name: "",
     telegram_channel_url: "",
+    telegram_channel_link: "",
     manager_telegram: "",
     xml_url: "",
     payment_iban: "",
@@ -34,7 +40,12 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
       return;
     }
 
-    if (!isMyDrop && !formData.xml_url) {
+    if (sourceType === "telegram") {
+      if (!formData.telegram_channel_link.trim()) {
+        toast.error("Вкажіть Telegram-канал (наприклад @my_shoes_drop)");
+        return;
+      }
+    } else if (!isMyDrop && !formData.xml_url) {
       toast.error("Для не-MyDrop магазину необхідно вказати XML-файл");
       return;
     }
@@ -42,14 +53,20 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
     setIsSubmitting(true);
     try {
       const tgUserId = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
+      const isTelegram = sourceType === "telegram";
+      const xmlLink = isTelegram ? null : (formData.xml_url || null);
+      const telegramLink = isTelegram ? formData.telegram_channel_link.trim() : null;
+
       const created = await directCreateSupplier(
         {
           shop_name: formData.shop_name,
-          yml_link: formData.xml_url || null,
-          xml_url: formData.xml_url || null,
+          source_type: sourceType,
+          yml_link: xmlLink,
+          xml_url: xmlLink,
+          telegram_channel_link: telegramLink,
           manager_telegram: formData.manager_telegram || null,
-          channel_link: formData.telegram_channel_url || null,
-          telegram_channel_url: formData.telegram_channel_url || null,
+          channel_link: telegramLink || formData.telegram_channel_url || null,
+          telegram_channel_url: telegramLink || formData.telegram_channel_url || null,
           iban: formData.payment_iban || null,
           payment_iban: formData.payment_iban || null,
           bank_name: formData.payment_bank_name || null,
@@ -67,10 +84,18 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
           : `Магазин «${formData.shop_name}» створено.`
       );
 
-      setFormData({ shop_name: "", telegram_channel_url: "", manager_telegram: "", xml_url: "", payment_iban: "", payment_card_holder: "", payment_bank_name: "" });
+      setFormData({ shop_name: "", telegram_channel_url: "", telegram_channel_link: "", manager_telegram: "", xml_url: "", payment_iban: "", payment_card_holder: "", payment_bank_name: "" });
+      setSourceType("xml");
       onSuccess?.();
     } catch (err: any) {
       console.error("Error creating supplier:", err);
+      if (isDuplicateSourceError(err)) {
+        uiToast({
+          variant: "destructive",
+          title: "Помилка! Магазин з таким посиланням або каналом вже існує!",
+        });
+        return;
+      }
       toast.error(err.message || "Помилка створення магазину");
     } finally {
       setIsSubmitting(false);
@@ -91,6 +116,32 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
       <CardContent>
         <form onSubmit={handleSubmit} className="space-y-4">
 
+          {/* Shop Name */}
+          <div className="space-y-2">
+            <Label>Назва магазину *</Label>
+            <Input
+              value={formData.shop_name}
+              onChange={(e) => setFormData(prev => ({ ...prev, shop_name: e.target.value }))}
+              placeholder="Назва магазину з MyDrop або Prom"
+            />
+          </div>
+
+          {/* Source type */}
+          <div className="space-y-2">
+            <Label>Джерело товарів *</Label>
+            <Tabs
+              value={sourceType}
+              onValueChange={(value) => setSourceType(value as "xml" | "telegram")}
+            >
+              <TabsList className="grid w-full grid-cols-2 h-auto">
+                <TabsTrigger value="xml">XML/MyDrop</TabsTrigger>
+                <TabsTrigger value="telegram">Telegram Канал</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          </div>
+
+          {sourceType === "xml" && (
+            <>
           {/* MyDrop Toggle */}
           <div className="flex items-center justify-between p-3 bg-primary/5 border border-primary/20 rounded-lg">
             <div className="flex items-center gap-2">
@@ -101,16 +152,6 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
               </div>
             </div>
             <Switch checked={isMyDrop} onCheckedChange={setIsMyDrop} />
-          </div>
-
-          {/* Shop Name */}
-          <div className="space-y-2">
-            <Label>Назва магазину *</Label>
-            <Input
-              value={formData.shop_name}
-              onChange={(e) => setFormData(prev => ({ ...prev, shop_name: e.target.value }))}
-              placeholder="Назва магазину з MyDrop або Prom"
-            />
           </div>
 
           {/* XML URL */}
@@ -135,7 +176,7 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
             )}
           </div>
 
-          {/* Telegram Channel */}
+          {/* Telegram Channel (shop, not product source) */}
           <div className="space-y-2">
             <Label>Telegram-канал магазину</Label>
             <Input
@@ -144,6 +185,25 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
               placeholder="https://t.me/mychannel або @mychannel"
             />
           </div>
+            </>
+          )}
+
+          {sourceType === "telegram" && (
+            <div className="space-y-2">
+              <Label>Telegram-канал з товарами *</Label>
+              <Input
+                value={formData.telegram_channel_link}
+                onChange={(e) => setFormData(prev => ({ ...prev, telegram_channel_link: e.target.value }))}
+                placeholder="Наприклад: @my_shoes_drop"
+              />
+              <Alert className="bg-accent/10 border-accent/20">
+                <AlertCircle className="h-4 w-4 text-accent" />
+                <AlertDescription className="text-xs text-muted-foreground">
+                  Бот автоматично читатиме ваші пости, розпізнаватиме ціни та розміри за допомогою ШІ і додаватиме товари в каталог. Бот має бути доданий в канал!
+                </AlertDescription>
+              </Alert>
+            </div>
+          )}
 
           {/* Manager Telegram */}
           <div className="space-y-2">

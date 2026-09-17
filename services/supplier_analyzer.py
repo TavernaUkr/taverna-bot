@@ -2,7 +2,7 @@
 """AI-модерація заявок постачальників (google.genai SDK). Не чіпає логіку товарів."""
 import asyncio
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 
 try:
     from google import genai
@@ -48,7 +48,13 @@ class SupplierAnalyzer:
             "Сформуй короткий звіт для CEO: адекватність, ризики, висновок."
         )
 
-    async def _complete(self, model_name: str, prompt: str) -> str:
+    async def _complete(
+        self,
+        model_name: str,
+        prompt: str,
+        *,
+        response_mime_type: Optional[str] = None,
+    ) -> str:
         if genai is None or types is None or not self._key_manager.has_keys():
             raise Exception("Gemini client is not configured")
         last_error: Optional[Exception] = None
@@ -58,14 +64,17 @@ class SupplierAnalyzer:
             except AllKeysExhaustedError as e:
                 raise Exception("429 Rate Limit") from e
             client = genai.Client(api_key=active_key)
+            cfg_kwargs: Dict[str, Any] = {
+                "temperature": 0.2,
+                "max_output_tokens": 800,
+            }
+            if response_mime_type:
+                cfg_kwargs["response_mime_type"] = response_mime_type
             try:
                 response = await client.aio.models.generate_content(
                     model=model_name,
                     contents=prompt,
-                    config=types.GenerateContentConfig(
-                        temperature=0.2,
-                        max_output_tokens=800,
-                    ),
+                    config=types.GenerateContentConfig(**cfg_kwargs),
                 )
             except Exception as e:
                 api_error = getattr(genai_errors, "APIError", None) if genai_errors else None
@@ -126,3 +135,107 @@ class SupplierAnalyzer:
             f"Дублікати в БД: {dup}.\n"
             "Потрібна ручна перевірка заявки адміністратором."
         )
+
+
+def _normalize_channel_score(parsed: Dict[str, Any], channel_link: str) -> Dict[str, Any]:
+    summary = parsed.get("admin_summary")
+    if not summary:
+        summary = f"Канал {channel_link or '—'} проаналізовано. Потрібна ручна перевірка адміном."
+    return {
+        "is_dropship": bool(parsed.get("is_dropship")),
+        "niche": str(parsed.get("niche") or "невідомо"),
+        "price_range": str(parsed.get("price_range") or "невідомо"),
+        "description_quality": str(parsed.get("description_quality") or "невідомо"),
+        "admin_summary": str(summary),
+    }
+
+
+async def analyze_telegram_channel(channel_link: str) -> dict:
+    """
+    AI-оцінка Telegram-каналу постачальника.
+
+    Пости беремо через Telethon (`get_recent_channel_posts`), далі Gemini
+    повертає JSON-звіт для адміна.
+    """
+    from services.telegram_parser import (
+        TelegramChannelParseError,
+        get_recent_channel_posts,
+    )
+
+    fallback = {
+        "is_dropship": True,
+        "niche": "взуття / одяг",
+        "price_range": "невідомо",
+        "description_quality": "не оцінено",
+        "admin_summary": (
+            f"AI-аналіз каналу {channel_link or '—'} недоступний. "
+            "Потрібна ручна перевірка адміністратором."
+        ),
+    }
+
+    try:
+        posts_blob = await get_recent_channel_posts(channel_link, limit=15)
+    except TelegramChannelParseError as e:
+        logger.warning("analyze_telegram_channel: парсинг %s: %s", channel_link, e)
+        fallback["admin_summary"] = str(e)
+        return fallback
+    except Exception as e:
+        logger.error("analyze_telegram_channel: збій парсингу %s: %s", channel_link, e, exc_info=True)
+        fallback["admin_summary"] = (
+            f"Не вдалося прочитати канал {channel_link or '—'}. "
+            "Потрібна ручна перевірка адміністратором."
+        )
+        return fallback
+
+    analyzer = SupplierAnalyzer()
+    if not analyzer.is_ready:
+        return fallback
+
+    prompt = (
+        f"Ось останні пости з Telegram-каналу постачальника: {posts_blob}. "
+        "Проаналізуй їх і поверни JSON строго такого формату: "
+        "{ 'is_dropship': boolean, 'niche': string, 'price_range': string, "
+        "'description_quality': string, 'admin_summary': string "
+        "(короткий висновок для адміна, чи варто співпрацювати) }"
+    )
+
+    from services.gemini_service import _safe_json_loads
+
+    last_error: Optional[Exception] = None
+    for attempt in range(1, 4):
+        for model_name in (analyzer.model_name, analyzer.fallback_model):
+            try:
+                try:
+                    raw = await analyzer._complete(
+                        model_name,
+                        prompt,
+                        response_mime_type="application/json",
+                    )
+                except Exception:
+                    raw = await analyzer._complete(model_name, prompt)
+                parsed = _safe_json_loads(raw) if raw else None
+                if parsed:
+                    return _normalize_channel_score(parsed, channel_link)
+                last_error = Exception("Gemini повернув не-JSON відповідь")
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "analyze_telegram_channel (%s, спроба %s/3): %s",
+                    model_name, attempt, e,
+                )
+                err = str(e)
+                if "503" in err or "429" in err:
+                    break
+                if model_name == analyzer.model_name:
+                    continue
+        if last_error and ("503" in str(last_error) or "429" in str(last_error)) and attempt < 3:
+            await asyncio.sleep(5)
+            continue
+        break
+
+    logger.error("analyze_telegram_channel не зміг отримати звіт: %s", last_error)
+    fallback["admin_summary"] = (
+        f"AI-аналіз каналу {channel_link or '—'} тимчасово недоступний. "
+        "Потрібна ручна перевірка адміністратором."
+    )
+    return fallback

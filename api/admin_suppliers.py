@@ -22,6 +22,8 @@ from api_models import (
     PendingSupplierApplicationResponse,
     SupplierImportProgressResponse,
     SupplierQueueShopProgress,
+    SupplierTransferRequest,
+    SupplierTransferResponse,
 )
 from config_reader import config
 from database.db import get_db, AsyncSession
@@ -50,6 +52,7 @@ from api.suppliers import (
     _clear_deletion_request_notes,
     _deletion_reason,
     _deletion_requested,
+    assert_source_not_duplicate,
 )
 from services.ai_queue_worker import build_ai_queue_view
 from services.mydrop_api import (
@@ -108,6 +111,8 @@ def _to_application(
         description=supplier.store_description,
         xml_url=supplier.yml_link or supplier.xml_url,
         yml_link=supplier.yml_link,
+        source_type=getattr(supplier, "source_type", None) or "xml",
+        telegram_channel_link=getattr(supplier, "telegram_channel_link", None),
         channel_link=supplier.channel_link,
         manager_telegram=supplier.manager_telegram,
         iban=supplier.iban or supplier.payout_iban,
@@ -116,6 +121,7 @@ def _to_application(
         is_verified=bool(supplier.is_verified),
         telegram_id=int(supplier.contact_telegram_id) if supplier.contact_telegram_id else None,
         ai_score_report=supplier.ai_score_report,
+        scoring_result=supplier.ai_score_report,
         trial_ends_at=supplier.trial_ends_at,
         created_at=supplier.created_at,
         approved_at=getattr(supplier, "approved_at", None),
@@ -841,6 +847,19 @@ async def direct_create_supplier(
         yml_link, extracted_key = normalize_mydrop_yml_link(request_data.resolved_yml())
     except InvalidMyDropYmlLinkError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    source_type = request_data.resolved_source_type()
+    telegram_channel_link = request_data.resolved_telegram_channel_link()
+    if source_type == "telegram" and not telegram_channel_link:
+        raise HTTPException(
+            status_code=400,
+            detail="Для джерела Telegram вкажіть посилання на канал (наприклад @my_shoes_drop).",
+        )
+    await assert_source_not_duplicate(
+        db,
+        source_type,
+        yml_link=yml_link,
+        telegram_channel_link=telegram_channel_link,
+    )
     description = request_data.resolved_description()
     edrpou_ipn = request_data.resolved_edrpou_ipn()
     iban = request_data.resolved_iban()
@@ -863,6 +882,8 @@ async def direct_create_supplier(
         status=SupplierStatus.active,
         supplier_type=legal_type,
         yml_link=yml_link,
+        source_type=source_type,
+        telegram_channel_link=telegram_channel_link,
         channel_link=channel_link,
         xml_url=yml_link,
         telegram_channel=channel_link,
@@ -878,7 +899,11 @@ async def direct_create_supplier(
         bank_name=request_data.resolved_bank(),
         legal_name=legal_name,
         mydrop_api_key=extracted_key,
-        ai_score_report="Створено адміном (direct-create). AI-скоринг заявки не потрібен.",
+        ai_score_report=(
+            None
+            if source_type == "telegram"
+            else "Створено адміном (direct-create). AI-скоринг заявки не потрібен."
+        ),
         approved_at=datetime.utcnow(),
         contact_telegram_id=owner_tg,
         user_id=owner_user_id,
@@ -889,15 +914,90 @@ async def direct_create_supplier(
     await db.commit()
     await db.refresh(new_supplier)
 
-    import_started = bool(yml_link or extracted_key)
+    import_started = bool(source_type != "telegram" and (yml_link or extracted_key))
     if import_started:
         schedule_supplier_catalog_import(new_supplier.id)
+    if source_type == "telegram":
+        from api.suppliers import _process_application_background, _schedule_background
+        _schedule_background(
+            _process_application_background(
+                new_supplier.id,
+                {
+                    "source_type": "telegram",
+                    "telegram_channel_link": telegram_channel_link,
+                    "channel_link": channel_link,
+                    "store_name": store_name,
+                },
+                False,
+            )
+        )
 
     logger.info(
         "Адмін створив магазин #%s (%s), owner_user_id=%s, owner_tg=%s, import_started=%s",
         new_supplier.id, store_name, owner_user_id, owner_tg, import_started,
     )
     return _to_application(new_supplier, import_started=import_started)
+
+
+@router.post("/suppliers/{supplier_id}/transfer", response_model=SupplierTransferResponse)
+async def transfer_supplier_ownership(
+    supplier_id: int,
+    request_data: SupplierTransferRequest,
+    db: AsyncSession = Depends(get_db),
+    telegram_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Передача прав на магазин: прив'язує suppliers.user_id до users.id
+    за Telegram username. Роль партнера в БД — supplier.
+    """
+    _assert_admin(telegram_id, authorization)
+
+    supplier = await db.get(Supplier, supplier_id)
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Постачальника не знайдено")
+
+    username = (request_data.new_owner_username or "").strip().lstrip("@")
+    if not username:
+        raise HTTPException(status_code=400, detail="Вкажіть username нового власника.")
+
+    username_l = username.lower()
+    new_owner = (
+        await db.execute(
+            select(User).where(
+                or_(
+                    func.lower(User.username) == username_l,
+                    func.lower(User.username) == f"@{username_l}",
+                )
+            )
+        )
+    ).scalar_one_or_none()
+    if not new_owner:
+        raise HTTPException(
+            status_code=404,
+            detail="Користувач не знайдений. Він має хоча б раз запустити бота.",
+        )
+
+    previous_user_id = supplier.user_id
+    supplier.user_id = new_owner.id
+    if new_owner.telegram_id:
+        supplier.contact_telegram_id = int(new_owner.telegram_id)
+
+    current_role = _user_role_value(new_owner)
+    if current_role not in (UserRole.admin.value, UserRole.supplier.value):
+        new_owner.role = UserRole.supplier
+
+    if previous_user_id and previous_user_id != new_owner.id:
+        await _maybe_revert_user_to_client(db, previous_user_id, supplier_id)
+
+    await db.commit()
+    logger.info(
+        "Адмін передав магазин #%s користувачу @%s (user_id=%s)",
+        supplier_id,
+        username,
+        new_owner.id,
+    )
+    return SupplierTransferResponse(message="Права успішно передано")
 
 
 @router.post("/suppliers/{supplier_id}/approve", response_model=PendingSupplierApplicationResponse)
