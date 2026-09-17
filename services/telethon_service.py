@@ -78,33 +78,8 @@ async def start_telethon_client(bot: Bot):
         logger.error(f"Помилка запуску Telethon: {e}", exc_info=True)
         return
 
-    # --- НОВА ЛОГІКА (15G) ---
-    # 1. Отримуємо ВСІХ 'Independent' постачальників з БД
-    async with AsyncSessionLocal() as db:
-        stmt = select(Supplier).where(
-            (Supplier.status == SupplierStatus.active) & # Тільки активні
-            (Supplier.type == SupplierType.independent) &
-            (Supplier.telegram_channel != None) # У кого є канал
-        )
-        independent_suppliers = (await db.execute(stmt)).scalars().all()
-    
-    # 2. Підписуємось на канал КОЖНОГО постачальника
-    if not independent_suppliers:
-        logger.info("Telethon: Не знайдено 'Independent' постачальників з каналами для відстеження.")
-    
-    for supplier in independent_suppliers:
-        try:
-            channel_username = supplier.telegram_channel.replace("https://t.me/", "").replace("@", "")
-            
-            # Використовуємо `lambda` для "захоплення" `supplier`
-            @client.on(events.NewMessage(chats=channel_username))
-            async def independent_handler(event, s=supplier):
-                # Викликаємо обробник, передаючи інфо про постачальника
-                asyncio.create_task(
-                    handle_independent_post(event, s)
-                )
-            
-            logger.info(f"Telethon: Успішно підписано на канал @{channel_username} (Постачальник: {supplier.name})")
-            
-        except Exception as e:
-            logger.error(f"Telethon: Не вдалося підписатися на {supplier.telegram_channel}: {e}")
+    try:
+        from services.telegram_listener import register_telegram_channel_listeners
+        register_telegram_channel_listeners(client)
+    except Exception as e:
+        logger.error("Telethon: не вдалося увімкнути live-слухач каналів: %s", e, exc_info=True)

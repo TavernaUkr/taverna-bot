@@ -674,6 +674,48 @@ export async function registerPartner(
 }
 
 export const SUPPLIERS_ME_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me`;
+export const SUPPLIERS_VERIFY_TELEGRAM_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/verify-telegram`;
+const VERIFY_TELEGRAM_TIMEOUT_MS = 60000;
+
+/** POST /api/v1/suppliers/verify-telegram — жива перевірка доступу до каналу. */
+export async function verifyTelegramChannel(
+  telegramChannelLink: string
+): Promise<{ message: string }> {
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(SUPPLIERS_VERIFY_TELEGRAM_ENDPOINT, VERIFY_TELEGRAM_TIMEOUT_MS, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({ telegram_channel_link: telegramChannelLink }),
+    });
+  } catch (networkError) {
+    if (networkError instanceof DOMException && networkError.name === "AbortError") {
+      throw new BackendApiError(
+        `Не вдалося перевірити канал: бекенд не відповів за ${VERIFY_TELEGRAM_TIMEOUT_MS / 1000}с.`
+      );
+    }
+    throw new BackendApiError("Не вдалося перевірити канал: немає з'єднання з бекендом.");
+  }
+
+  if (!response.ok) {
+    let detail = "Не вдалося перевірити канал";
+    try {
+      const errJson = await response.json();
+      if (typeof errJson?.detail === "string" && errJson.detail.trim()) {
+        detail = errJson.detail;
+      }
+    } catch {
+      // тіло відповіді не JSON
+    }
+    throw new BackendApiError(detail, response.status);
+  }
+
+  return (await response.json()) as { message: string };
+}
+
 export const SUPPLIERS_REQUEST_DELETION_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/request-deletion`;
 export const SUPPLIERS_IMPORT_PROGRESS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/import-progress`;
 export const ADMIN_PENDING_SUPPLIERS_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/pending`;
@@ -1046,6 +1088,56 @@ export async function transferSupplierOwnership(
     `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/transfer${params}`,
     { new_owner_username: newOwnerUsername },
     "Не вдалося передати права",
+    adminTelegramHeaders()
+  );
+}
+
+export interface BackendAICategorizationRule {
+  id: number;
+  keyword: string;
+  correct_category: string;
+  created_at?: string | null;
+}
+
+export interface BackendAICategorizationRuleCreate {
+  keyword: string;
+  correct_category: string;
+}
+
+/** GET /api/v1/admin/ai-rules — словник правил ШІ-категоризації. */
+export async function fetchAdminAiRules(
+  telegramId?: number | null
+): Promise<BackendAICategorizationRule[]> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendGet<BackendAICategorizationRule[]>(
+    `${API_BASE_URL}/api/v1/admin/ai-rules${params}`,
+    adminTelegramHeaders()
+  );
+}
+
+/** POST /api/v1/admin/ai-rules — додати правило keyword → категорія. */
+export async function createAdminAiRule(
+  payload: BackendAICategorizationRuleCreate,
+  telegramId?: number | null
+): Promise<BackendAICategorizationRule> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendPost<BackendAICategorizationRule>(
+    `${API_BASE_URL}/api/v1/admin/ai-rules${params}`,
+    payload,
+    "Не вдалося додати правило",
+    adminTelegramHeaders()
+  );
+}
+
+/** DELETE /api/v1/admin/ai-rules/{id} — видалити правило. */
+export async function deleteAdminAiRule(
+  ruleId: number,
+  telegramId?: number | null
+): Promise<{ ok: boolean; rule_id: number }> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendDelete<{ ok: boolean; rule_id: number }>(
+    `${API_BASE_URL}/api/v1/admin/ai-rules/${ruleId}${params}`,
+    "Не вдалося видалити правило",
     adminTelegramHeaders()
   );
 }

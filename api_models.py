@@ -526,6 +526,27 @@ class SupplierTransferRequest(BaseModel):
 class SupplierTransferResponse(BaseModel):
     message: str = "Права успішно передано"
 
+
+class TelegramChannelVerifyRequest(BaseModel):
+    telegram_channel_link: str = Field(min_length=1)
+
+
+class TelegramChannelVerifyResponse(BaseModel):
+    message: str = "Доступ підтверджено"
+
+
+class AICategorizationRuleCreate(BaseModel):
+    keyword: str = Field(min_length=1, max_length=255)
+    correct_category: str = Field(min_length=1, max_length=255)
+
+
+class AICategorizationRuleResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    keyword: str
+    correct_category: str
+    created_at: Optional[datetime] = None
+
 class AdminForcePostRequest(BaseModel):
     product_id: int
 

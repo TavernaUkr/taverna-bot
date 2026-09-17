@@ -215,6 +215,23 @@ async def ensure_user_settings_columns() -> None:
         await conn.run_sync(_ensure)
 
 
+async def ensure_ai_categorization_rules_table() -> None:
+    """Live-режим: таблиця ai_categorization_rules, якщо її ще немає."""
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        insp = inspect(sync_conn)
+        if "ai_categorization_rules" in set(insp.get_table_names()):
+            return
+        from database.models import AICategorizationRule
+        AICategorizationRule.__table__.create(bind=sync_conn, checkfirst=True)
+        logger.info("Створено таблицю ai_categorization_rules.")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
 async def get_db() -> AsyncSession:
     """
     FastAPI "Dependency" для отримання сесії БД.
@@ -247,3 +264,4 @@ async def init_db() -> None:
     await ensure_supplier_status_timestamps()
     await ensure_user_settings_columns()
     await ensure_supplier_telegram_source_columns()
+    await ensure_ai_categorization_rules_table()

@@ -49,7 +49,7 @@ from aiogram.types import (
 
 from config_reader import config
 from database.db import init_db
-from services import telethon_service, scheduler_service
+from services import telethon_service, scheduler_service, telegram_listener
 from handlers import (
     user_commands,
     # product_handlers, # <-- ВИМКНЕНО (Замінено MiniApp)
@@ -103,7 +103,7 @@ async def main():
     # Встановлюємо команди та кнопку меню
     await set_main_menu(bot)
 
-    # Запускаємо фонові сервіси
+    # Запускаємо фонові сервіси. Live-слухач каналів: services.telegram_listener
     asyncio.create_task(telethon_service.start_telethon_client(bot))
     asyncio.create_task(scheduler_service.start_scheduler(bot))
 

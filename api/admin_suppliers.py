@@ -7,7 +7,7 @@ from typing import List, Optional
 from uuid import uuid4
 import math
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from sqlalchemy import delete, func, inspect, select, text, update
 
 from api.auth import validate_init_data
@@ -24,6 +24,8 @@ from api_models import (
     SupplierQueueShopProgress,
     SupplierTransferRequest,
     SupplierTransferResponse,
+    TelegramChannelVerifyRequest,
+    TelegramChannelVerifyResponse,
 )
 from config_reader import config
 from database.db import get_db, AsyncSession
@@ -53,6 +55,7 @@ from api.suppliers import (
     _deletion_reason,
     _deletion_requested,
     assert_source_not_duplicate,
+    verify_telegram_channel_or_raise,
 )
 from services.ai_queue_worker import build_ai_queue_view
 from services.mydrop_api import (
@@ -60,6 +63,7 @@ from services.mydrop_api import (
     normalize_mydrop_yml_link,
 )
 from services.mydrop_sync import schedule_supplier_catalog_import
+from services.telegram_sync import run_telegram_import_job
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin (Supplier Applications)"])
@@ -822,9 +826,21 @@ async def restore_supplier(
     return _to_application(supplier)
 
 
+@router.post("/suppliers/verify-telegram", response_model=TelegramChannelVerifyResponse)
+async def admin_verify_telegram_channel(
+    request_data: TelegramChannelVerifyRequest,
+    telegram_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Жива перевірка доступу до Telegram-каналу перед створенням магазину адміном."""
+    _assert_admin(telegram_id, authorization)
+    return await verify_telegram_channel_or_raise(request_data.telegram_channel_link)
+
+
 @router.post("/suppliers/direct-create", response_model=PendingSupplierApplicationResponse, status_code=201)
 async def direct_create_supplier(
     request_data: AdminDirectCreateSupplierRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     telegram_id: Optional[int] = Query(default=None),
     authorization: Optional[str] = Header(default=None),
@@ -914,10 +930,10 @@ async def direct_create_supplier(
     await db.commit()
     await db.refresh(new_supplier)
 
-    import_started = bool(source_type != "telegram" and (yml_link or extracted_key))
-    if import_started:
-        schedule_supplier_catalog_import(new_supplier.id)
+    import_started = False
     if source_type == "telegram":
+        background_tasks.add_task(run_telegram_import_job, new_supplier.id)
+        import_started = True
         from api.suppliers import _process_application_background, _schedule_background
         _schedule_background(
             _process_application_background(
@@ -931,6 +947,9 @@ async def direct_create_supplier(
                 False,
             )
         )
+    elif yml_link or extracted_key:
+        schedule_supplier_catalog_import(new_supplier.id)
+        import_started = True
 
     logger.info(
         "Адмін створив магазин #%s (%s), owner_user_id=%s, owner_tg=%s, import_started=%s",
@@ -1003,6 +1022,7 @@ async def transfer_supplier_ownership(
 @router.post("/suppliers/{supplier_id}/approve", response_model=PendingSupplierApplicationResponse)
 async def approve_supplier_application(
     supplier_id: int,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     telegram_id: Optional[int] = Query(default=None),
     authorization: Optional[str] = Header(default=None),
@@ -1013,23 +1033,26 @@ async def approve_supplier_application(
     if not supplier:
         raise HTTPException(status_code=404, detail="Заявку не знайдено")
 
+    source_type = (getattr(supplier, "source_type", None) or "xml").strip().lower()
+
     supplier.is_verified = True
     supplier.status = SupplierStatus.active
     supplier.approved_at = datetime.utcnow()
-    try:
-        canonical_yml, extracted_key = normalize_mydrop_yml_link(
-            supplier.yml_link or supplier.xml_url or supplier.mydrop_api_key or ""
-        )
-    except InvalidMyDropYmlLinkError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    if extracted_key:
-        supplier.yml_link = canonical_yml
-        supplier.xml_url = canonical_yml
-        supplier.mydrop_api_key = extracted_key
-        supplier.type = SupplierType.mydrop
-    elif canonical_yml:
-        supplier.yml_link = canonical_yml
-        supplier.xml_url = canonical_yml
+    if source_type != "telegram":
+        try:
+            canonical_yml, extracted_key = normalize_mydrop_yml_link(
+                supplier.yml_link or supplier.xml_url or supplier.mydrop_api_key or ""
+            )
+        except InvalidMyDropYmlLinkError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        if extracted_key:
+            supplier.yml_link = canonical_yml
+            supplier.xml_url = canonical_yml
+            supplier.mydrop_api_key = extracted_key
+            supplier.type = SupplierType.mydrop
+        elif canonical_yml:
+            supplier.yml_link = canonical_yml
+            supplier.xml_url = canonical_yml
     if supplier.user_id:
         user = await db.get(User, supplier.user_id)
         if user and user.role != UserRole.admin:
@@ -1038,15 +1061,21 @@ async def approve_supplier_application(
     await db.commit()
     await db.refresh(supplier)
 
-    has_feed = bool(supplier.yml_link or supplier.xml_url or supplier.mydrop_api_key)
-    if has_feed:
-        schedule_supplier_catalog_import(supplier.id)
+    import_started = False
+    if source_type == "telegram":
+        background_tasks.add_task(run_telegram_import_job, supplier.id)
+        import_started = True
+    else:
+        has_feed = bool(supplier.yml_link or supplier.xml_url or supplier.mydrop_api_key)
+        if has_feed:
+            schedule_supplier_catalog_import(supplier.id)
+            import_started = True
 
     logger.info(
-        "Адмін схвалив заявку #%s, import_started=%s",
-        supplier_id, has_feed,
+        "Адмін схвалив заявку #%s, source_type=%s, import_started=%s",
+        supplier_id, source_type, import_started,
     )
-    return _to_application(supplier, import_started=has_feed)
+    return _to_application(supplier, import_started=import_started)
 
 
 @router.post("/suppliers/{supplier_id}/reject", response_model=PendingSupplierApplicationResponse)

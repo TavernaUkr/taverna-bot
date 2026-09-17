@@ -7,7 +7,7 @@ import { ArrowLeft, Building, User, Mail, Phone, FileText, Globe, ChevronRight, 
 import { toast } from "sonner";
 import { useTelegramAuth } from "@/hooks/useTelegramAuth";
 import { useToast } from "@/hooks/use-toast";
-import { isDuplicateSourceError, registerPartner } from "@/lib/backendApi";
+import { isDuplicateSourceError, registerPartner, verifyTelegramChannel } from "@/lib/backendApi";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { vibrate } from "@/hooks/useTelegramUI";
@@ -72,6 +72,8 @@ const SupplierRegistration = () => {
   const [step, setStep] = useState(1);
   const [supplierType, setSupplierType] = useState<SupplierType | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCheckingTg, setIsCheckingTg] = useState(false);
+  const [tgVerified, setTgVerified] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<'idle' | 'success' | 'error'>('idle');
   
   const { register, handleSubmit, trigger, formState: { errors }, setValue, watch } = useForm<SupplierFormData>({
@@ -87,6 +89,34 @@ const SupplierRegistration = () => {
     }
   });
   const sourceType = watch("sourceType") || "xml";
+  const needsTgCheck = sourceType === "telegram" && !tgVerified;
+
+  const checkTelegramChannel = async (rawLink?: string) => {
+    const link = (rawLink ?? watch("telegramChannelLink") ?? "").trim();
+    if (!link) {
+      uiToast({
+        variant: "destructive",
+        title: "Вкажіть Telegram-канал (наприклад @my_shoes_drop)",
+      });
+      return false;
+    }
+    setIsCheckingTg(true);
+    try {
+      await verifyTelegramChannel(link);
+      setTgVerified(true);
+      toast.success("Канал успішно підключено!");
+      return true;
+    } catch (error) {
+      setTgVerified(false);
+      uiToast({
+        variant: "destructive",
+        title: error instanceof Error ? error.message : "Не вдалося перевірити канал",
+      });
+      return false;
+    } finally {
+      setIsCheckingTg(false);
+    }
+  };
 
   // Pre-fill form when profile loads
   useEffect(() => {
@@ -99,6 +129,11 @@ const SupplierRegistration = () => {
   }, [profile, setValue]);
   
   const onSubmit = async (data: SupplierFormData) => {
+    if (data.sourceType === "telegram" && !tgVerified) {
+      await checkTelegramChannel(data.telegramChannelLink);
+      return;
+    }
+
     setIsSubmitting(true);
     setSubmitStatus('idle');
     
@@ -573,7 +608,10 @@ const SupplierRegistration = () => {
                 <div className="grid grid-cols-2 gap-1 p-1 bg-muted rounded-xl">
                   <button
                     type="button"
-                    onClick={() => setValue("sourceType", "xml", { shouldValidate: true })}
+                    onClick={() => {
+                      setValue("sourceType", "xml", { shouldValidate: true });
+                      setTgVerified(false);
+                    }}
                     className={`py-2.5 px-3 rounded-lg text-sm font-medium transition-colors ${
                       sourceType === "xml"
                         ? "bg-background text-foreground shadow-sm"
@@ -584,7 +622,10 @@ const SupplierRegistration = () => {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setValue("sourceType", "telegram", { shouldValidate: true })}
+                    onClick={() => {
+                      setValue("sourceType", "telegram", { shouldValidate: true });
+                      setTgVerified(false);
+                    }}
                     className={`py-2.5 px-3 rounded-lg text-sm font-medium transition-colors ${
                       sourceType === "telegram"
                         ? "bg-background text-foreground shadow-sm"
@@ -625,11 +666,16 @@ const SupplierRegistration = () => {
                   Telegram-канал з товарами *
                 </label>
                 <input
-                  {...register("telegramChannelLink")}
+                  {...register("telegramChannelLink", {
+                    onChange: () => setTgVerified(false),
+                  })}
                   type="text"
                   placeholder="Наприклад: @my_shoes_drop"
                   className="w-full px-4 py-3 bg-muted border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
                 />
+                <p className="text-xs text-slate-400">
+                  Увага: Бот перевірить канал на наявність мінімум 30 постів. Для приватних каналів обов'язково додайте бота в адміністратори перед перевіркою.
+                </p>
                 {errors.telegramChannelLink && (
                   <p className="text-xs text-destructive">{errors.telegramChannelLink.message}</p>
                 )}
@@ -741,25 +787,40 @@ const SupplierRegistration = () => {
               <button
                 type="button"
                 onClick={() => setStep(2)}
-                disabled={isSubmitting}
+                disabled={isSubmitting || isCheckingTg}
                 className="flex-1 py-3 bg-muted text-foreground rounded-xl font-medium hover:bg-muted/80 transition-colors disabled:opacity-50"
               >
                 Назад
               </button>
               <button
-                type="submit"
-                disabled={isSubmitting}
-                className="flex-1 py-3 bg-primary text-primary-foreground rounded-xl font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+                type={needsTgCheck ? "button" : "submit"}
+                disabled={isSubmitting || isCheckingTg}
+                onClick={needsTgCheck ? () => { void checkTelegramChannel(); } : undefined}
+                className={`flex-1 py-3 rounded-xl font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2 ${
+                  sourceType === "telegram" && tgVerified
+                    ? "bg-emerald-500 text-white hover:bg-emerald-600"
+                    : "bg-primary text-primary-foreground hover:bg-primary/90"
+                }`}
               >
-                {isSubmitting ? (
+                {isCheckingTg ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Перевірка...
+                  </>
+                ) : isSubmitting ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin" />
                     Надсилання...
                   </>
+                ) : needsTgCheck ? (
+                  <>
+                    <Send className="h-4 w-4" />
+                    Перевірити канал
+                  </>
                 ) : (
                   <>
                     <Send className="h-4 w-4" />
-                    Надіслати заявку
+                    {sourceType === "telegram" ? "Відправити заявку" : "Надіслати заявку"}
                   </>
                 )}
               </button>

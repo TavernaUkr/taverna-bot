@@ -10,7 +10,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { toast } from "sonner";
 import { useToast } from "@/hooks/use-toast";
 import { hapticNotification } from "@/lib/haptics";
-import { directCreateSupplier, isDuplicateSourceError } from "@/lib/backendApi";
+import { directCreateSupplier, isDuplicateSourceError, verifyTelegramChannel } from "@/lib/backendApi";
 
 interface ManualSupplierFormProps {
   onSuccess?: () => void;
@@ -19,6 +19,8 @@ interface ManualSupplierFormProps {
 export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
   const { toast: uiToast } = useToast();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isCheckingTg, setIsCheckingTg] = useState(false);
+  const [tgVerified, setTgVerified] = useState(false);
   const [isMyDrop, setIsMyDrop] = useState(false);
   const [sourceType, setSourceType] = useState<"xml" | "telegram">("xml");
   const [formData, setFormData] = useState({
@@ -32,6 +34,35 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
     payment_bank_name: "",
   });
 
+  const needsTgCheck = sourceType === "telegram" && !tgVerified;
+
+  const checkTelegramChannel = async () => {
+    const link = formData.telegram_channel_link.trim();
+    if (!link) {
+      uiToast({
+        variant: "destructive",
+        title: "Вкажіть Telegram-канал (наприклад @my_shoes_drop)",
+      });
+      return false;
+    }
+    setIsCheckingTg(true);
+    try {
+      await verifyTelegramChannel(link);
+      setTgVerified(true);
+      toast.success("Канал успішно підключено!");
+      return true;
+    } catch (error) {
+      setTgVerified(false);
+      uiToast({
+        variant: "destructive",
+        title: error instanceof Error ? error.message : "Не вдалося перевірити канал",
+      });
+      return false;
+    } finally {
+      setIsCheckingTg(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -43,6 +74,10 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
     if (sourceType === "telegram") {
       if (!formData.telegram_channel_link.trim()) {
         toast.error("Вкажіть Telegram-канал (наприклад @my_shoes_drop)");
+        return;
+      }
+      if (!tgVerified) {
+        await checkTelegramChannel();
         return;
       }
     } else if (!isMyDrop && !formData.xml_url) {
@@ -86,6 +121,7 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
 
       setFormData({ shop_name: "", telegram_channel_url: "", telegram_channel_link: "", manager_telegram: "", xml_url: "", payment_iban: "", payment_card_holder: "", payment_bank_name: "" });
       setSourceType("xml");
+      setTgVerified(false);
       onSuccess?.();
     } catch (err: any) {
       console.error("Error creating supplier:", err);
@@ -131,7 +167,10 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
             <Label>Джерело товарів *</Label>
             <Tabs
               value={sourceType}
-              onValueChange={(value) => setSourceType(value as "xml" | "telegram")}
+              onValueChange={(value) => {
+                setSourceType(value as "xml" | "telegram");
+                setTgVerified(false);
+              }}
             >
               <TabsList className="grid w-full grid-cols-2 h-auto">
                 <TabsTrigger value="xml">XML/MyDrop</TabsTrigger>
@@ -193,9 +232,15 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
               <Label>Telegram-канал з товарами *</Label>
               <Input
                 value={formData.telegram_channel_link}
-                onChange={(e) => setFormData(prev => ({ ...prev, telegram_channel_link: e.target.value }))}
+                onChange={(e) => {
+                  setTgVerified(false);
+                  setFormData(prev => ({ ...prev, telegram_channel_link: e.target.value }));
+                }}
                 placeholder="Наприклад: @my_shoes_drop"
               />
+              <p className="text-xs text-slate-400">
+                Увага: Бот перевірить канал на наявність мінімум 30 постів. Для приватних каналів обов'язково додайте бота в адміністратори перед перевіркою.
+              </p>
               <Alert className="bg-accent/10 border-accent/20">
                 <AlertCircle className="h-4 w-4 text-accent" />
                 <AlertDescription className="text-xs text-muted-foreground">
@@ -271,13 +316,30 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
             <p>• При наложеному платежі — постачальник має перевести маржу за 14 днів</p>
           </div>
 
-          <Button type="submit" className="w-full" disabled={isSubmitting}>
-            {isSubmitting ? (
+          <Button
+            type={needsTgCheck ? "button" : "submit"}
+            className={`w-full ${
+              sourceType === "telegram" && tgVerified
+                ? "bg-emerald-500 hover:bg-emerald-600 text-white"
+                : ""
+            }`}
+            disabled={isSubmitting || isCheckingTg}
+            onClick={needsTgCheck ? () => { void checkTelegramChannel(); } : undefined}
+          >
+            {isCheckingTg ? (
+              <Loader2 className="h-4 w-4 animate-spin mr-2" />
+            ) : isSubmitting ? (
               <Loader2 className="h-4 w-4 animate-spin mr-2" />
             ) : (
               <Store className="h-4 w-4 mr-2" />
             )}
-            Створити магазин
+            {isCheckingTg
+              ? "Перевірка..."
+              : needsTgCheck
+                ? "Перевірити канал"
+                : sourceType === "telegram"
+                  ? "Відправити заявку"
+                  : "Створити магазин"}
           </Button>
         </form>
       </CardContent>

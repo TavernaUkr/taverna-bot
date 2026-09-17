@@ -24,6 +24,8 @@ from api_models import (
     SupplierDeletionResponse,
     SupplierMeResponse,
     SupplierQueueShopProgress,
+    TelegramChannelVerifyRequest,
+    TelegramChannelVerifyResponse,
 )
 from bot_instance import get_bot_instance
 from config_reader import config
@@ -654,6 +656,39 @@ def _telegram_id_from_authorization(authorization: Optional[str]) -> Optional[in
     if not raw_id:
         raise HTTPException(status_code=401, detail="Invalid initData: user is missing")
     return int(raw_id)
+
+
+async def verify_telegram_channel_or_raise(
+    telegram_channel_link: str,
+) -> TelegramChannelVerifyResponse:
+    """Спільна перевірка каналу для реєстрації та адмінки. 400 українською, без падіння Telethon."""
+    from services.telegram_parser import verify_channel_access
+
+    link = (telegram_channel_link or "").strip()
+    if not link:
+        raise HTTPException(
+            status_code=400,
+            detail="Бот не має доступу до каналу. Якщо канал приватний, додайте бота в адміністратори.",
+        )
+    result = await verify_channel_access(link)
+    if result.get("status") == "ok":
+        return TelegramChannelVerifyResponse(message="Доступ підтверджено")
+    if result.get("reason") == "not_enough_posts":
+        count = result.get("count", 0)
+        raise HTTPException(
+            status_code=400,
+            detail=f"У каналі замало постів. Мінімум 30, знайдено: {count}.",
+        )
+    raise HTTPException(
+        status_code=400,
+        detail="Бот не має доступу до каналу. Якщо канал приватний, додайте бота в адміністратори.",
+    )
+
+
+@router.post("/verify-telegram", response_model=TelegramChannelVerifyResponse)
+async def verify_telegram_channel(request_data: TelegramChannelVerifyRequest):
+    """Жива перевірка доступу до Telegram-каналу перед реєстрацією постачальника."""
+    return await verify_telegram_channel_or_raise(request_data.telegram_channel_link)
 
 
 @router.post("/register", response_model=PartnerRegisterResponse, status_code=201)

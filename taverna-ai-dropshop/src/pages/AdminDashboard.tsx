@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, Users, Check, X, Loader2, DollarSign, ShoppingCart, Package,
   Shield, UserCog, RefreshCw,
-  Crown, Tag, Gift, Brain, MessageSquare, Trophy, Store, Megaphone, Wallet,
+  Crown, Tag, Gift, Brain, BookOpen, MessageSquare, Trophy, Store, Megaphone, Wallet,
   Phone, Link2, Bot, Trash2, MessageCircle, History, AlertTriangle, RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -29,6 +29,7 @@ import { AIOrderReports } from '@/components/admin/AIOrderReports';
 import { AdminRolesManager } from '@/components/admin/AdminRolesManager';
 import { CommandCenter } from '@/components/admin/CommandCenter';
 import { AdminAiQueuePanel } from '@/components/admin/AdminQueueSheet';
+import { AIRulesManager } from '@/components/admin/AIRulesManager';
 import { PaymentsManager } from '@/components/admin/PaymentsManager';
 import { ShopBalancesPanel } from '@/components/admin/ShopBalancesPanel';
 import { TavernaGroupPanel } from '@/components/admin/TavernaGroupPanel';
@@ -612,6 +613,9 @@ export default function AdminDashboard() {
               <TabsTrigger value="ai-queue" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Bot className="h-3.5 w-3.5" /> AI-черга
               </TabsTrigger>
+              <TabsTrigger value="ai-rules" className="text-xs px-3 gap-1 flex-shrink-0">
+                <BookOpen className="h-3.5 w-3.5" /> Словник ШІ
+              </TabsTrigger>
               <TabsTrigger value="applications" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Users className="h-3.5 w-3.5" /> Заявки
                 {pendingSuppliers.length + deletionRequests.length > 0 && (
@@ -646,6 +650,10 @@ export default function AdminDashboard() {
 
           <TabsContent value="ai-queue">
             <AdminAiQueuePanel />
+          </TabsContent>
+
+          <TabsContent value="ai-rules">
+            <AIRulesManager />
           </TabsContent>
 
 

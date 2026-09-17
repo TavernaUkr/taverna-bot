@@ -39,7 +39,7 @@ from services import (
     payout_service, publisher_service,
     omnichannel_service as ads_service # <-- ОНОВЛЕНО
 )
-from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession, ensure_supplier_status_timestamps, ensure_user_settings_columns, ensure_supplier_telegram_source_columns
+from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession, ensure_supplier_status_timestamps, ensure_user_settings_columns, ensure_supplier_telegram_source_columns, ensure_ai_categorization_rules_table
 from services.ai_queue_worker import start_ai_product_queue
 from database.models import * # (Імпортуємо все)
 from config_reader import config
@@ -53,6 +53,7 @@ from api.users import router as users_router  # PATCH /api/v1/users/me/settings
 from api.auth import router as twa_auth_router
 from api.suppliers import router as twa_suppliers_router
 from api.admin_suppliers import router as admin_suppliers_router
+from api.admin_rules import router as admin_rules_router
 from services.auth_service import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -89,12 +90,26 @@ async def startup_event():
     except Exception as e:
         logger.error("Не вдалося додати source_type/telegram_channel_link: %s", e, exc_info=True)
     try:
+        await ensure_ai_categorization_rules_table()
+    except Exception as e:
+        logger.error("Не вдалося створити таблицю ai_categorization_rules: %s", e, exc_info=True)
+    try:
         await start_ai_product_queue()
     except Exception as e:
         logger.error("Не вдалося запустити AI-чергу товарів: %s", e, exc_info=True)
+    try:
+        from services.scheduler import start_scheduler as start_xml_sync_scheduler
+        start_xml_sync_scheduler()
+    except Exception as e:
+        logger.error("Не вдалося запустити XML-планувальник: %s", e, exc_info=True)
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    try:
+        from services.scheduler import stop_scheduler as stop_xml_sync_scheduler
+        stop_xml_sync_scheduler()
+    except Exception as e:
+        logger.error("Не вдалося зупинити XML-планувальник: %s", e, exc_info=True)
     # `bot` закриється у `bot.py`, тут не чіпаємо
     logger.info("FastAPI shutdown.")
 
@@ -466,6 +481,7 @@ app.include_router(delivery_router)
 app.include_router(twa_auth_router)  # POST /api/v1/auth/telegram
 app.include_router(twa_suppliers_router)  # POST /api/v1/suppliers/register (Mini App)
 app.include_router(admin_suppliers_router)  # pending / approve / reject / direct-create
+app.include_router(admin_rules_router)  # GET/POST/DELETE /api/v1/admin/ai-rules
 app.include_router(auth_handlers.router)
 app.include_router(supplier_handlers.router)
 app.include_router(admin_handlers.router)

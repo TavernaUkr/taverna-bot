@@ -398,3 +398,13 @@ class BonusHistory(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User", back_populates="bonus_history")
+
+
+class AICategorizationRule(Base):
+    """Словник правил ШІ: keyword → правильна категорія/ніша для Gemini."""
+    __tablename__ = "ai_categorization_rules"
+
+    id = Column(Integer, primary_key=True)
+    keyword = Column(String(255), nullable=False, index=True)
+    correct_category = Column(String(255), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

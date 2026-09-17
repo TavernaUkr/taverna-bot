@@ -18,10 +18,11 @@ except ImportError:
     types = None  # type: ignore
     genai_errors = None  # type: ignore
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config_reader import config
-from database.models import Product, ProductAIStatus
+from database.models import AICategorizationRule, Product, ProductAIStatus
 from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager
 
 logger = logging.getLogger(__name__)
@@ -247,6 +248,30 @@ def _safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
+def _build_rules_text(rules: list) -> str:
+    if not rules:
+        return ""
+    lines = [
+        f"- Якщо текст містить '{rule.keyword}', обов'язково використовуй категорію '{rule.correct_category}'."
+        for rule in rules
+    ]
+    return "ВАЖЛИВІ ПРАВИЛА КАТЕГОРИЗАЦІЇ:\n" + "\n".join(lines)
+
+
+async def load_ai_categorization_rules_text(db: AsyncSession) -> str:
+    """Текстовий блок словника правил для промта Gemini. Порожній рядок, якщо правил немає."""
+    try:
+        rows = (
+            await db.execute(
+                select(AICategorizationRule).order_by(AICategorizationRule.id.asc())
+            )
+        ).scalars().all()
+    except Exception as e:
+        logger.warning("Не вдалося прочитати AI-правила категоризації: %s", e)
+        return ""
+    return _build_rules_text(rows)
+
+
 def _clip(value: str, max_len: int) -> str:
     value = (value or "").strip()
     if len(value) <= max_len:
@@ -446,9 +471,18 @@ class ProductAIProcessor:
             or (server_error and isinstance(exc, server_error))
         )
 
-    async def _complete(self, model_name: str, user_prompt: str) -> str:
+    async def _complete(
+        self,
+        model_name: str,
+        user_prompt: str,
+        rules_text: str = "",
+    ) -> str:
         if genai is None or types is None or not self._key_manager:
             raise Exception("Gemini client is not configured")
+
+        system_instruction = _SYSTEM_PROMPT
+        if rules_text:
+            system_instruction = f"{rules_text.strip()}\n\n{_SYSTEM_PROMPT.strip()}"
 
         last_error: Optional[Exception] = None
         attempts = max(1, self._key_manager.key_count)
@@ -464,7 +498,7 @@ class ProductAIProcessor:
                     model=model_name,
                     contents=user_prompt,
                     config=types.GenerateContentConfig(
-                        system_instruction=_SYSTEM_PROMPT,
+                        system_instruction=system_instruction,
                         response_mime_type="application/json",
                     ),
                 )
@@ -529,12 +563,15 @@ class ProductAIProcessor:
 
         product_id = product.id
         source_text = _product_text(product.name, product.description, product.sub_category)
+        rules_text = await load_ai_categorization_rules_text(db_session)
         prompt = self._build_user_prompt(product)
+        if rules_text:
+            prompt = f"{rules_text}\n\n{prompt}"
         models_to_try = (self.model_name, self.fallback_model)
 
         for attempt, model_name in enumerate(models_to_try):
             try:
-                content = await self._complete(model_name, prompt)
+                content = await self._complete(model_name, prompt, rules_text=rules_text)
 
                 cleaned_content = content.replace("```json", "").replace("```", "").strip()
                 start_idx = cleaned_content.find("{")

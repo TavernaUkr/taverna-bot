@@ -20,7 +20,7 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from sqlalchemy import case, literal, select, delete, insert, update
+from sqlalchemy import literal, select, delete, insert, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -147,12 +147,18 @@ async def sync_supplier_products(
        (try/except навколо кожного товару) — це відповідає вимозі
        "стійкий до помилок" код.
 
-    Повертає статистику: {"products": N, "variants": M, "errors": K}.
-    Не кидає виняток назовні при мережевих помилках MyDrop — повертає
-    нульову статистику і пише детальний лог (щоб фонова синхронізація
-    одного постачальника не зносила весь job).
+    Повертає статистику: products / created / updated / inactivated / variants / errors.
+    Існуючі товари оновлюються (ціна, опис, наявність), ai_status і категорії
+    не чіпаємо. Нові — ai_status=pending.
     """
-    stats = {"products": 0, "variants": 0, "errors": 0}
+    stats = {
+        "products": 0,
+        "created": 0,
+        "updated": 0,
+        "inactivated": 0,
+        "variants": 0,
+        "errors": 0,
+    }
 
     # --- Крок 1: Отримання даних з MyDrop / прямого YML (мережа) ---
     client = MyDropAPIClient()
@@ -203,6 +209,7 @@ async def sync_supplier_products(
     # щоб не тримати write-lock на весь каталог і не смикати диск на кожному.
     _COMMIT_EVERY = 100
     pending_in_batch = 0
+    seen_skus: Set[str] = set()
 
     for raw_product in products:
         try:
@@ -233,64 +240,63 @@ async def sync_supplier_products(
             category_tag = str(category_id) if category_id is not None else None
             drop_price = raw_product.get("drop_price")
 
-            # --- Product upsert (за supplier_id + supplier_sku, як в XML-парсері) ---
-            product_stmt = (
-                pg_insert(Product)
-                .values(
+            # --- Збір sizes до запису Product: від цього залежить active/inactive ---
+            sizes = raw_product.get("sizes") or []
+            if not sizes:
+                sizes = [{"id": None, "title": None, "amount": raw_product.get("amount", 0)}]
+
+            any_available = False
+            for size in sizes:
+                if not isinstance(size, dict):
+                    continue
+                try:
+                    qty_probe = int(size.get("amount", 0) or 0)
+                except (TypeError, ValueError):
+                    qty_probe = 0
+                if qty_probe > 0:
+                    any_available = True
+            product_status = ProductStatus.active if any_available else ProductStatus.inactive
+
+            # Upsert за (supplier_id, supplier_sku): без дублікатів, без скидання AI.
+            existing = (
+                await db_session.execute(
+                    select(Product).where(
+                        Product.supplier_id == supplier_id,
+                        Product.supplier_sku == sku,
+                    )
+                )
+            ).scalar_one_or_none()
+
+            if existing:
+                existing.description = description
+                existing.status = product_status
+                existing.pictures = pictures
+                if not existing.is_ai_processed:
+                    existing.name = title
+                await db_session.flush()
+                product_id = existing.id
+                stats["updated"] += 1
+            else:
+                new_product = Product(
                     supplier_id=supplier_id,
                     supplier_sku=sku,
                     name=title,
                     description=description,
                     pictures=pictures,
                     category=category_tag,
-                    status=ProductStatus.active,
+                    status=product_status,
                     ai_status=ProductAIStatus.pending,
+                    is_ai_processed=False,
                 )
-                .on_conflict_do_update(
-                    index_elements=["supplier_id", "supplier_sku"],
-                    set_={
-                        # Якщо товар уже пройшов Gemini — не затираємо SEO-назву,
-                        # опис і смарт-категорію сирим імпортом з MyDrop.
-                        "name": case(
-                            (Product.is_ai_processed.is_(True), Product.name),
-                            else_=title,
-                        ),
-                        "description": case(
-                            (Product.is_ai_processed.is_(True), Product.description),
-                            else_=description,
-                        ),
-                        "pictures": pictures,
-                        "category": case(
-                            (Product.is_ai_processed.is_(True), Product.category),
-                            else_=category_tag,
-                        ),
-                        "ai_status": case(
-                            (
-                                Product.ai_status.in_(
-                                    (
-                                        ProductAIStatus.completed,
-                                        ProductAIStatus.processing,
-                                        ProductAIStatus.cancelled,
-                                    )
-                                ),
-                                Product.ai_status,
-                            ),
-                            else_=ProductAIStatus.pending,
-                        ),
-                        "updated_at": func.now(),
-                    },
-                )
-                .returning(Product.id)
-            )
-            product_id = (await db_session.execute(product_stmt)).scalar_one()
+                db_session.add(new_product)
+                await db_session.flush()
+                product_id = new_product.id
+                stats["created"] += 1
+
             stats["products"] += 1
+            seen_skus.add(sku)
 
             # --- Збір опцій (Розмір/Колір/інше) з усіх sizes + product-level params ---
-            sizes = raw_product.get("sizes") or []
-            if not sizes:
-                # Товар без варіацій розміру (sizes_available == False) —
-                # створюємо ОДИН "порожній" розмір, щоб мати рівно 1 варіант.
-                sizes = [{"id": None, "title": None, "amount": raw_product.get("amount", 0)}]
 
             options_map: Dict[str, Set[str]] = defaultdict(set)
             product_level_params = _extract_params(raw_product)
@@ -428,13 +434,27 @@ async def sync_supplier_products(
             )
             continue
 
+    if seen_skus:
+        inactivated = await db_session.execute(
+            update(Product)
+            .where(
+                Product.supplier_id == supplier_id,
+                ~Product.supplier_sku.in_(list(seen_skus)),
+                Product.status == ProductStatus.active,
+            )
+            .values(status=ProductStatus.inactive)
+        )
+        stats["inactivated"] = int(inactivated.rowcount or 0)
+
     # --- Крок 5: Фінальний commit хвоста пакета (менше 100 товарів) ---
     try:
-        if pending_in_batch:
+        if pending_in_batch or stats["inactivated"]:
             await db_session.commit()
         logger.info(
-            "sync_supplier_products: постачальник #%s синхронізовано. products=%s, variants=%s, errors=%s",
-            supplier_id, stats["products"], stats["variants"], stats["errors"],
+            "sync_supplier_products: постачальник #%s. created=%s updated=%s inactivated=%s variants=%s errors=%s",
+            supplier_id,
+            stats["created"], stats["updated"], stats["inactivated"],
+            stats["variants"], stats["errors"],
         )
     except SQLAlchemyError as e:
         await db_session.rollback()
@@ -474,7 +494,15 @@ async def import_supplier_catalog_and_process_ai(supplier_id: int) -> Dict[str, 
     2) записати товари з supplier_id (ai_status=pending);
     3) Gemini обробляє їх окремою чергою по 1 товару / 15с.
     """
-    result = {"products": 0, "variants": 0, "errors": 0, "ai_queued": 0}
+    result = {
+        "products": 0,
+        "created": 0,
+        "updated": 0,
+        "inactivated": 0,
+        "variants": 0,
+        "errors": 0,
+        "ai_queued": 0,
+    }
     if AsyncSessionLocal is None:
         logger.error("import_supplier_catalog: AsyncSessionLocal не ініціалізовано.")
         return result
@@ -551,9 +579,10 @@ async def import_supplier_catalog_and_process_ai(supplier_id: int) -> Dict[str, 
         )
 
     logger.info(
-        "import_supplier_catalog #%s завершено: products=%s variants=%s errors=%s ai_queued=%s",
+        "import_supplier_catalog #%s завершено: created=%s updated=%s inactivated=%s variants=%s errors=%s ai_queued=%s",
         supplier_id,
-        result["products"], result["variants"], result["errors"],
+        result.get("created", 0), result.get("updated", 0), result.get("inactivated", 0),
+        result["variants"], result["errors"],
         result.get("ai_queued", 0),
     )
     return result
