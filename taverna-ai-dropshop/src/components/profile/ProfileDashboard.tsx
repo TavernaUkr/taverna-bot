@@ -1,3 +1,5 @@
+import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -39,6 +41,42 @@ import { AppSettingsSheet } from "@/components/profile/AppSettingsSheet";
 import { useBonuses } from "@/hooks/useBonuses";
 
 type TestRole = "guest" | "customer" | "supplier" | "shop_manager" | "moderator" | "admin";
+
+function SettingsMenuRow({
+  icon: Icon,
+  title,
+  subtitle,
+  onClick,
+  extra,
+}: {
+  icon: LucideIcon;
+  title: string;
+  subtitle?: ReactNode;
+  onClick: () => void;
+  extra?: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors"
+    >
+      <div className="flex items-center min-w-0">
+        <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center mr-4 shrink-0">
+          <Icon className="w-5 h-5 text-muted-foreground" />
+        </div>
+        <div className="text-left min-w-0">
+          <p className="font-medium text-foreground">{title}</p>
+          {subtitle ? <div className="text-sm text-muted-foreground">{subtitle}</div> : null}
+        </div>
+      </div>
+      <div className="flex items-center gap-2 shrink-0">
+        {extra}
+        <ChevronRight className="h-5 w-5 text-muted-foreground" />
+      </div>
+    </button>
+  );
+}
 
 export const ProfileDashboard = () => {
   const navigate = useNavigate();
@@ -146,22 +184,12 @@ export const ProfileDashboard = () => {
   };
 
   const appSettingsButton = (
-    <button
-      type="button"
+    <SettingsMenuRow
+      icon={Settings}
+      title="Налаштування додатку"
+      subtitle="Тема, вібрація та сповіщення"
       onClick={openAppSettings}
-      className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors"
-    >
-      <div className="flex items-center">
-        <div className="w-10 h-10 rounded-full bg-gray-100 dark:bg-gray-800 flex items-center justify-center text-gray-500 mr-4">
-          <Settings className="w-5 h-5" />
-        </div>
-        <div className="text-left">
-          <p className="font-medium text-foreground">Налаштування додатку</p>
-          <p className="text-sm text-muted-foreground">Тема, вібрація та сповіщення</p>
-        </div>
-      </div>
-      <ChevronRight className="h-5 w-5 text-muted-foreground" />
-    </button>
+    />
   );
 
   useEffect(() => {
@@ -487,99 +515,68 @@ export const ProfileDashboard = () => {
               {appSettingsButton}
               <Separator />
 
-              <button
+              <SettingsMenuRow
+                icon={User}
+                title="Налаштування профілю"
+                subtitle={
+                  <span className="flex items-center gap-1">
+                    <MapPin className="h-3 w-3" />
+                    Мої дані, адреси доставки
+                  </span>
+                }
+                extra={
+                  <span className="text-xs font-medium bg-primary/10 text-primary px-2 py-0.5 rounded-full">
+                    {addresses?.length || 0}
+                  </span>
+                }
                 onClick={() => {
                   hapticSelection();
                   setShowAccountSettings(true);
                 }}
-                className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <User className="h-5 w-5 text-muted-foreground" />
-                  <div className="text-left">
-                    <p className="font-medium text-foreground">Налаштування профілю</p>
-                    <p className="text-sm text-muted-foreground flex items-center gap-1">
-                      <MapPin className="h-3 w-3" />
-                      Мої дані, адреси доставки
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-medium bg-primary/10 text-primary px-2 py-0.5 rounded-full">
-                    {addresses?.length || 0}
-                  </span>
-                  <ChevronRight className="h-5 w-5 text-muted-foreground" />
-                </div>
-              </button>
+              />
 
-              {/* Help Guides */}
               <Separator />
-              <button 
+              <SettingsMenuRow
+                icon={HelpCircle}
+                title="Як користуватись"
+                subtitle="Інструкція для покупців"
                 onClick={() => setShowCustomerGuide(true)}
-                className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors"
-              >
-                <div className="flex items-center">
-                  <div className="w-10 h-10 rounded-full bg-gray-100 dark:bg-gray-800 flex items-center justify-center text-gray-500 mr-4">
-                    <HelpCircle className="w-5 h-5" />
-                  </div>
-                  <div className="text-left">
-                    <p className="font-medium text-foreground">Як користуватись</p>
-                    <p className="text-sm text-muted-foreground">
-                      Інструкція для покупців
-                    </p>
-                  </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-muted-foreground" />
-              </button>
+              />
 
-              {(canSeeSupplierGuide) && (
-                <button 
-                  onClick={() => setShowSupplierGuide(true)}
-                  className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors border-t border-border"
-                >
-                  <div className="flex items-center gap-3">
-                    <BookOpen className="h-5 w-5 text-primary" />
-                    <div className="text-left">
-                      <p className="font-medium text-foreground">Інструкція постачальника</p>
-                      <p className="text-sm text-muted-foreground">
-                        Черга, націнки, реклама
-                      </p>
-                    </div>
-                  </div>
-                  <ChevronRight className="h-5 w-5 text-primary" />
-                </button>
+              {canSeeSupplierGuide && (
+                <>
+                  <Separator />
+                  <SettingsMenuRow
+                    icon={BookOpen}
+                    title="Інструкція постачальника"
+                    subtitle="Черга, націнки, реклама"
+                    onClick={() => setShowSupplierGuide(true)}
+                  />
+                </>
               )}
 
               {canSeeModeratorGuide && (
-              <button
-                onClick={() => setShowModeratorGuide(true)}
-                className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors border-t border-border"
-              >
-                <div className="flex items-center gap-3">
-                  <Shield className="h-5 w-5 text-orange-500" />
-                  <div className="text-left">
-                    <p className="font-medium text-foreground">Інструкція модератора</p>
-                    <p className="text-sm text-muted-foreground">Скарги, повернення, чати</p>
-                  </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-muted-foreground" />
-              </button>
+                <>
+                  <Separator />
+                  <SettingsMenuRow
+                    icon={Shield}
+                    title="Інструкція модератора"
+                    subtitle="Скарги, повернення, чати"
+                    onClick={() => setShowModeratorGuide(true)}
+                  />
+                </>
               )}
 
               {canSeeManagerGuide && (
-              <button
-                onClick={() => setShowManagerGuide(true)}
-                className="w-full flex items-center justify-between p-4 hover:bg-muted/50 transition-colors border-t border-border"
-              >
-                <div className="flex items-center gap-3">
-                  <Store className="h-5 w-5 text-primary" />
-                  <div className="text-left">
-                    <p className="font-medium text-foreground">Інструкція менеджера</p>
-                    <p className="text-sm text-muted-foreground">Замовлення магазину та чати клієнтів</p>
-                  </div>
-                </div>
-                <ChevronRight className="h-5 w-5 text-muted-foreground" />
-              </button>
+                <>
+                  <Separator />
+                  <SettingsMenuRow
+                    icon={Store}
+                    title="Інструкція менеджера"
+                    subtitle="Замовлення магазину та чати клієнтів"
+                    onClick={() => setShowManagerGuide(true)}
+                  />
+                </>
               )}
             </div>
 

@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils";
 import { PlatformTreasury } from "./PlatformTreasury";
 import { SupplierAuditCards } from "./SupplierAuditCards";
 import { SystemKillSwitch } from "./SystemKillSwitch";
+import { AdminQueueSheet, AdminAiQueuePanel } from "./AdminQueueSheet";
 
 interface OrderStats {
   totalOrders: number;
@@ -138,6 +139,8 @@ export function CommandCenter({ stats, applicationsCount, onNavigate }: CommandC
 
   return (
     <div className="space-y-4">
+      <AdminAiQueuePanel />
+
       {/* KPI grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         {kpis.map((k) => (
@@ -212,13 +215,14 @@ export function CommandCenter({ stats, applicationsCount, onNavigate }: CommandC
             <Button
               key={qa.tab}
               variant="outline"
-              className="h-auto flex-col gap-1.5 py-3"
+              className="h-auto flex-col gap-1.5 py-3 text-foreground"
               onClick={() => onNavigate(qa.tab)}
             >
               <qa.icon className="h-5 w-5 text-primary" />
               <span className="text-xs">{qa.label}</span>
             </Button>
           ))}
+          <AdminQueueSheet onOpenTab={() => onNavigate("ai-queue")} />
         </div>
       </div>
 

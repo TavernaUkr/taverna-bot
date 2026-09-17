@@ -9,7 +9,7 @@ import logging
 import math
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from fastapi import APIRouter, Depends, HTTPException, Header
@@ -21,8 +21,8 @@ from api_models import (
     PartnerRegisterResponse,
     SupplierDeletionRequest,
     SupplierDeletionResponse,
-    SupplierImportProgressResponse,
     SupplierMeResponse,
+    SupplierQueueShopProgress,
 )
 from bot_instance import get_bot_instance
 from config_reader import config
@@ -40,7 +40,10 @@ from database.models import (
 )
 from api.auth import validate_init_data
 from services.mydrop_api import InvalidMyDropYmlLinkError, normalize_mydrop_yml_link
-from services.supplier_analyzer import SupplierAnalyzer
+from services.ai_queue_worker import (
+    BLOCKED_SUPPLIER_STATUSES,
+    build_ai_queue_view,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/suppliers", tags=["Suppliers (Mini App)"])
@@ -297,38 +300,34 @@ async def _supplier_ids_for_telegram(
     filters = [Supplier.contact_telegram_id == telegram_id]
     if user:
         filters.append(Supplier.user_id == user.id)
-    stmt = select(Supplier.id).where(or_(*filters))
-    return list((await db.execute(stmt)).scalars().all())
-
-
-async def _queue_position_for_suppliers(
-    db: AsyncSession,
-    supplier_ids: list[int],
-) -> int:
-    """
-    Позиція постачальника серед унікальних supplier_id з pending-товарами.
-    0 = обробляється зараз (або черги немає). 1 = один постачальник попереду.
-    """
-    if not supplier_ids:
-        return 0
-    oldest_pending = func.min(Product.created_at)
-    stmt = (
-        select(Product.supplier_id, oldest_pending.label("oldest_pending"))
-        .where(
-            Product.ai_status == ProductAIStatus.pending,
-            Product.status != ProductStatus.deleted,
-        )
-        .group_by(Product.supplier_id)
-        .order_by(oldest_pending.asc(), Product.supplier_id.asc())
+    stmt = select(Supplier.id).where(
+        or_(*filters),
+        Supplier.status.notin_(BLOCKED_SUPPLIER_STATUSES),
     )
-    rows = (await db.execute(stmt)).all()
-    if not rows:
-        return 0
-    mine = {int(sid) for sid in supplier_ids}
-    for index, row in enumerate(rows):
-        if int(row.supplier_id) in mine:
-            return index
-    return 0
+    ids = [int(x) for x in (await db.execute(stmt)).scalars().all()]
+
+    role_value = None
+    if user is not None and user.role is not None:
+        role_value = user.role.value if hasattr(user.role, "value") else str(user.role)
+    if role_value == UserRole.admin.value:
+        orphan_stmt = select(Supplier.id).where(
+            Supplier.status.notin_(BLOCKED_SUPPLIER_STATUSES),
+            Supplier.user_id.is_(None),
+            Supplier.contact_telegram_id.is_(None),
+        )
+        ids.extend(int(x) for x in (await db.execute(orphan_stmt)).scalars().all())
+        if user is not None:
+            await db.execute(
+                update(Supplier)
+                .where(
+                    Supplier.status.notin_(BLOCKED_SUPPLIER_STATUSES),
+                    Supplier.user_id.is_(None),
+                    Supplier.contact_telegram_id.is_(None),
+                )
+                .values(user_id=user.id, contact_telegram_id=telegram_id)
+            )
+            await db.commit()
+    return list(dict.fromkeys(ids))
 
 
 def _enum_value(value: Any) -> Optional[str]:
@@ -498,14 +497,37 @@ async def request_my_shop_deletion(
     return SupplierDeletionResponse()
 
 
-@router.get("/me/import-progress", response_model=SupplierImportProgressResponse)
+def _widget_shop_from_row(row: dict) -> SupplierQueueShopProgress:
+    fetching = bool(row.get("is_fetching_xml"))
+    position = int(row["queue_position"])
+    status = str(row.get("status") or (
+        "fetching_xml" if fetching else ("processing" if position == 0 else "waiting")
+    ))
+    estimated = int(row.get("estimated_minutes", row.get("remaining_minutes") or 0))
+    return SupplierQueueShopProgress(
+        supplier_id=int(row["supplier_id"]),
+        shop_name=str(row["shop_name"]),
+        status=status,
+        total=int(row["total"]),
+        processed=int(row["processed"]),
+        pending_count=int(row["pending_count"]),
+        queue_position=position,
+        items_ahead=int(row["items_ahead"]),
+        estimated_minutes=estimated,
+        wait_minutes=int(row["wait_minutes"]),
+        is_processing=bool(row["is_processing"]),
+        is_fetching_xml=fetching,
+    )
+
+
+@router.get("/me/import-progress", response_model=List[SupplierQueueShopProgress])
 async def get_my_import_progress(
     db: AsyncSession = Depends(get_db),
     authorization: Optional[str] = Header(default=None),
 ):
     """
-    Скільки товарів поточного постачальника вже пройшли AI-категоризацію.
-    1 товар ≈ 15 секунд. is_importing=true, поки completed < total.
+    Масив магазинів поточного користувача в XML-парсингу або AI-черзі.
+    Час магазину №2 = (залишок №1 + товари №2) * 15 / 60.
     """
     telegram_id = _telegram_id_from_authorization(authorization)
     if not telegram_id:
@@ -514,70 +536,13 @@ async def get_my_import_progress(
             detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
         )
 
-    supplier_ids = await _supplier_ids_for_telegram(db, telegram_id)
-    if not supplier_ids:
-        return SupplierImportProgressResponse(
-            total=0,
-            completed=0,
-            estimated_minutes=0,
-            is_importing=False,
-            queue_ahead=0,
-            queue_position=0,
-        )
+    owner_ids = set(int(x) for x in await _supplier_ids_for_telegram(db, telegram_id))
+    if not owner_ids:
+        return []
 
-    total = (
-        await db.execute(
-            select(func.count(Product.id)).where(
-                Product.supplier_id.in_(supplier_ids),
-                Product.ai_status != ProductAIStatus.cancelled,
-            )
-        )
-    ).scalar() or 0
-    completed = (
-        await db.execute(
-            select(func.count(Product.id)).where(
-                Product.supplier_id.in_(supplier_ids),
-                Product.ai_status == ProductAIStatus.completed,
-            )
-        )
-    ).scalar() or 0
-    in_queue = (
-        await db.execute(
-            select(func.count(Product.id)).where(
-                Product.supplier_id.in_(supplier_ids),
-                Product.ai_status.in_((ProductAIStatus.pending, ProductAIStatus.processing)),
-            )
-        )
-    ).scalar() or 0
-
-    total = int(total)
-    completed = int(completed)
-    in_queue = int(in_queue)
-
-    queue_ahead = int(
-        (
-            await db.execute(
-                select(func.count(Product.id)).where(
-                    Product.ai_status == ProductAIStatus.pending,
-                    Product.supplier_id.notin_(supplier_ids),
-                )
-            )
-        ).scalar() or 0
-    )
-
-    remaining = in_queue + queue_ahead
-    estimated_minutes = math.ceil(remaining * SECONDS_PER_PRODUCT_AI / 60) if remaining else 0
-    is_importing = in_queue > 0
-    queue_position = await _queue_position_for_suppliers(db, supplier_ids)
-
-    return SupplierImportProgressResponse(
-        total=total,
-        completed=completed,
-        estimated_minutes=estimated_minutes,
-        is_importing=is_importing,
-        queue_ahead=queue_ahead,
-        queue_position=queue_position,
-    )
+    view = await build_ai_queue_view(db)
+    mine = [row for row in view if int(row["supplier_id"]) in owner_ids]
+    return [_widget_shop_from_row(row) for row in mine]
 
 
 def _telegram_id_from_authorization(authorization: Optional[str]) -> Optional[int]:

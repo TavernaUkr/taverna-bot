@@ -13,11 +13,15 @@ from sqlalchemy import delete, func, inspect, select, text, update
 from api.auth import validate_init_data
 from api_models import (
     AdminApproveDeletionResponse,
+    AdminAiQueueResponse,
+    AdminAiQueueCurrentResponse,
+    AdminAiQueueWaitingItem,
     AdminDirectCreateSupplierRequest,
     AdminStoreListItem,
     AdminSupplierDeleteResponse,
     PendingSupplierApplicationResponse,
     SupplierImportProgressResponse,
+    SupplierQueueShopProgress,
 )
 from config_reader import config
 from database.db import get_db, AsyncSession
@@ -47,6 +51,7 @@ from api.suppliers import (
     _deletion_reason,
     _deletion_requested,
 )
+from services.ai_queue_worker import build_ai_queue_view
 from services.mydrop_api import (
     InvalidMyDropYmlLinkError,
     normalize_mydrop_yml_link,
@@ -142,7 +147,7 @@ def _to_store_item(supplier: Supplier, product_count: int = 0) -> AdminStoreList
 def _assert_admin(
     telegram_id: Optional[int],
     authorization: Optional[str],
-) -> None:
+) -> Optional[int]:
     resolved = telegram_id
     if authorization:
         scheme, _, token = authorization.partition(" ")
@@ -158,9 +163,93 @@ def _assert_admin(
                 resolved = int(raw_id)
     if resolved is not None and resolved not in set(config.ADMIN_IDS):
         raise HTTPException(status_code=403, detail="Admin access required")
+    return resolved
+
+
+_PLACEHOLDER_TELEGRAM_IDS = {0, 123456789}
+
+
+def _is_placeholder_telegram_id(value: Optional[int]) -> bool:
+    if value is None:
+        return True
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return True
+    return parsed <= 0 or parsed in _PLACEHOLDER_TELEGRAM_IDS
 
 
 _SHOP_TABLE_CANDIDATES = ("stores", "shops", "store", "shop")
+
+
+async def _load_user_by_telegram(db: AsyncSession, telegram_id: int) -> Optional[User]:
+    return (
+        await db.execute(select(User).where(User.telegram_id == int(telegram_id)))
+    ).scalars().first()
+
+
+async def _load_user_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
+    return await db.get(User, int(user_id))
+
+
+async def _resolve_current_admin(
+    db: AsyncSession,
+    telegram_id: Optional[int],
+    authorization: Optional[str],
+) -> tuple[Optional[int], Optional[User]]:
+    """Поточний адмін: Bearer initData → query telegram_id → перший User з роллю admin."""
+    admin_tg = _assert_admin(telegram_id, authorization)
+    if _is_placeholder_telegram_id(admin_tg):
+        admin_tg = None
+    admin_user = await _load_user_by_telegram(db, admin_tg) if admin_tg else None
+    if admin_user is None:
+        admin_user = (
+            await db.execute(
+                select(User).where(User.role == UserRole.admin).order_by(User.id.asc())
+            )
+        ).scalars().first()
+        if admin_user and admin_tg is None and getattr(admin_user, "telegram_id", None):
+            admin_tg = int(admin_user.telegram_id)
+    return admin_tg, admin_user
+
+
+async def _resolve_shop_owner(
+    db: AsyncSession,
+    request_data: AdminDirectCreateSupplierRequest,
+    admin_tg: Optional[int],
+    admin_user: Optional[User],
+) -> tuple[Optional[int], Optional[int]]:
+    """
+    Власник магазину: явний user_id / telegram_id з тіла запиту,
+    інакше — поточний адмін.
+    """
+    owner_user_id = getattr(request_data, "user_id", None)
+    owner_tg = (
+        getattr(request_data, "owner_telegram_id", None)
+        or getattr(request_data, "telegram_id", None)
+    )
+    owner_user: Optional[User] = None
+    if owner_user_id:
+        try:
+            owner_user = await _load_user_by_id(db, int(owner_user_id))
+        except (TypeError, ValueError):
+            owner_user = None
+    if owner_user is None and not _is_placeholder_telegram_id(owner_tg):
+        owner_user = await _load_user_by_telegram(db, int(owner_tg))
+
+    if owner_user is not None:
+        tg = int(owner_user.telegram_id) if owner_user.telegram_id else (
+            int(owner_tg) if not _is_placeholder_telegram_id(owner_tg) else None
+        )
+        return tg, int(owner_user.id)
+
+    if not _is_placeholder_telegram_id(owner_tg):
+        return int(owner_tg), admin_user.id if admin_user else None
+
+    return (
+        int(admin_tg) if admin_tg else None,
+        int(admin_user.id) if admin_user else None,
+    )
 
 
 def _shop_name_of(supplier: Supplier) -> str:
@@ -550,6 +639,90 @@ async def admin_global_import_progress(
     )
 
 
+@router.get("/ai-queue", response_model=AdminAiQueueResponse)
+async def admin_ai_queue(
+    db: AsyncSession = Depends(get_db),
+    telegram_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Глобальна AI-черга по магазинах:
+    хто обробляється зараз + хто чекає.
+    shops — усі магазини системи з queue_position і сумарним estimated_minutes.
+    """
+    _assert_admin(telegram_id, authorization)
+    view = await build_ai_queue_view(db)
+    if not view:
+        return AdminAiQueueResponse(current_processing=None, waiting_list=[], shops=[])
+
+    def _shop_item(row: dict) -> SupplierQueueShopProgress:
+        estimated = int(row.get("estimated_minutes", row["remaining_minutes"]))
+        fetching = bool(row.get("is_fetching_xml"))
+        position = int(row["queue_position"])
+        status = str(row.get("status") or (
+            "fetching_xml" if fetching else ("processing" if position == 0 else "waiting")
+        ))
+        return SupplierQueueShopProgress(
+            supplier_id=int(row["supplier_id"]),
+            shop_name=str(row["shop_name"]),
+            status=status,
+            total=int(row["total"]),
+            processed=int(row["processed"]),
+            pending_count=int(row["pending_count"]),
+            queue_position=position,
+            items_ahead=int(row["items_ahead"]),
+            estimated_minutes=estimated,
+            wait_minutes=int(row["wait_minutes"]),
+            is_processing=bool(row["is_processing"]),
+            is_fetching_xml=fetching,
+        )
+
+    def _waiting_item(row: dict) -> AdminAiQueueWaitingItem:
+        estimated = int(row.get("estimated_minutes", row["remaining_minutes"]))
+        return AdminAiQueueWaitingItem(
+            supplier_id=int(row["supplier_id"]),
+            shop_name=str(row["shop_name"]),
+            pending_count=int(row["pending_count"]),
+            queue_position=int(row["queue_position"]),
+            processed=int(row["processed"]),
+            total=int(row["total"]),
+            remaining_minutes=estimated,
+            wait_minutes=int(row["wait_minutes"]),
+            estimated_minutes=estimated,
+            created_at=row.get("created_at"),
+            is_fetching_xml=bool(row.get("is_fetching_xml")),
+        )
+
+    shops = [_shop_item(row) for row in view]
+    ai_rows = [row for row in view if not row.get("is_fetching_xml")]
+    fetch_rows = [row for row in view if row.get("is_fetching_xml")]
+    current = None
+    waiting_src = []
+    if ai_rows:
+        first = ai_rows[0]
+        estimated = int(first.get("estimated_minutes", first["remaining_minutes"]))
+        current = AdminAiQueueCurrentResponse(
+            supplier_id=int(first["supplier_id"]),
+            shop_name=str(first["shop_name"]),
+            processed=int(first["processed"]),
+            total=int(first["total"]),
+            pending_count=int(first["pending_count"]),
+            remaining_minutes=estimated,
+            wait_minutes=int(first["wait_minutes"]),
+            estimated_minutes=estimated,
+            created_at=first.get("created_at"),
+            is_fetching_xml=False,
+        )
+        waiting_src = ai_rows[1:] + fetch_rows
+    else:
+        waiting_src = fetch_rows
+    return AdminAiQueueResponse(
+        current_processing=current,
+        waiting_list=[_waiting_item(row) for row in waiting_src],
+        shops=shops,
+    )
+
+
 @router.post("/suppliers/{supplier_id}/approve-deletion", response_model=AdminApproveDeletionResponse)
 async def approve_supplier_deletion(
     supplier_id: int,
@@ -653,8 +826,12 @@ async def direct_create_supplier(
     """
     Режим Бога: адмін створює магазин-вітрину одразу зі статусом approved.
     ІПН/ЄДРПОУ/IBAN — необов'язкові. Якщо є yml_link — одразу стартує імпорт.
+    Якщо власника не вказано / тестовий — магазин належить адміну.
     """
-    _assert_admin(telegram_id, authorization)
+    admin_tg, admin_user = await _resolve_current_admin(db, telegram_id, authorization)
+    owner_tg, owner_user_id = await _resolve_shop_owner(
+        db, request_data, admin_tg, admin_user
+    )
     try:
         store_name = request_data.resolved_name()
     except ValueError as e:
@@ -703,6 +880,8 @@ async def direct_create_supplier(
         mydrop_api_key=extracted_key,
         ai_score_report="Створено адміном (direct-create). AI-скоринг заявки не потрібен.",
         approved_at=datetime.utcnow(),
+        contact_telegram_id=owner_tg,
+        user_id=owner_user_id,
     )
     db.add(new_supplier)
     await db.flush()
@@ -715,8 +894,8 @@ async def direct_create_supplier(
         schedule_supplier_catalog_import(new_supplier.id)
 
     logger.info(
-        "Адмін створив магазин #%s (%s), import_started=%s",
-        new_supplier.id, store_name, import_started,
+        "Адмін створив магазин #%s (%s), owner_user_id=%s, owner_tg=%s, import_started=%s",
+        new_supplier.id, store_name, owner_user_id, owner_tg, import_started,
     )
     return _to_application(new_supplier, import_started=import_started)
 

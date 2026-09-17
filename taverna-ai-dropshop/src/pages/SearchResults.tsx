@@ -8,7 +8,7 @@ import { ProductCard } from "@/components/ProductCard";
 import { ProductFeedView } from "@/components/catalog/ProductFeedView";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 import { useCartContext } from "@/contexts/CartContext";
-import { fetchBackendProducts, fetchBackendCategories, fetchBackendFilters, BackendApiError, type BackendProductVariant, type BackendProductOption, type BackendFilterAttribute, type BackendCategorySub } from "@/lib/backendApi";
+import { fetchBackendProductsPaged, fetchBackendCategories, fetchBackendFilters, BackendApiError, type BackendProductVariant, type BackendProductOption, type BackendFilterAttribute, type BackendCategorySub } from "@/lib/backendApi";
 import { mapBackendProductToUi, buildCategoriesFromProducts } from "@/hooks/useProducts";
 import {
   PimFilterPills,
@@ -187,7 +187,7 @@ export default function SearchResults() {
     const loadCatalog = async () => {
       setIsLoading(true);
       try {
-        const backendProducts = await fetchBackendProducts();
+        const backendProducts = await fetchBackendProductsPaged();
         const mapped = backendProducts
           .map(mapBackendProductToUi)
           .filter((p) => p.in_stock);

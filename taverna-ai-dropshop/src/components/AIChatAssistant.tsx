@@ -221,19 +221,12 @@ export const AIChatAssistant = () => {
         aria-label="Taverna AI"
         onClick={() => setIsOpen(true)}
         className={cn(
-          "relative shrink-0",
-          "w-14 h-14 rounded-full",
-          "bg-gradient-to-br from-primary to-accent",
-          "text-primary-foreground shadow-lg",
-          "flex items-center justify-center",
-          "hover:scale-110 active:scale-95",
-          "transition-all duration-200",
-          "animate-pulse-slow",
+          "relative flex items-center justify-center w-14 h-14 rounded-full text-white bg-gradient-to-b from-emerald-500 to-emerald-700 shadow-[0_8px_15px_rgba(4,120,87,0.4),inset_0_2px_3px_rgba(255,255,255,0.3),inset_0_-3px_4px_rgba(0,0,0,0.4)] hover:scale-105 transition-transform duration-300 z-10",
           isOpen && "hidden"
         )}
       >
-        <Bot className="h-6 w-6" />
-        <span className="absolute -top-1 -right-1 w-4 h-4 bg-live rounded-full animate-pulse" />
+        <Bot className="w-7 h-7 drop-shadow-md" />
+        <div className="absolute top-0 right-0 w-3.5 h-3.5 bg-red-500 border-2 border-white dark:border-[#1c1c1e] rounded-full" style={{ animation: "heartbeat 2s infinite ease-in-out" }}></div>
       </button>
 
       {/* Chat Window */}

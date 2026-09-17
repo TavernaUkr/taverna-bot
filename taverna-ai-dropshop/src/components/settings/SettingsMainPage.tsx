@@ -32,7 +32,7 @@ export function SettingsMainPage({
       <div className="sticky top-0 bg-card border-b border-border p-4 flex items-center gap-3 z-10">
         <button
           onClick={onBack}
-          className="w-11 h-11 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+          className="w-11 h-11 rounded-xl flex items-center justify-center text-foreground hover:bg-muted transition-all"
         >
           <ArrowLeft className="h-5 w-5" />
         </button>
@@ -77,8 +77,8 @@ export function SettingsMainPage({
             }}
             className="w-full flex items-center gap-3 px-4 py-4 hover:bg-muted transition-colors border-b border-border active:scale-[0.99]"
           >
-            <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center">
-              <User className="h-5 w-5 text-primary" />
+            <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center">
+              <User className="h-5 w-5 text-muted-foreground" />
             </div>
             <div className="flex-1 text-left">
               <span className="font-medium text-foreground">Мої дані</span>
@@ -95,8 +95,8 @@ export function SettingsMainPage({
             }}
             className="w-full flex items-center gap-3 px-4 py-4 hover:bg-muted transition-colors border-b border-border active:scale-[0.99]"
           >
-            <div className="w-10 h-10 rounded-lg bg-accent/20 flex items-center justify-center">
-              <MapPin className="h-5 w-5 text-accent" />
+            <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center">
+              <MapPin className="h-5 w-5 text-muted-foreground" />
             </div>
             <div className="flex-1 text-left">
               <span className="font-medium text-foreground">Адреси доставки</span>
@@ -124,8 +124,8 @@ export function SettingsMainPage({
             }}
             className="w-full flex items-center gap-3 px-4 py-4 hover:bg-muted transition-colors active:scale-[0.99]"
           >
-            <div className="w-10 h-10 rounded-lg bg-success/10 flex items-center justify-center">
-              <CreditCard className="h-5 w-5 text-success" />
+            <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center">
+              <CreditCard className="h-5 w-5 text-muted-foreground" />
             </div>
             <div className="flex-1 text-left">
               <span className="font-medium text-foreground">Картка для повернень</span>

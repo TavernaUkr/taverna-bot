@@ -1,60 +1,118 @@
 import { useEffect, useState } from "react";
-import { Bot, Loader2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import {
   BackendApiError,
-  fetchAdminImportProgress,
+  fetchAdminAiQueue,
   fetchSupplierImportProgress,
-  type BackendSupplierImportProgress,
+  type BackendAdminAiQueue,
+  type BackendWidgetQueueShop,
 } from "@/lib/backendApi";
-import { Progress } from "@/components/ui/progress";
-import { Card, CardContent } from "@/components/ui/card";
-import { cn } from "@/lib/utils";
 
 const POLL_MS = 10000;
 
-interface SupplierImportProgressProps {
-  isAdmin?: boolean;
-  variant?: "floating" | "inline";
+function shopsFromAdminQueue(data: BackendAdminAiQueue | null | undefined): BackendWidgetQueueShop[] {
+  if (!data) return [];
+  if (Array.isArray(data.shops) && data.shops.length > 0) {
+    return data.shops.filter(Boolean).map((shop) => ({
+      shop_name: shop.shop_name,
+      status:
+        shop.status ||
+        (shop.is_fetching_xml ? "fetching_xml" : shop.is_processing ? "processing" : "waiting"),
+      processed: shop.processed,
+      total: shop.total,
+      queue_position: shop.queue_position,
+      estimated_minutes: shop.estimated_minutes ?? shop.wait_minutes ?? 0,
+      supplier_id: shop.supplier_id,
+      is_fetching_xml: Boolean(shop.is_fetching_xml),
+    }));
+  }
+  const rows: BackendWidgetQueueShop[] = [];
+  if (data.current_processing) {
+    const current = data.current_processing;
+    rows.push({
+      shop_name: current.shop_name,
+      status: current.is_fetching_xml ? "fetching_xml" : "processing",
+      processed: current.processed,
+      total: current.total,
+      queue_position: 0,
+      estimated_minutes: current.remaining_minutes ?? 0,
+      supplier_id: current.supplier_id,
+      is_fetching_xml: Boolean(current.is_fetching_xml),
+    });
+  }
+  for (const item of data.waiting_list || []) {
+    rows.push({
+      shop_name: item.shop_name,
+      status: item.is_fetching_xml ? "fetching_xml" : "waiting",
+      processed: item.processed ?? 0,
+      total: item.total ?? 0,
+      queue_position: item.queue_position,
+      estimated_minutes: item.estimated_minutes ?? item.remaining_minutes ?? 0,
+      supplier_id: item.supplier_id,
+      is_fetching_xml: Boolean(item.is_fetching_xml),
+    });
+  }
+  return rows;
 }
 
-function WaitingQueueNotice({
-  queuePosition,
-  className,
-}: {
-  queuePosition: number;
-  className?: string;
-}) {
+function ShopQueueRows({ queueData }: { queueData: BackendWidgetQueueShop[] }) {
   return (
-    <div
-      className={cn(
-        "rounded-xl border border-amber-400/50 bg-amber-500/15 p-3",
-        className
-      )}
-      role="status"
-      aria-live="polite"
-    >
-      <p className="text-sm font-medium leading-snug text-amber-950 dark:text-amber-100">
-        ⏳ Очікування черги. Перед вами постачальників: {queuePosition}. AI почне
-        обробку ваших товарів автоматично.
-      </p>
-    </div>
+    <>
+      {queueData.map((shop, index) => {
+        const isProcessing = shop.queue_position === 0 && !shop.is_fetching_xml;
+        const isFetching = Boolean(shop.is_fetching_xml);
+
+        let topText = "";
+        if (isFetching) {
+          topText = `Завантаження XML: ${shop.shop_name}... (В черзі #${shop.queue_position})`;
+        } else if (isProcessing) {
+          topText = `AI-обробка: ${shop.shop_name}... Завантажено ${shop.processed} з ${shop.total}`;
+        } else {
+          topText = `Очікування: ${shop.shop_name} (В черзі #${shop.queue_position})`;
+        }
+
+        const percentage = shop.total > 0 ? (shop.processed / shop.total) * 100 : 0;
+
+        return (
+          <div
+            key={shop.supplier_id || shop.shop_name}
+            className={`flex flex-col gap-2 ${index > 0 ? "pt-3 border-t border-white/10" : ""}`}
+          >
+            <div className="flex items-start gap-2">
+              <Loader2 className="w-4 h-4 text-emerald-500 animate-spin shrink-0 mt-0.5" />
+              <div className="flex flex-col min-w-0">
+                <span className="text-xs font-medium text-slate-200 leading-tight truncate block">{topText}</span>
+                <span className="text-[10px] text-slate-400 mt-1 truncate block">
+                  Орієнтовний час: ~{shop.estimated_minutes} хв
+                </span>
+              </div>
+            </div>
+            {isProcessing && (
+              <div className="h-1.5 w-full bg-slate-700/50 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-emerald-500 transition-all duration-500"
+                  style={{ width: `${percentage}%` }}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
   );
 }
 
-export function SupplierImportProgress({
-  isAdmin = false,
-  variant = "floating",
-}: SupplierImportProgressProps) {
-  const { effectiveRole } = useTelegramAuthContext();
-  const [progress, setProgress] = useState<BackendSupplierImportProgress | null>(null);
-  const enabled = isAdmin
-    ? effectiveRole === "admin"
-    : effectiveRole === "supplier" || (effectiveRole === "admin" && variant === "inline");
+export function SupplierImportProgress() {
+  const { effectiveRole, profile } = useTelegramAuthContext();
+  const isAdmin = effectiveRole === "admin" || effectiveRole === "owner";
+  const enabled =
+    effectiveRole === "supplier" || isAdmin;
+  const [queueData, setQueueData] = useState<BackendWidgetQueueShop[]>([]);
+  const [isCollapsed, setIsCollapsed] = useState(false);
 
   useEffect(() => {
     if (!enabled) {
-      setProgress(null);
       return;
     }
 
@@ -63,27 +121,29 @@ export function SupplierImportProgress({
 
     const load = async () => {
       try {
-        const data = isAdmin
-          ? await fetchAdminImportProgress()
-          : await fetchSupplierImportProgress();
-        if (cancelled) return;
-        setProgress(data);
-        if (
-          data.is_importing ||
-          data.total === 0 ||
-          (data.queue_ahead ?? 0) > 0 ||
-          (data.queue_position ?? 0) > 0 ||
-          isAdmin
-        ) {
-          timer = window.setTimeout(load, POLL_MS);
+        let next: BackendWidgetQueueShop[] = [];
+        if (isAdmin) {
+          const telegramId =
+            profile?.telegram_id ||
+            (typeof window !== "undefined"
+              ? (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id
+              : undefined);
+          const data = await fetchAdminAiQueue(telegramId ? Number(telegramId) : undefined);
+          next = shopsFromAdminQueue(data);
+        } else {
+          const data = await fetchSupplierImportProgress();
+          next = Array.isArray(data) ? data.filter(Boolean) : [];
         }
+        if (cancelled) return;
+        setQueueData(next);
       } catch (error) {
         if (cancelled) return;
         const status = error instanceof BackendApiError ? error.status : undefined;
         if (status === 401 || status === 403 || status === 404) {
-          setProgress(null);
           return;
         }
+      }
+      if (!cancelled) {
         timer = window.setTimeout(load, POLL_MS);
       }
     };
@@ -94,102 +154,33 @@ export function SupplierImportProgress({
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [enabled, isAdmin]);
+  }, [enabled, isAdmin, profile?.telegram_id]);
 
-  if (!enabled || !progress) {
-    return null;
-  }
-
-  const {
-    total,
-    completed,
-    estimated_minutes,
-    queue_ahead = 0,
-    queue_position = 0,
-    is_importing,
-  } = progress;
-  const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
-  const remainingOwn = Math.max(0, total - completed);
-  const displayMinutes =
-    Math.ceil((remainingOwn + (isAdmin ? 0 : queue_ahead)) * 15 / 60) || estimated_minutes || 0;
-  const pendingCount = isAdmin ? queue_ahead : Math.max(0, remainingOwn);
-  const hasPending = is_importing || pendingCount > 0;
-  const isWaitingInQueue = !isAdmin && queue_position > 0;
-
-  if (isWaitingInQueue) {
-    if (variant === "inline") {
-      return (
-        <WaitingQueueNotice queuePosition={queue_position} className="mx-4 mb-1" />
-      );
-    }
-    return (
-      <WaitingQueueNotice
-        queuePosition={queue_position}
-        className="fixed bottom-24 left-4 z-50 w-64 max-w-[calc(100vw-2rem)] shadow-lg"
-      />
-    );
-  }
-
-  if (variant === "inline") {
-    return (
-      <Card className="mx-4 mb-1 border-primary/20 bg-primary/5">
-        <CardContent className="p-3 space-y-2">
-          <div className="flex items-start gap-2">
-            {is_importing ? (
-              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary mt-0.5" />
-            ) : (
-              <Bot className="h-4 w-4 shrink-0 text-primary mt-0.5" />
-            )}
-            <div className="min-w-0">
-              <p className="text-xs font-medium text-foreground">
-                {is_importing
-                  ? `AI-черга: оброблено ${completed} з ${total}`
-                  : total > 0
-                    ? `AI-черга порожня · ${completed} з ${total} готово`
-                    : "AI-черга порожня"}
-              </p>
-              <p className="text-[11px] text-muted-foreground mt-0.5">
-                {is_importing
-                  ? `У черзі ${pendingCount} товарів · орієнтовно ~${displayMinutes} хв`
-                  : "Нові імпорти з'являться тут автоматично"}
-              </p>
-            </div>
-          </div>
-          <Progress value={is_importing ? percent : total > 0 ? 100 : 0} className="h-1.5" />
-        </CardContent>
-      </Card>
-    );
-  }
-
-  if (!is_importing && !hasPending) {
-    return null;
-  }
+  if (!enabled) return null;
+  if (!Array.isArray(queueData) || queueData.length === 0) return null;
 
   return (
-    <div
-      className={cn(
-        "fixed bottom-24 left-4 z-50 w-64 max-w-[calc(100vw-2rem)]",
-        "rounded-xl border border-border bg-card p-3 text-foreground",
-        "shadow-lg backdrop-blur-md"
-      )}
-      role="status"
-      aria-live="polite"
-    >
-      <div className="flex items-start gap-2">
-        <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-primary" />
-        <div className="min-w-0">
-          <p className="text-xs font-medium leading-snug">
-            AI-обробка товарів... Завантажено {completed} з {total}
-          </p>
-          <p className="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400">
-            Орієнтовний час: ~{displayMinutes} хв
-          </p>
-        </div>
+    <div className="fixed bottom-24 left-4 z-[100] flex items-end pointer-events-none">
+      <div
+        className={`pointer-events-auto cursor-pointer flex items-center justify-center bg-[#1c1c1e]/90 backdrop-blur-xl border border-white/10 border-l-0 rounded-r-xl p-2 shadow-lg transition-all duration-500 hover:bg-slate-800 ${isCollapsed ? "translate-x-0 opacity-100 w-10" : "-translate-x-full opacity-0 w-0 overflow-hidden"}`}
+        onClick={() => setIsCollapsed(false)}
+      >
+        <ChevronRight className="w-5 h-5 text-emerald-500 animate-pulse" />
       </div>
-      <Progress
-        value={percent}
-        className="mt-2 h-1.5 bg-white/15"
-      />
+
+      <div
+        className={`pointer-events-auto relative ml-2 bg-[#1c1c1e]/85 backdrop-blur-xl border border-white/10 rounded-2xl shadow-[0_0_30px_rgba(0,0,0,0.5)] flex flex-col gap-3 overflow-hidden transition-all duration-500 ease-in-out origin-left ${isCollapsed ? "w-0 opacity-0 scale-x-0 p-0 border-0" : "w-[240px] opacity-100 scale-x-100 p-3"}`}
+      >
+        <button
+          type="button"
+          onClick={() => setIsCollapsed(true)}
+          className="absolute top-2 right-2 p-1 text-slate-400 hover:text-white bg-white/5 rounded-full transition-colors"
+        >
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+
+        <ShopQueueRows queueData={queueData} />
+      </div>
     </div>
   );
 }

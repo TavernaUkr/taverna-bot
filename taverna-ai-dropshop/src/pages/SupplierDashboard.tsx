@@ -278,7 +278,7 @@ export default function SupplierDashboard() {
         <div className="flex items-center gap-3 p-4">
           <button
             onClick={() => navigate("/?tab=account")}
-            className="w-10 h-10 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+            className="w-10 h-10 rounded-xl flex items-center justify-center text-foreground hover:bg-muted transition-all"
           >
             <ArrowLeft className="h-5 w-5" />
           </button>

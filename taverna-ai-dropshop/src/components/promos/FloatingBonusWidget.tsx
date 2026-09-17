@@ -1,5 +1,4 @@
 import { Gift } from "lucide-react";
-import { motion } from "framer-motion";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,25 +23,16 @@ export const BonusFab = ({ className, menuAlign = "end" }: BonusFabProps) => {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <motion.button
+        <button
           type="button"
-          initial={{ scale: 0.9, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          transition={{ type: "spring", stiffness: 260, damping: 18 }}
-          whileHover={{ scale: 1.08 }}
-          whileTap={{ scale: 0.92 }}
           aria-label="Бонуси"
           className={cn(
-            "relative w-10 h-10 rounded-full",
-            "bg-gradient-to-br from-warning via-rating to-primary",
-            "text-primary-foreground shadow-lg shadow-primary/25",
-            "flex items-center justify-center shrink-0",
+            "relative flex items-center justify-center w-12 h-12 rounded-full text-white bg-gradient-to-b from-amber-500 to-orange-600 shadow-[0_8px_15px_rgba(234,88,12,0.4),inset_0_2px_3px_rgba(255,255,255,0.3),inset_0_-3px_4px_rgba(0,0,0,0.4)] hover:scale-105 transition-transform duration-300",
             className
           )}
         >
-          <span className="pointer-events-none absolute inset-0 rounded-full bg-primary/30 blur-md animate-pulse" />
-          <Gift className="relative z-10 h-4 w-4" />
-        </motion.button>
+          <Gift className="h-5 w-5 drop-shadow-md" />
+        </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="left" align={menuAlign} sideOffset={10} className="w-64 z-[80]">
         <DropdownMenuItem

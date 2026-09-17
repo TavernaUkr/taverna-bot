@@ -156,6 +156,7 @@ const App = () => (
                 <AnimatedRoutes />
                 <FloatingToolsContainer />
                 <FloatingDevRoleSwitcher />
+                {/* Глобальний віджет черги: поза <Routes>, не розмонтовується при навігації */}
                 <SupplierImportProgress />
               </FloatingToolsProvider>
             </BrowserRouter>

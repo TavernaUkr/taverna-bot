@@ -13,7 +13,7 @@ export function FloatingToolsContainer() {
   if (isFeedActive) return null;
 
   return (
-    <div className="fixed bottom-24 right-4 z-50 flex flex-col items-end gap-3">
+    <div className="fixed bottom-24 right-4 z-[90] flex flex-col items-end gap-3">
       <FloatingSupportWidget />
       <FloatingBonusWidget />
       <AIChatAssistant />

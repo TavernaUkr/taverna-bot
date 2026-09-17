@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.orm import selectinload
 from typing import List, Optional
 import logging
 
 from database.db import get_db, AsyncSessionLocal
-from database.models import Product, ProductStatus, ProductVariant, ProductOption
+from database.models import Product, ProductStatus, ProductAIStatus, ProductVariant, ProductOption
 from api_models import (
     ProductAPI,
     ProductVariantAPI,
@@ -339,6 +339,8 @@ async def get_all_products(
     target_niche: Optional[List[str]] = Query(None, description="Ніша: Мілітарі / Дім / Електроніка"),
     niche: Optional[List[str]] = Query(None, description="Аліас target_niche"),
     gender: Optional[List[str]] = Query(None, description="Стать: Чоловічий / Жіночий / Унісекс"),
+    limit: int = Query(50, ge=1, le=100, description="Скільки товарів віддати (захист від зависання)"),
+    offset: int = Query(0, ge=0, description="Зсув для наступної сторінки"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -346,6 +348,9 @@ async def get_all_products(
     Each product includes a share_url field that points to the product in the Telegram bot.
     Фільтри category / sub_category / season / niche працюють по текстових AI-полях.
     Кожен параметр можна передати як один рядок, CSV або кілька повторів.
+
+    Пагінація обов'язкова: без limit сервер зависав на 1000+ товарів.
+    Каталог одразу після XML: ai_status=pending АБО status=active.
     """
     try:
         # Execute query to get products with variants (+ option values) and options eagerly loaded
@@ -362,6 +367,13 @@ async def get_all_products(
             genders=_normalize_query_list(gender),
             sub_categories=_normalize_query_list(sub_category),
         )
+        stmt = stmt.where(
+            or_(
+                Product.ai_status == ProductAIStatus.pending,
+                Product.status == ProductStatus.active,
+            )
+        )
+        stmt = stmt.order_by(Product.id.desc()).offset(offset).limit(limit)
         result = await db.execute(stmt)
         products = result.scalars().unique().all()
 

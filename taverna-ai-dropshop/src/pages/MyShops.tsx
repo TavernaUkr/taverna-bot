@@ -27,7 +27,6 @@ import {
   fetchMySupplier,
   requestSupplierDeletion,
 } from "@/lib/backendApi";
-import { SupplierImportProgress } from "@/components/supplier/SupplierImportProgress";
 
 interface ShopInfo {
   id: string;
@@ -280,8 +279,6 @@ export default function MyShops() {
         </div>
       </div>
 
-      {(isSupplier || isAdmin) && <SupplierImportProgress variant="inline" />}
-
       <div className="p-4 space-y-4 pb-24">
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
@@ -442,7 +439,7 @@ export default function MyShops() {
                   <Button
                     size="sm"
                     variant="outline"
-                    className="w-full h-9 mt-2 text-destructive border-destructive/40 hover:bg-destructive/10 hover:text-destructive"
+                    className="w-full h-9 mt-2 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30 border border-red-200 dark:border-red-800"
                     disabled={shop.deletion_requested}
                     onClick={openDeleteDialog}
                   >

@@ -529,3 +529,8 @@ All colors MUST be HSL.
     @apply outline-none ring-2 ring-primary/50 ring-offset-2 ring-offset-background;
   }
 }
+
+@keyframes heartbeat {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.3); }
+}

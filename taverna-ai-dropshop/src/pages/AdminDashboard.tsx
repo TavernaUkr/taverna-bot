@@ -23,12 +23,12 @@ import { ManualSupplierForm } from '@/components/admin/ManualSupplierForm';
 import { SupportChatsViewer } from '@/components/admin/SupportChatsViewer';
 import { GiveawaysManager } from '@/components/admin/GiveawaysManager';
 import { AdminStoreManager } from '@/components/admin/AdminStoreManager';
-import { SupplierImportProgress } from '@/components/supplier/SupplierImportProgress';
 import { AdminStoreOrders } from '@/components/admin/AdminStoreOrders';
 import { OrdersManager } from '@/components/admin/OrdersManager';
 import { AIOrderReports } from '@/components/admin/AIOrderReports';
 import { AdminRolesManager } from '@/components/admin/AdminRolesManager';
 import { CommandCenter } from '@/components/admin/CommandCenter';
+import { AdminAiQueuePanel } from '@/components/admin/AdminQueueSheet';
 import { PaymentsManager } from '@/components/admin/PaymentsManager';
 import { ShopBalancesPanel } from '@/components/admin/ShopBalancesPanel';
 import { TavernaGroupPanel } from '@/components/admin/TavernaGroupPanel';
@@ -449,7 +449,7 @@ export default function AdminDashboard() {
       <div className="sticky top-0 z-40 bg-background/95 backdrop-blur border-b border-border">
         <div className="flex items-center justify-between p-4">
           <div className="flex items-center gap-3">
-            <Button variant="ghost" size="icon" onClick={() => navigate("/?tab=account")}>
+            <Button variant="ghost" size="icon" className="text-foreground" onClick={() => navigate("/?tab=account")}>
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div>
@@ -491,8 +491,6 @@ export default function AdminDashboard() {
         </CardContent></Card>
       </div>
 
-      <SupplierImportProgress isAdmin variant="inline" />
-
       {/* Alert badges */}
       <div className="px-4 flex gap-2 flex-wrap">
         {orderStats.pendingOrders > 0 && (
@@ -529,6 +527,9 @@ export default function AdminDashboard() {
               <TabsTrigger value="stores" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Store className="h-3.5 w-3.5" /> Магазини
               </TabsTrigger>
+              <TabsTrigger value="ai-queue" className="text-xs px-3 gap-1 flex-shrink-0">
+                <Bot className="h-3.5 w-3.5" /> AI-черга
+              </TabsTrigger>
               <TabsTrigger value="applications" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Users className="h-3.5 w-3.5" /> Заявки
                 {pendingSuppliers.length + deletionRequests.length > 0 && (
@@ -559,6 +560,10 @@ export default function AdminDashboard() {
               applicationsCount={pendingSuppliers.length}
               onNavigate={(tab) => { hapticSelection(); setActiveTab(tab); }}
             />
+          </TabsContent>
+
+          <TabsContent value="ai-queue">
+            <AdminAiQueuePanel />
           </TabsContent>
 
 

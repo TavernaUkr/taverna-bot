@@ -227,7 +227,7 @@ export async function fetchBackendFilters(
   return backendGet<BackendProductFilters>(qs ? `${FILTERS_ENDPOINT}?${qs}` : FILTERS_ENDPOINT);
 }
 
-/** Отримати всі товари з нашого FastAPI-бекенду. */
+/** Отримати товари з нашого FastAPI-бекенду (пагінація, щоб не вішати сервер). */
 export async function fetchBackendProducts(filters?: {
   category?: QueryValue;
   main_category?: QueryValue;
@@ -236,6 +236,8 @@ export async function fetchBackendProducts(filters?: {
   target_niche?: QueryValue;
   niche?: QueryValue;
   gender?: QueryValue;
+  limit?: number;
+  offset?: number;
 }): Promise<BackendProduct[]> {
   const params = new URLSearchParams();
   appendQueryValues(params, "category", filters?.category ?? filters?.main_category);
@@ -243,8 +245,31 @@ export async function fetchBackendProducts(filters?: {
   appendQueryValues(params, "season", filters?.season);
   appendQueryValues(params, "target_niche", filters?.target_niche ?? filters?.niche);
   appendQueryValues(params, "gender", filters?.gender);
-  const qs = params.toString();
-  return backendGet<BackendProduct[]>(qs ? `${PRODUCTS_ENDPOINT}?${qs}` : PRODUCTS_ENDPOINT);
+  const limit = Math.min(Math.max(filters?.limit ?? 50, 1), 100);
+  const offset = Math.max(filters?.offset ?? 0, 0);
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  return backendGet<BackendProduct[]>(`${PRODUCTS_ENDPOINT}?${params.toString()}`);
+}
+
+/** Кілька сторінок по 50, максимум 500 товарів — без одного гігантського запиту. */
+export async function fetchBackendProductsPaged(
+  filters?: Omit<
+    NonNullable<Parameters<typeof fetchBackendProducts>[0]>,
+    "limit" | "offset"
+  >,
+  maxItems = 500
+): Promise<BackendProduct[]> {
+  const all: BackendProduct[] = [];
+  const pageSize = 50;
+  let offset = 0;
+  while (all.length < maxItems) {
+    const page = await fetchBackendProducts({ ...filters, limit: pageSize, offset });
+    all.push(...page);
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+  return all;
 }
 
 /**
@@ -297,7 +322,7 @@ export async function fetchProductById(id: string | number): Promise<BackendProd
  * пошуковий ендпоінт (`?search=`), достатньо буде оновити тільки цю функцію.
  */
 export async function searchBackendProducts(query: string): Promise<BackendProduct[]> {
-  const all = await fetchBackendProducts();
+  const all = await fetchBackendProductsPaged();
   const q = query.trim().toLowerCase();
   if (!q) return all;
 
@@ -655,13 +680,82 @@ export interface BackendSupplierMe {
   deleted_at?: string | null;
 }
 
+export type BackendQueueShopStatus = "fetching_xml" | "processing" | "waiting";
+
+export interface BackendWidgetQueueShop {
+  shop_name: string;
+  status: BackendQueueShopStatus;
+  processed: number;
+  total: number;
+  queue_position: number;
+  estimated_minutes: number;
+  supplier_id?: number;
+  is_fetching_xml?: boolean;
+}
+
+export interface BackendSupplierQueueShop {
+  supplier_id: number;
+  shop_name: string;
+  status?: BackendQueueShopStatus;
+  total: number;
+  processed: number;
+  pending_count: number;
+  queue_position: number;
+  items_ahead: number;
+  estimated_minutes: number;
+  wait_minutes: number;
+  is_processing: boolean;
+  is_fetching_xml?: boolean;
+}
+
 export interface BackendSupplierImportProgress {
   total: number;
   completed: number;
+  processed?: number;
   estimated_minutes: number;
   is_importing: boolean;
   queue_ahead?: number;
   queue_position?: number;
+  items_ahead: number;
+  shop_name?: string | null;
+  supplier_id?: number | null;
+  pending_count?: number;
+  wait_minutes?: number;
+  is_fetching_xml?: boolean;
+  shops?: BackendSupplierQueueShop[];
+}
+
+export interface BackendAdminAiQueueCurrent {
+  supplier_id: number;
+  shop_name: string;
+  processed: number;
+  total: number;
+  pending_count?: number;
+  remaining_minutes: number;
+  wait_minutes?: number;
+  estimated_minutes?: number;
+  created_at?: string | null;
+  is_fetching_xml?: boolean;
+}
+
+export interface BackendAdminAiQueueWaitingItem {
+  supplier_id: number;
+  shop_name: string;
+  pending_count: number;
+  queue_position: number;
+  processed?: number;
+  total?: number;
+  remaining_minutes?: number;
+  wait_minutes?: number;
+  estimated_minutes?: number;
+  created_at?: string | null;
+  is_fetching_xml?: boolean;
+}
+
+export interface BackendAdminAiQueue {
+  current_processing: BackendAdminAiQueueCurrent | null;
+  waiting_list: BackendAdminAiQueueWaitingItem[];
+  shops?: BackendSupplierQueueShop[];
 }
 
 export interface BackendAdminStore {
@@ -743,12 +837,19 @@ export async function requestSupplierDeletion(reason: string): Promise<{ ok: boo
   );
 }
 
-/** GET /api/v1/suppliers/me/import-progress — прогрес AI-категоризації товарів. */
-export async function fetchSupplierImportProgress(): Promise<BackendSupplierImportProgress> {
-  return backendGet<BackendSupplierImportProgress>(
+/** GET /api/v1/suppliers/me/import-progress — масив магазинів у XML/AI-черзі. */
+export async function fetchSupplierImportProgress(): Promise<BackendWidgetQueueShop[]> {
+  const data = await backendGet<BackendWidgetQueueShop[] | { shops?: BackendWidgetQueueShop[] }>(
     SUPPLIERS_IMPORT_PROGRESS_ENDPOINT,
     adminTelegramHeaders()
   );
+  if (Array.isArray(data)) {
+    return data.filter(Boolean);
+  }
+  if (data && Array.isArray(data.shops)) {
+    return data.shops.filter(Boolean);
+  }
+  return [];
 }
 
 export async function fetchAdminStores(
@@ -767,6 +868,16 @@ export async function fetchAdminImportProgress(
   const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
   return backendGet<BackendSupplierImportProgress>(
     `${API_BASE_URL}/api/v1/admin/suppliers/import-progress${params}`,
+    adminTelegramHeaders()
+  );
+}
+
+export async function fetchAdminAiQueue(
+  telegramId?: number | null
+): Promise<BackendAdminAiQueue> {
+  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  return backendGet<BackendAdminAiQueue>(
+    `${API_BASE_URL}/api/v1/admin/ai-queue${params}`,
     adminTelegramHeaders()
   );
 }

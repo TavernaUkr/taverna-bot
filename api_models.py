@@ -230,14 +230,71 @@ class PartnerRegisterResponse(BaseModel):
     created_at: Optional[datetime] = None
 
 
+class SupplierQueueShopProgress(BaseModel):
+    """Один магазин у AI-черзі (віджет і адмінка)."""
+    supplier_id: int = 0
+    shop_name: str
+    status: str = "waiting"
+    total: int = 0
+    processed: int = 0
+    pending_count: int = 0
+    queue_position: int = 0
+    items_ahead: int = 0
+    estimated_minutes: int = 0
+    wait_minutes: int = 0
+    is_processing: bool = False
+    is_fetching_xml: bool = False
+
+
 class SupplierImportProgressResponse(BaseModel):
-    """Прогрес AI-категоризації товарів поточного постачальника."""
+    """Прогрес AI лише для магазинів поточного користувача."""
     total: int = 0
     completed: int = 0
+    processed: int = 0
     estimated_minutes: int = 0
     is_importing: bool = False
     queue_ahead: int = 0
     queue_position: int = 0
+    items_ahead: int = 0
+    shop_name: Optional[str] = None
+    supplier_id: Optional[int] = None
+    pending_count: int = 0
+    wait_minutes: int = 0
+    is_fetching_xml: bool = False
+    shops: list[SupplierQueueShopProgress] = []
+
+
+class AdminAiQueueCurrentResponse(BaseModel):
+    supplier_id: int
+    shop_name: str
+    processed: int = 0
+    total: int = 0
+    pending_count: int = 0
+    remaining_minutes: int = 0
+    wait_minutes: int = 0
+    estimated_minutes: int = 0
+    created_at: Optional[datetime] = None
+    is_fetching_xml: bool = False
+
+
+class AdminAiQueueWaitingItem(BaseModel):
+    supplier_id: int
+    shop_name: str
+    pending_count: int = 0
+    queue_position: int = 0
+    processed: int = 0
+    total: int = 0
+    remaining_minutes: int = 0
+    wait_minutes: int = 0
+    estimated_minutes: int = 0
+    created_at: Optional[datetime] = None
+    is_fetching_xml: bool = False
+
+
+class AdminAiQueueResponse(BaseModel):
+    current_processing: Optional[AdminAiQueueCurrentResponse] = None
+    waiting_list: list[AdminAiQueueWaitingItem] = []
+    shops: list[SupplierQueueShopProgress] = []
 
 
 class SupplierMeResponse(BaseModel):
@@ -351,6 +408,9 @@ class AdminDirectCreateSupplierRequest(BaseModel):
     legal_name: Optional[str] = None
     payment_card_holder: Optional[str] = None
     supplier_type: Optional[str] = None
+    telegram_id: Optional[int] = None
+    user_id: Optional[int] = None
+    owner_telegram_id: Optional[int] = None
 
     def resolved_name(self) -> str:
         value = (self.shop_name or self.store_name or self.name or "").strip()

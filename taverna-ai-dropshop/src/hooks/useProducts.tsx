@@ -174,6 +174,8 @@ export function useProducts() {
 
       const backendProducts = await fetchBackendProducts({
         category: filters?.categoryId,
+        limit: 50,
+        offset: 0,
       });
       let mapped = backendProducts.map(mapBackendProductToUi);
 
