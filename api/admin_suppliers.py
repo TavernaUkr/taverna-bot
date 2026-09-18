@@ -2,7 +2,7 @@
 """Заявки постачальників для React-адмінки Mini App."""
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
 import math
@@ -75,6 +75,7 @@ PENDING_STATUSES = (
 )
 
 HISTORY_STATUSES = (
+    SupplierStatus.parsing,
     SupplierStatus.active,
     SupplierStatus.rejected,
     SupplierStatus.banned,
@@ -129,6 +130,7 @@ def _to_application(
         trial_ends_at=supplier.trial_ends_at,
         created_at=supplier.created_at,
         approved_at=getattr(supplier, "approved_at", None),
+        restored_at=getattr(supplier, "restored_at", None),
         deleted_at=getattr(supplier, "deleted_at", None),
         import_started=import_started,
         deletion_reason=_deletion_reason(supplier),
@@ -498,7 +500,7 @@ async def _hard_delete_supplier(db: AsyncSession, supplier: Supplier) -> bool:
 
     user_reverted = await _maybe_revert_user_to_client(db, user_id, supplier_id)
 
-    supplier.deleted_at = datetime.utcnow()
+    supplier.deleted_at = datetime.now(timezone.utc)
     await db.delete(supplier)
     await db.commit()
     return user_reverted
@@ -704,28 +706,21 @@ async def admin_ai_queue(
         )
 
     shops = [_shop_item(row) for row in view]
-    ai_rows = [row for row in view if not row.get("is_fetching_xml")]
-    fetch_rows = [row for row in view if row.get("is_fetching_xml")]
-    current = None
-    waiting_src = []
-    if ai_rows:
-        first = ai_rows[0]
-        estimated = int(first.get("estimated_minutes", first["remaining_minutes"]))
-        current = AdminAiQueueCurrentResponse(
-            supplier_id=int(first["supplier_id"]),
-            shop_name=str(first["shop_name"]),
-            processed=int(first["processed"]),
-            total=int(first["total"]),
-            pending_count=int(first["pending_count"]),
-            remaining_minutes=estimated,
-            wait_minutes=int(first["wait_minutes"]),
-            estimated_minutes=estimated,
-            created_at=first.get("created_at"),
-            is_fetching_xml=False,
-        )
-        waiting_src = ai_rows[1:] + fetch_rows
-    else:
-        waiting_src = fetch_rows
+    first = view[0]
+    estimated = int(first.get("estimated_minutes", first["remaining_minutes"]))
+    current = AdminAiQueueCurrentResponse(
+        supplier_id=int(first["supplier_id"]),
+        shop_name=str(first["shop_name"]),
+        processed=int(first["processed"]),
+        total=int(first["total"]),
+        pending_count=int(first["pending_count"]),
+        remaining_minutes=estimated,
+        wait_minutes=int(first["wait_minutes"]),
+        estimated_minutes=estimated,
+        created_at=first.get("created_at"),
+        is_fetching_xml=bool(first.get("is_fetching_xml")),
+    )
+    waiting_src = view[1:]
     return AdminAiQueueResponse(
         current_processing=current,
         waiting_list=[_waiting_item(row) for row in waiting_src],
@@ -760,7 +755,7 @@ async def approve_supplier_deletion(
 
     supplier.status = SupplierStatus.deleted
     supplier.is_verified = False
-    supplier.deleted_at = datetime.utcnow()
+    supplier.deleted_at = datetime.now(timezone.utc)
 
     user_reverted = await _maybe_revert_user_to_client(db, supplier.user_id, supplier_id)
 
@@ -806,6 +801,11 @@ async def restore_supplier(
     supplier.status = SupplierStatus.active
     supplier.is_verified = True
     supplier.deleted_at = None
+    now_utc = datetime.now(timezone.utc)
+    supplier.restored_at = now_utc
+    supplier.queue_joined_at = now_utc
+    if supplier.approved_at is None:
+        supplier.approved_at = now_utc
     _clear_deletion_request_notes(supplier)
 
     if supplier.user_id:
@@ -920,10 +920,12 @@ async def direct_create_supplier(
             if source_type == "telegram"
             else "Створено адміном (direct-create). AI-скоринг заявки не потрібен."
         ),
-        approved_at=datetime.utcnow(),
+        approved_at=datetime.now(timezone.utc),
         contact_telegram_id=owner_tg,
         user_id=owner_user_id,
     )
+    if source_type == "telegram" or yml_link or extracted_key:
+        new_supplier.status = SupplierStatus.parsing
     db.add(new_supplier)
     await db.flush()
     await _ensure_shop_record(db, new_supplier)
@@ -1036,8 +1038,7 @@ async def approve_supplier_application(
     source_type = (getattr(supplier, "source_type", None) or "xml").strip().lower()
 
     supplier.is_verified = True
-    supplier.status = SupplierStatus.active
-    supplier.approved_at = datetime.utcnow()
+    supplier.approved_at = datetime.now(timezone.utc)
     if source_type != "telegram":
         try:
             canonical_yml, extracted_key = normalize_mydrop_yml_link(
@@ -1058,18 +1059,26 @@ async def approve_supplier_application(
         if user and user.role != UserRole.admin:
             user.role = UserRole.supplier
     await _ensure_shop_record(db, supplier)
-    await db.commit()
-    await db.refresh(supplier)
 
     import_started = False
     if source_type == "telegram":
-        background_tasks.add_task(run_telegram_import_job, supplier.id)
+        supplier.status = SupplierStatus.parsing
         import_started = True
     else:
         has_feed = bool(supplier.yml_link or supplier.xml_url or supplier.mydrop_api_key)
         if has_feed:
-            schedule_supplier_catalog_import(supplier.id)
+            supplier.status = SupplierStatus.parsing
             import_started = True
+        else:
+            supplier.status = SupplierStatus.active
+
+    await db.commit()
+    await db.refresh(supplier)
+
+    if source_type == "telegram":
+        background_tasks.add_task(run_telegram_import_job, supplier.id)
+    elif import_started:
+        schedule_supplier_catalog_import(supplier.id)
 
     logger.info(
         "Адмін схвалив заявку #%s, source_type=%s, import_started=%s",

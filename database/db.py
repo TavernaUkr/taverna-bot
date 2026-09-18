@@ -138,7 +138,7 @@ async def ensure_product_ai_status_column() -> None:
 
 
 async def ensure_supplier_status_timestamps() -> None:
-    """Live-режим: approved_at / deleted_at на suppliers, якщо колонок ще немає."""
+    """Live-режим: approved_at / restored_at / deleted_at на suppliers, якщо колонок ще немає."""
     if engine is None:
         return
 
@@ -153,6 +153,46 @@ async def ensure_supplier_status_timestamps() -> None:
         if "deleted_at" not in cols:
             sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN deleted_at DATETIME"))
             logger.info("Додано колонку suppliers.deleted_at.")
+        if "restored_at" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN restored_at DATETIME"))
+            logger.info("Додано колонку suppliers.restored_at.")
+        if "queue_joined_at" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN queue_joined_at DATETIME"))
+            logger.info("Додано колонку suppliers.queue_joined_at.")
+            try:
+                sync_conn.execute(text(
+                    "UPDATE suppliers SET queue_joined_at = created_at "
+                    "WHERE queue_joined_at IS NULL"
+                ))
+            except Exception:
+                pass
+            try:
+                sync_conn.execute(text(
+                    "CREATE INDEX ix_suppliers_queue_joined_at ON suppliers (queue_joined_at)"
+                ))
+            except Exception:
+                pass
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
+async def ensure_supplier_parsing_status() -> None:
+    """Live-режим: значення parsing у enum статусів постачальника (PostgreSQL)."""
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        if sync_conn.dialect.name != "postgresql":
+            return
+        for type_name in ("supplierstatus", "supplier_status_enum"):
+            try:
+                sync_conn.execute(text(
+                    f"ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS 'parsing'"
+                ))
+                logger.info("Додано значення %s.parsing.", type_name)
+            except Exception:
+                pass
 
     async with engine.begin() as conn:
         await conn.run_sync(_ensure)
@@ -232,6 +272,23 @@ async def ensure_ai_categorization_rules_table() -> None:
         await conn.run_sync(_ensure)
 
 
+async def ensure_supplier_history_log_table() -> None:
+    """Live-режим: таблиця supplier_history_log, якщо її ще немає."""
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        insp = inspect(sync_conn)
+        if "supplier_history_log" in set(insp.get_table_names()):
+            return
+        from database.models import SupplierHistoryLog
+        SupplierHistoryLog.__table__.create(bind=sync_conn, checkfirst=True)
+        logger.info("Створено таблицю supplier_history_log.")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
 async def get_db() -> AsyncSession:
     """
     FastAPI "Dependency" для отримання сесії БД.
@@ -264,4 +321,6 @@ async def init_db() -> None:
     await ensure_supplier_status_timestamps()
     await ensure_user_settings_columns()
     await ensure_supplier_telegram_source_columns()
+    await ensure_supplier_parsing_status()
     await ensure_ai_categorization_rules_table()
+    await ensure_supplier_history_log_table()

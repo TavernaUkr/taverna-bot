@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
@@ -130,8 +129,8 @@ export function AIOrderReports() {
       </div>
 
       {/* Reports list */}
-      <ScrollArea className="h-[calc(100vh-500px)]">
-        <div className="space-y-3 pr-2">
+      <div className="overflow-y-auto pb-24">
+        <div className="space-y-3 pr-2 pb-24">
           {isLoading ? (
             <div className="flex justify-center py-8">
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -168,7 +167,7 @@ export function AIOrderReports() {
             ))
           )}
         </div>
-      </ScrollArea>
+      </div>
     </div>
   );
 }

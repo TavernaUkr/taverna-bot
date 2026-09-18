@@ -13,21 +13,9 @@ import {
   fetchAdminAiQueue,
   type BackendAdminAiQueue,
 } from "@/lib/backendApi";
+import { formatLocalTime } from "@/utils/dateFormatter";
 
 const POLL_MS = 10000;
-
-function formatDate(value?: string | null): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString("uk-UA", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 function useAdminAiQueue(enabled: boolean) {
   const [queue, setQueue] = useState<BackendAdminAiQueue | null>(null);
@@ -114,26 +102,35 @@ function AdminQueueList({
   return (
     <div className="space-y-3">
       {current && (
-        <div className="flex flex-col gap-2 rounded-2xl border border-emerald-500/20 bg-slate-200/80 p-4 text-slate-900 shadow-md backdrop-blur-md dark:border-white/10 dark:bg-zinc-950/80 dark:text-white">
+        <div className="flex h-auto min-h-min flex-col rounded-2xl border border-emerald-500/20 bg-slate-200/80 p-3 text-slate-900 shadow-md backdrop-blur-md dark:border-white/10 dark:bg-zinc-950/80 dark:text-white">
           <div className="flex items-start gap-2">
             <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-emerald-500" />
-            <div className="min-w-0">
-              <p className="text-sm font-medium leading-snug">
-                Зараз: {current.shop_name} (ID {current.supplier_id})
+            <div className="flex-1">
+              <p className="whitespace-normal break-words text-sm font-medium leading-tight">
+                {current.is_fetching_xml
+                  ? `Завантаження XML: ${current.shop_name} (ID ${current.supplier_id})`
+                  : `Зараз: ${current.shop_name} (ID ${current.supplier_id})`}
               </p>
-              <p className="text-sm leading-snug">
-                Завантажено {current.processed} з {current.total}
-                {typeof current.pending_count === "number" ? ` · у роботі ${current.pending_count}` : ""}
+              <p className="whitespace-normal break-words text-sm leading-tight">
+                {current.is_fetching_xml
+                  ? "Товарів у базі ще немає · парсинг каталогу"
+                  : `Завантажено ${current.processed} з ${current.total}${
+                      typeof current.pending_count === "number" ? ` · у роботі ${current.pending_count}` : ""
+                    }`}
               </p>
-              <p className="mt-0.5 text-[11px] text-slate-600 dark:text-slate-300">
-                Орієнтовний час: ~{current.remaining_minutes} хв · зареєстровано {formatDate(current.created_at)}
+              <p className="mt-0.5 whitespace-normal break-words text-[11px] leading-tight text-slate-600 dark:text-slate-300">
+                Орієнтовний час: ~{current.remaining_minutes} хв · зареєстровано {formatLocalTime(current.created_at)}
               </p>
             </div>
           </div>
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-400/80 dark:bg-slate-700">
+          <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-400/80 dark:bg-slate-700">
             <div
-              className="h-full bg-emerald-500 transition-all"
-              style={{ width: `${currentPercent}%` }}
+              className={
+                current.total === 0
+                  ? "h-full w-full bg-emerald-500 animate-pulse"
+                  : "h-full bg-emerald-500 transition-all"
+              }
+              style={current.total === 0 ? undefined : { width: `${currentPercent}%` }}
             />
           </div>
         </div>
@@ -147,31 +144,32 @@ function AdminQueueList({
           {waiting.map((item) => (
             <div
               key={item.supplier_id}
-              className="rounded-2xl border border-slate-300/60 bg-slate-200/80 p-4 text-slate-900 shadow-md backdrop-blur-md dark:border-white/10 dark:bg-zinc-950/80 dark:text-white"
+              className="h-auto min-h-min rounded-2xl border border-slate-300/60 bg-slate-200/80 p-3 text-slate-900 shadow-md backdrop-blur-md dark:border-white/10 dark:bg-zinc-950/80 dark:text-white"
             >
               {item.is_fetching_xml ? (
                 <>
-                  <p className="text-sm font-medium leading-snug text-sky-700 dark:text-sky-300">
-                    Завантаження XML: {item.shop_name} (ID {item.supplier_id})
+                  <p className="whitespace-normal break-words text-sm font-medium leading-tight text-amber-700 dark:text-amber-300">
+                    ⏳ {item.shop_name} (ID {item.supplier_id})
                   </p>
-                  <p className="mt-0.5 text-[11px] text-slate-600 dark:text-slate-300">
-                    Товарів у базі ще немає · парсинг каталогу
+                  <p className="mt-0.5 whitespace-normal break-words text-[11px] leading-tight text-slate-600 dark:text-slate-300">
+                    В черзі {item.queue_position}
+                    {typeof item.wait_minutes === "number" ? ` · чекати ~${item.wait_minutes} хв` : ""}
                   </p>
                 </>
               ) : (
                 <>
-                  <p className="text-sm font-medium leading-snug text-amber-700 dark:text-amber-300">
+                  <p className="whitespace-normal break-words text-sm font-medium leading-tight text-amber-700 dark:text-amber-300">
                     ⏳ {item.shop_name} (ID {item.supplier_id})
                   </p>
-                  <p className="mt-0.5 text-[11px] text-slate-600 dark:text-slate-300">
-                    Позиція {item.queue_position} · {item.pending_count} товарів
+                  <p className="mt-0.5 whitespace-normal break-words text-[11px] leading-tight text-slate-600 dark:text-slate-300">
+                    В черзі {item.queue_position} · {item.pending_count} товарів
                     {typeof item.wait_minutes === "number" ? ` · чекати ~${item.wait_minutes} хв` : ""}
                     {typeof item.remaining_minutes === "number" ? ` · до кінця ~${item.remaining_minutes} хв` : ""}
                   </p>
                 </>
               )}
-              <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-                Зареєстровано {formatDate(item.created_at)}
+              <p className="mt-0.5 whitespace-normal break-words text-[11px] leading-tight text-slate-500 dark:text-slate-400">
+                Зареєстровано {formatLocalTime(item.created_at)}
               </p>
             </div>
           ))}
@@ -186,7 +184,7 @@ export function AdminAiQueuePanel() {
   const { queue, loading, error } = useAdminAiQueue(true);
 
   return (
-    <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
+    <div className="rounded-2xl border border-border bg-card p-4 space-y-3 pb-24">
       <div className="flex items-center gap-2">
         <Cpu className="h-5 w-5 text-primary" />
         <div>

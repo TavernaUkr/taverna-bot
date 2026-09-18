@@ -7,11 +7,11 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
+import { formatLocalTime } from "@/utils/dateFormatter";
 
 interface PaymentsManagerProps {
   mode: "admin" | "moderator";
@@ -168,8 +168,7 @@ export function PaymentsManager({ mode }: PaymentsManagerProps) {
     };
   }, [splits]);
 
-  const formatDate = (d?: string | null) =>
-    d ? new Date(d).toLocaleDateString("uk-UA", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+  const formatDate = (d?: string | null) => formatLocalTime(d);
 
   return (
     <div className="space-y-4">
@@ -220,8 +219,8 @@ export function PaymentsManager({ mode }: PaymentsManagerProps) {
         />
       </div>
 
-      <ScrollArea className="h-[calc(100vh-440px)]">
-        <div className="space-y-3 pr-3">
+      <div className="overflow-y-auto pb-24">
+        <div className="space-y-3 pr-3 pb-24">
           {isLoading ? (
             <div className="flex justify-center py-12"><Loader2 className="h-8 w-8 animate-spin text-muted-foreground" /></div>
           ) : filtered.length === 0 ? (
@@ -348,7 +347,7 @@ export function PaymentsManager({ mode }: PaymentsManagerProps) {
             })
           )}
         </div>
-      </ScrollArea>
+      </div>
     </div>
   );
 }

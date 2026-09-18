@@ -9,7 +9,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -226,8 +225,8 @@ export function AdminRolesManager() {
       <p className="text-xs text-muted-foreground">{filteredUsers.length} користувачів</p>
 
       {/* Users list */}
-      <ScrollArea className="h-[calc(100vh-520px)]">
-        <div className="space-y-2 pr-4">
+      <div className="overflow-y-auto pb-24">
+        <div className="space-y-2 pr-4 pb-24">
           {filteredUsers.map(user => (
             <Card key={user.id} className={user.activeBan ? "border-destructive/30 bg-destructive/5" : ""}>
               <CardContent className="p-3 space-y-2">
@@ -303,7 +302,7 @@ export function AdminRolesManager() {
             </Card>
           ))}
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Ban Dialog */}
       <Dialog open={!!banDialog} onOpenChange={() => setBanDialog(null)}>

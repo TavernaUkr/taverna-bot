@@ -94,11 +94,6 @@ async def register_supplier(
                 detail="Магазин з таким URL (XML або Shop URL) вже зареєстрований в системі."
             )
 
-    # 4. Перевірка, чи цей юзер вже не має магазину
-    existing_supplier = await db.execute(select(Supplier).where(Supplier.user_id == user_id))
-    if existing_supplier.scalar_one_or_none():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Цей акаунт вже має зареєстрований магазин.")
-
     try:
         # 5. Створюємо нового Постачальника
         new_supplier = Supplier(

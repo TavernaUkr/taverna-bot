@@ -38,7 +38,7 @@ import Ratings from "./pages/Ratings";
 import { FloatingDevRoleSwitcher } from "@/components/dev/FloatingDevRoleSwitcher";
 import { FloatingToolsProvider } from "@/components/floating/FloatingToolsContext";
 import { FloatingToolsContainer } from "@/components/floating/FloatingToolsContainer";
-import { SupplierImportProgress } from "@/components/supplier/SupplierImportProgress";
+import { GlobalAIWidget } from "@/components/supplier/GlobalAIWidget";
 
 const queryClient = new QueryClient();
 
@@ -157,7 +157,7 @@ const App = () => (
                 <FloatingToolsContainer />
                 <FloatingDevRoleSwitcher />
                 {/* Глобальний віджет черги: поза <Routes>, не розмонтовується при навігації */}
-                <SupplierImportProgress />
+                <GlobalAIWidget />
               </FloatingToolsProvider>
             </BrowserRouter>
 

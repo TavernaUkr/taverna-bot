@@ -11,7 +11,11 @@ from telethon import TelegramClient, events
 
 from database.db import AsyncSessionLocal
 from database.models import Supplier, SupplierStatus
-from services.telegram_parser import parse_telegram_posts_to_products
+from services.telegram_parser import (
+    extract_and_upload_message_media,
+    extract_photo_urls_from_text,
+    parse_telegram_posts_to_products,
+)
 from services.telegram_sync import _source_url_for_message, upsert_parsed_telegram_items
 
 logger = logging.getLogger(__name__)
@@ -121,7 +125,7 @@ def _resolve_supplier_id(event, approved: Dict[str, int]) -> Optional[int]:
     return None
 
 
-def _event_post_text(event) -> str:
+async def _event_post_text(event) -> str:
     message = getattr(event, "message", None)
     text = ""
     if message is not None:
@@ -129,6 +133,7 @@ def _event_post_text(event) -> str:
     if not text:
         text = (getattr(event, "text", None) or "").strip()
     flags = []
+    public_urls: list[str] = []
     if message is not None:
         if getattr(message, "photo", None):
             flags.append("є фото")
@@ -136,12 +141,25 @@ def _event_post_text(event) -> str:
             flags.append("є відео")
         elif getattr(message, "media", None):
             flags.append("є медіа")
+        try:
+            client = getattr(event, "client", None)
+            public_urls = await extract_and_upload_message_media(client, message)
+        except Exception as e:
+            logger.warning(
+                "telegram_listener: медіа не завантажено (пост #%s): %s — парсимо текст.",
+                getattr(message, "id", "?"), e,
+            )
     header = f"Пост #{getattr(message, 'id', '?')}"
     if flags:
         header += f" [{', '.join(flags)}]"
+    parts = [header]
     if text:
-        return f"{header}\n{text}"
-    return header if flags else ""
+        parts.append(text)
+    for url in public_urls:
+        parts.append(f"Фото товару: {url}")
+    if text or flags or public_urls:
+        return "\n".join(parts)
+    return ""
 
 
 async def _handle_channel_post(event, *, is_edit: bool) -> None:
@@ -155,7 +173,7 @@ async def _handle_channel_post(event, *, is_edit: bool) -> None:
         if not supplier_id:
             return
 
-        posts_text = _event_post_text(event)
+        posts_text = await _event_post_text(event)
         if not posts_text.strip():
             return
 
@@ -174,6 +192,12 @@ async def _handle_channel_post(event, *, is_edit: bool) -> None:
                 supplier_id, is_edit,
             )
             return
+
+        photo_urls = extract_photo_urls_from_text(posts_text)
+        if photo_urls:
+            for item in parsed:
+                if not item.get("image_urls"):
+                    item["image_urls"] = list(photo_urls)
 
         message = getattr(event, "message", None)
         message_id = int(getattr(message, "id", 0) or getattr(event, "id", 0) or 0)

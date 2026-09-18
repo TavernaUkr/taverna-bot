@@ -732,10 +732,11 @@ export interface BackendSupplierMe {
   deletion_requested: boolean;
   created_at?: string | null;
   approved_at?: string | null;
+  restored_at?: string | null;
   deleted_at?: string | null;
 }
 
-export type BackendQueueShopStatus = "fetching_xml" | "processing" | "waiting";
+export type BackendQueueShopStatus = "fetching_xml" | "parsing" | "processing" | "waiting";
 
 export interface BackendWidgetQueueShop {
   shop_name: string;
@@ -856,6 +857,7 @@ export interface BackendPendingSupplierApplication {
   trial_ends_at?: string | null;
   created_at?: string | null;
   approved_at?: string | null;
+  restored_at?: string | null;
   deleted_at?: string | null;
   import_started?: boolean;
   deletion_reason?: string | null;
@@ -873,16 +875,32 @@ function adminTelegramHeaders(): Record<string, string> {
   return headers;
 }
 
-/** GET /api/v1/suppliers/me — магазин поточного постачальника. */
-export async function fetchMySupplier(): Promise<BackendSupplierMe | null> {
+/** GET /api/v1/suppliers/me — усі магазини поточного постачальника. */
+export async function fetchMySuppliers(): Promise<BackendSupplierMe[]> {
   try {
-    return await backendGet<BackendSupplierMe>(SUPPLIERS_ME_ENDPOINT, adminTelegramHeaders());
+    const data = await backendGet<BackendSupplierMe[] | BackendSupplierMe>(
+      SUPPLIERS_ME_ENDPOINT,
+      adminTelegramHeaders()
+    );
+    if (Array.isArray(data)) {
+      return data.filter(Boolean);
+    }
+    if (data && typeof data === "object" && "id" in data) {
+      return [data];
+    }
+    return [];
   } catch (error) {
     if (error instanceof BackendApiError && (error.status === 404 || error.status === 401)) {
-      return null;
+      return [];
     }
     throw error;
   }
+}
+
+/** GET /api/v1/suppliers/me — перший магазин (сумісність). */
+export async function fetchMySupplier(): Promise<BackendSupplierMe | null> {
+  const rows = await fetchMySuppliers();
+  return rows[0] ?? null;
 }
 
 /** POST /api/v1/suppliers/me/request-deletion — заявка адміну на видалення магазину. */

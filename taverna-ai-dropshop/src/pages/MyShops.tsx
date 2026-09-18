@@ -26,7 +26,7 @@ import { useToast } from "@/hooks/use-toast";
 import { hapticSelection } from "@/lib/haptics";
 import {
   BackendApiError,
-  fetchMySupplier,
+  fetchMySuppliers,
   requestSupplierDeletion,
   transferSupplierOwnership,
 } from "@/lib/backendApi";
@@ -85,6 +85,169 @@ const isLovableDevEnvironment = () => {
   }
 };
 
+function StoreCard({
+  shop,
+  canEdit,
+  isAdmin,
+  onSettings,
+  onWallet,
+  onPromo,
+  onOrders,
+  onReviews,
+  onTransfer,
+  onDelete,
+}: {
+  shop: ShopInfo;
+  canEdit: boolean;
+  isAdmin: boolean;
+  onSettings: (shop: ShopInfo) => void;
+  onWallet: (shop: ShopInfo) => void;
+  onPromo: (shop: ShopInfo) => void;
+  onOrders: (shop: ShopInfo) => void;
+  onReviews: (shop: ShopInfo) => void;
+  onTransfer: (shop: ShopInfo) => void;
+  onDelete: (shop: ShopInfo) => void;
+}) {
+  return (
+    <Card className="overflow-hidden">
+      <CardContent className="p-4">
+        <div className="flex items-start gap-3 mb-3">
+          <Avatar className="h-14 w-14 rounded-xl">
+            <AvatarImage src={shop.logo_url || undefined} alt={shop.shop_name} />
+            <AvatarFallback className="rounded-xl bg-primary/10 text-primary font-bold text-lg">
+              {shop.shop_name.charAt(0).toUpperCase()}
+            </AvatarFallback>
+          </Avatar>
+
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1">
+              <h3 className="font-semibold text-foreground truncate">
+                {shop.shop_name}
+              </h3>
+              <Badge
+                variant={shop.role === "owner" ? "default" : "secondary"}
+                className="text-[10px] px-1.5 py-0 shrink-0"
+              >
+                {shop.role === "owner" ? "Власник" : "Менеджер"}
+              </Badge>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              {supplierTypeLabel(shop.supplier_type) && (
+                <span>{supplierTypeLabel(shop.supplier_type)}</span>
+              )}
+              <Badge
+                variant={shop.is_active ? "default" : "secondary"}
+                className="text-[10px]"
+              >
+                {supplierStatusLabel(shop.status) || (shop.is_active ? "Активний" : "Неактивний")}
+              </Badge>
+              {shop.deletion_requested && (
+                <Badge variant="destructive" className="text-[10px]">
+                  Заявка на видалення
+                </Badge>
+              )}
+            </div>
+            <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
+              <span className="flex items-center gap-1">
+                <Package className="h-3 w-3" />
+                {typeof shop.completed_products === "number"
+                  ? `${shop.completed_products} з ${shop.product_count} товарів оброблено`
+                  : `${shop.product_count} товарів`}
+              </span>
+              {shop.review_count > 0 && (
+                <span className="flex items-center gap-1">
+                  <Star className="h-3 w-3" />
+                  {shop.review_count} відгуків
+                </span>
+              )}
+            </div>
+          </div>
+
+          {canEdit && (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="shrink-0 h-10 w-10 rounded-full hover:bg-primary/10"
+              onClick={() => onSettings(shop)}
+              title="Редагувати магазин"
+            >
+              <Settings className="h-5 w-5 text-primary" />
+            </Button>
+          )}
+        </div>
+
+        <Button
+          size="sm"
+          variant="outline"
+          className="w-full h-9 mb-2 border-amber-500/40 text-amber-600 hover:bg-amber-500/10 hover:text-amber-600"
+          onClick={() => onWallet(shop)}
+        >
+          <Wallet className="h-3.5 w-3.5 mr-1.5" />
+          Баланс магазину
+        </Button>
+
+        <Button
+          size="sm"
+          variant="premium"
+          className="w-full h-9 mb-2"
+          onClick={() => onPromo(shop)}
+        >
+          <Megaphone className="h-3.5 w-3.5 mr-1.5" />
+          Просування
+        </Button>
+
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            className="flex-1 h-9"
+            onClick={() => onOrders(shop)}
+          >
+            <ShoppingCart className="h-3.5 w-3.5 mr-1.5" />
+            Замовлення
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            className="flex-1 h-9"
+            onClick={() => onReviews(shop)}
+          >
+            <MessageSquare className="h-3.5 w-3.5 mr-1.5" />
+            Відгуки
+          </Button>
+        </div>
+
+        {shop.role === "owner" && (
+          <div className="flex gap-2 mt-2">
+            {isAdmin && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="flex-1 h-9 border-indigo-300 text-indigo-600 hover:bg-indigo-50 hover:text-indigo-700 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-900/30"
+                onClick={() => onTransfer(shop)}
+              >
+                <UserPlus className="h-3.5 w-3.5 mr-1.5" />
+                Передати права
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              className={`${isAdmin ? "flex-1" : "w-full"} h-9 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30 border border-red-200 dark:border-red-800`}
+              disabled={shop.deletion_requested}
+              onClick={() => onDelete(shop)}
+            >
+              <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+              {shop.deletion_requested ? "Заявку надіслано" : "Видалити магазин"}
+            </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function MyShops() {
   const navigate = useNavigate();
   const { toast: uiToast } = useToast();
@@ -120,20 +283,21 @@ export default function MyShops() {
       const allShops: ShopInfo[] = [];
 
       if (isSupplier || isAdmin) {
-        const mine = await fetchMySupplier();
-        if (mine?.store_name) {
+        const mine = await fetchMySuppliers();
+        for (const shop of Array.isArray(mine) ? mine : []) {
+          if (!shop?.store_name) continue;
           allShops.push({
-            id: String(mine.id),
-            shop_name: mine.store_name,
+            id: String(shop.id),
+            shop_name: shop.store_name,
             logo_url: null,
-            is_active: mine.status === "active",
-            product_count: mine.product_count || 0,
+            is_active: shop.status === "active",
+            product_count: shop.product_count || 0,
             review_count: 0,
             role: "owner",
-            supplier_type: mine.supplier_type,
-            status: mine.status,
-            completed_products: mine.completed_products,
-            deletion_requested: mine.deletion_requested,
+            supplier_type: shop.supplier_type,
+            status: shop.status,
+            completed_products: shop.completed_products,
+            deletion_requested: shop.deletion_requested,
           });
         }
       }
@@ -218,7 +382,7 @@ export default function MyShops() {
     return false;
   };
 
-  const openDeleteDialog = () => {
+  const openDeleteDialog = (shop?: ShopInfo) => {
     hapticSelection();
     setDeleteReason("");
     setDeleteOpen(true);
@@ -343,7 +507,7 @@ export default function MyShops() {
         </div>
       </div>
 
-      <div className="p-4 space-y-4 pb-24">
+      <div className="p-4">
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="h-8 w-8 animate-spin text-primary" />
@@ -369,164 +533,38 @@ export default function MyShops() {
             )}
           </div>
         ) : (
-          shops.map((shop) => (
-            <Card key={shop.id} className="overflow-hidden">
-              <CardContent className="p-4">
-                {/* Header row: avatar + name + badge + gear icon */}
-                <div className="flex items-start gap-3 mb-3">
-                  <Avatar className="h-14 w-14 rounded-xl">
-                    <AvatarImage src={shop.logo_url || undefined} alt={shop.shop_name} />
-                    <AvatarFallback className="rounded-xl bg-primary/10 text-primary font-bold text-lg">
-                      {shop.shop_name.charAt(0).toUpperCase()}
-                    </AvatarFallback>
-                  </Avatar>
-
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <h3 className="font-semibold text-foreground truncate">
-                        {shop.shop_name}
-                      </h3>
-                      <Badge
-                        variant={shop.role === "owner" ? "default" : "secondary"}
-                        className="text-[10px] px-1.5 py-0 shrink-0"
-                      >
-                        {shop.role === "owner" ? "Власник" : "Менеджер"}
-                      </Badge>
-                    </div>
-
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      {supplierTypeLabel(shop.supplier_type) && (
-                        <span>{supplierTypeLabel(shop.supplier_type)}</span>
-                      )}
-                      <Badge
-                        variant={shop.is_active ? "default" : "secondary"}
-                        className="text-[10px]"
-                      >
-                        {supplierStatusLabel(shop.status) || (shop.is_active ? "Активний" : "Неактивний")}
-                      </Badge>
-                      {shop.deletion_requested && (
-                        <Badge variant="destructive" className="text-[10px]">
-                          Заявка на видалення
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
-                      <span className="flex items-center gap-1">
-                        <Package className="h-3 w-3" />
-                        {typeof shop.completed_products === "number"
-                          ? `${shop.completed_products} з ${shop.product_count} товарів оброблено`
-                          : `${shop.product_count} товарів`}
-                      </span>
-                      {shop.review_count > 0 && (
-                        <span className="flex items-center gap-1">
-                          <Star className="h-3 w-3" />
-                          {shop.review_count} відгуків
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* ⚙️ Gear icon — only for owners (or dev supplier) */}
-                  {canEditShop(shop) && (
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="shrink-0 h-10 w-10 rounded-full hover:bg-primary/10"
-                      onClick={() => {
-                        hapticSelection();
-                        navigate(`/store-management/${shop.id}`);
-                      }}
-                      title="Редагувати магазин"
-                    >
-                      <Settings className="h-5 w-5 text-primary" />
-                    </Button>
-                  )}
-                </div>
-
-                {/* Balance button — owners & managers */}
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="w-full h-9 mb-2 border-amber-500/40 text-amber-600 hover:bg-amber-500/10 hover:text-amber-600"
-                  onClick={() => {
-                    hapticSelection();
-                    navigate(`/wallet/${shop.id}`);
-                  }}
-                >
-                  <Wallet className="h-3.5 w-3.5 mr-1.5" />
-                  Баланс магазину
-                </Button>
-
-                {/* Promotion button — owners & managers */}
-                <Button
-                  size="sm"
-                  variant="premium"
-                  className="w-full h-9 mb-2"
-                  onClick={() => {
-                    hapticSelection();
-                    setPromoShopId(shop.id);
-                  }}
-                >
-                  <Megaphone className="h-3.5 w-3.5 mr-1.5" />
-                  Просування
-                </Button>
-
-                {/* Action buttons */}
-                <div className="flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="flex-1 h-9"
-                    onClick={() => {
-                      hapticSelection();
-                      navigate(`/store-orders/${shop.id}`);
-                    }}
-                  >
-                    <ShoppingCart className="h-3.5 w-3.5 mr-1.5" />
-                    Замовлення
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="flex-1 h-9"
-                    onClick={() => {
-                      hapticSelection();
-                      navigate(`/store-management/${shop.id}${shop.role === "manager" ? "?mode=manager" : ""}`);
-                    }}
-                  >
-                    <MessageSquare className="h-3.5 w-3.5 mr-1.5" />
-                    Відгуки
-                  </Button>
-                </div>
-
-                {shop.role === "owner" && (
-                  <div className="flex gap-2 mt-2">
-                    {isAdmin && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="flex-1 h-9 border-indigo-300 text-indigo-600 hover:bg-indigo-50 hover:text-indigo-700 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-900/30"
-                        onClick={() => openTransferDialog(shop)}
-                      >
-                        <UserPlus className="h-3.5 w-3.5 mr-1.5" />
-                        Передати права
-                      </Button>
-                    )}
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className={`${isAdmin ? "flex-1" : "w-full"} h-9 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30 border border-red-200 dark:border-red-800`}
-                      disabled={shop.deletion_requested}
-                      onClick={openDeleteDialog}
-                    >
-                      <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-                      {shop.deletion_requested ? "Заявку надіслано" : "Видалити магазин"}
-                    </Button>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          ))
+          <div className="flex flex-col gap-4 overflow-y-auto pb-20">
+            {shops.map((shop) => (
+              <StoreCard
+                key={shop.id}
+                shop={shop}
+                canEdit={canEditShop(shop)}
+                isAdmin={isAdmin}
+                onSettings={(item) => {
+                  hapticSelection();
+                  navigate(`/store-management/${item.id}`);
+                }}
+                onWallet={(item) => {
+                  hapticSelection();
+                  navigate(`/wallet/${item.id}`);
+                }}
+                onPromo={(item) => {
+                  hapticSelection();
+                  setPromoShopId(item.id);
+                }}
+                onOrders={(item) => {
+                  hapticSelection();
+                  navigate(`/store-orders/${item.id}`);
+                }}
+                onReviews={(item) => {
+                  hapticSelection();
+                  navigate(`/store-management/${item.id}${item.role === "manager" ? "?mode=manager" : ""}`);
+                }}
+                onTransfer={openTransferDialog}
+                onDelete={openDeleteDialog}
+              />
+            ))}
+          </div>
         )}
       </div>
 

@@ -42,7 +42,7 @@ async def _fetch_next_raw_product(
         stmt = stmt.where(Product.supplier_id == supplier_id)
     if skip_ids:
         stmt = stmt.where(Product.id.notin_(skip_ids))
-    stmt = stmt.order_by(Product.id.asc()).limit(1)
+    stmt = stmt.order_by(Product.created_at.asc(), Product.id.asc()).limit(1)
     result = await db.execute(stmt)
     return result.scalars().first()
 

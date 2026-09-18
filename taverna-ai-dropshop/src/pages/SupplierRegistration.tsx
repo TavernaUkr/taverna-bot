@@ -674,7 +674,7 @@ const SupplierRegistration = () => {
                   className="w-full px-4 py-3 bg-muted border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
                 />
                 <p className="text-xs text-slate-400">
-                  Увага: Бот перевірить канал на наявність мінімум 30 постів. Для приватних каналів обов'язково додайте бота в адміністратори перед перевіркою.
+                  Для публічних каналів нічого робити не потрібно. Для приватних — переконайтеся, що ви надали доступ до каналу (додали акаунт-парсер).
                 </p>
                 {errors.telegramChannelLink && (
                   <p className="text-xs text-destructive">{errors.telegramChannelLink.message}</p>
@@ -682,7 +682,7 @@ const SupplierRegistration = () => {
                 <Alert className="bg-accent/10 border-accent/20">
                   <AlertCircle className="h-4 w-4 text-accent" />
                   <AlertDescription className="text-xs text-muted-foreground">
-                    Бот автоматично читатиме ваші пости, розпізнаватиме ціни та розміри за допомогою ШІ і додаватиме товари в каталог. Бот має бути доданий в канал!
+                    Пости каналу читатимуться автоматично: ШІ розпізнає ціни та розміри і додасть товари в каталог.
                   </AlertDescription>
                 </Alert>
               </div>

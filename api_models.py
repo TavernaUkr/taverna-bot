@@ -1,11 +1,34 @@
 # api_models.py
-from pydantic import BaseModel, EmailStr, HttpUrl, Field, ConfigDict
+from pydantic import BaseModel, EmailStr, HttpUrl, Field, ConfigDict, field_serializer
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from database.models import (
     SupplierType, SupplierStatus, OrderStatus, UserRole, PayoutMethod,
     PriceRuleType, SupplierLegalType
 )
+
+
+def datetime_to_utc_z(value: Optional[datetime]) -> Optional[str]:
+    """Naive час = UTC. JSON: 2026-09-19T00:49:00Z."""
+    if value is None:
+        return None
+    dt = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+class UtcJsonDates(BaseModel):
+    @field_serializer(
+        "created_at",
+        "approved_at",
+        "restored_at",
+        "deleted_at",
+        "trial_ends_at",
+        when_used="json",
+        check_fields=False,
+    )
+    def _utc_z(self, value: Optional[datetime]) -> Optional[str]:
+        return datetime_to_utc_z(value)
+
 
 # --- МОДЕЛІ З `web_app.py` ---
 
@@ -284,7 +307,7 @@ class SupplierImportProgressResponse(BaseModel):
     shops: list[SupplierQueueShopProgress] = []
 
 
-class AdminAiQueueCurrentResponse(BaseModel):
+class AdminAiQueueCurrentResponse(UtcJsonDates):
     supplier_id: int
     shop_name: str
     processed: int = 0
@@ -297,7 +320,7 @@ class AdminAiQueueCurrentResponse(BaseModel):
     is_fetching_xml: bool = False
 
 
-class AdminAiQueueWaitingItem(BaseModel):
+class AdminAiQueueWaitingItem(UtcJsonDates):
     supplier_id: int
     shop_name: str
     pending_count: int = 0
@@ -317,7 +340,7 @@ class AdminAiQueueResponse(BaseModel):
     shops: list[SupplierQueueShopProgress] = []
 
 
-class SupplierMeResponse(BaseModel):
+class SupplierMeResponse(UtcJsonDates):
     """Картка магазину поточного постачальника (GET /suppliers/me)."""
     id: int
     store_name: str
@@ -329,6 +352,7 @@ class SupplierMeResponse(BaseModel):
     deletion_requested: bool = False
     created_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
+    restored_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None
 
 
@@ -341,7 +365,7 @@ class SupplierDeletionResponse(BaseModel):
     detail: str = "Заявка на видалення надіслана адміністратору"
 
 
-class PendingSupplierApplicationResponse(BaseModel):
+class PendingSupplierApplicationResponse(UtcJsonDates):
     """Заявка для React-адмінки, включно з AI-звітом."""
     model_config = ConfigDict(from_attributes=True)
 
@@ -370,6 +394,7 @@ class PendingSupplierApplicationResponse(BaseModel):
     trial_ends_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
+    restored_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None
     import_started: bool = False
     deletion_reason: Optional[str] = None
@@ -504,6 +529,7 @@ class SupplierAdminResponse(BaseModel):
     admin_notes: Optional[str] = None
     created_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
+    restored_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None
 
 class AdminManualAddRequest(BaseModel):
@@ -754,4 +780,5 @@ class SupplierResponse(BaseModel):
     payout_card_token: Optional[str] = None
     created_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
+    restored_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None

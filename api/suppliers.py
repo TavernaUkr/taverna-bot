@@ -365,10 +365,10 @@ SECONDS_PER_PRODUCT_AI = 15
 DELETION_NOTE_PREFIX = "[ЗАЯВКА НА ВИДАЛЕННЯ]"
 
 
-async def _get_supplier_for_telegram(
+async def _get_suppliers_for_telegram(
     db: AsyncSession,
     telegram_id: int,
-) -> Optional[Supplier]:
+) -> list[Supplier]:
     user = await _get_user_by_telegram_id(db, telegram_id)
     filters = [Supplier.contact_telegram_id == telegram_id]
     if user:
@@ -384,7 +384,15 @@ async def _get_supplier_for_telegram(
             Supplier.id.desc(),
         )
     )
-    return (await db.execute(stmt)).scalars().first()
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def _get_supplier_for_telegram(
+    db: AsyncSession,
+    telegram_id: int,
+) -> Optional[Supplier]:
+    rows = await _get_suppliers_for_telegram(db, telegram_id)
+    return rows[0] if rows else None
 
 
 async def _supplier_ids_for_telegram(
@@ -400,28 +408,6 @@ async def _supplier_ids_for_telegram(
         Supplier.status.notin_(BLOCKED_SUPPLIER_STATUSES),
     )
     ids = [int(x) for x in (await db.execute(stmt)).scalars().all()]
-
-    role_value = None
-    if user is not None and user.role is not None:
-        role_value = user.role.value if hasattr(user.role, "value") else str(user.role)
-    if role_value == UserRole.admin.value:
-        orphan_stmt = select(Supplier.id).where(
-            Supplier.status.notin_(BLOCKED_SUPPLIER_STATUSES),
-            Supplier.user_id.is_(None),
-            Supplier.contact_telegram_id.is_(None),
-        )
-        ids.extend(int(x) for x in (await db.execute(orphan_stmt)).scalars().all())
-        if user is not None:
-            await db.execute(
-                update(Supplier)
-                .where(
-                    Supplier.status.notin_(BLOCKED_SUPPLIER_STATUSES),
-                    Supplier.user_id.is_(None),
-                    Supplier.contact_telegram_id.is_(None),
-                )
-                .values(user_id=user.id, contact_telegram_id=telegram_id)
-            )
-            await db.commit()
     return list(dict.fromkeys(ids))
 
 
@@ -499,28 +485,12 @@ async def _notify_admins_deletion_request(supplier: Supplier, reason: str) -> No
             logger.error("Не вдалося надіслати заявку на видалення адміну %s: %s", admin_id, e)
 
 
-@router.get("/me", response_model=SupplierMeResponse)
-async def get_my_supplier(
-    db: AsyncSession = Depends(get_db),
-    authorization: Optional[str] = Header(default=None),
-):
-    """Картка магазину поточного постачальника для «Керування магазинами»."""
-    telegram_id = _telegram_id_from_authorization(authorization)
-    if not telegram_id:
-        raise HTTPException(
-            status_code=401,
-            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
-        )
-
-    supplier = await _get_supplier_for_telegram(db, telegram_id)
-    if not supplier:
-        raise HTTPException(status_code=404, detail="Магазин не знайдено")
-
-    store_name = (supplier.store_name or supplier.name or "").strip()
-    if not store_name:
-        raise HTTPException(status_code=404, detail="Магазин не знайдено")
-
-    product_count, completed_products = await _product_stats(db, supplier.id)
+def _to_me_response(
+    supplier: Supplier,
+    product_count: int,
+    completed_products: int,
+) -> SupplierMeResponse:
+    store_name = (supplier.store_name or supplier.name or "").strip() or f"Магазин #{supplier.id}"
     return SupplierMeResponse(
         id=supplier.id,
         store_name=store_name,
@@ -532,8 +502,30 @@ async def get_my_supplier(
         deletion_requested=_deletion_requested(supplier),
         created_at=getattr(supplier, "created_at", None),
         approved_at=getattr(supplier, "approved_at", None),
+        restored_at=getattr(supplier, "restored_at", None),
         deleted_at=getattr(supplier, "deleted_at", None),
     )
+
+
+@router.get("/me", response_model=List[SupplierMeResponse])
+async def get_my_supplier(
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Усі магазини поточного постачальника для «Керування магазинами»."""
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    suppliers = await _get_suppliers_for_telegram(db, telegram_id)
+    result: List[SupplierMeResponse] = []
+    for supplier in suppliers:
+        product_count, completed_products = await _product_stats(db, supplier.id)
+        result.append(_to_me_response(supplier, product_count, completed_products))
+    return result
 
 
 @router.post("/me/request-deletion", response_model=SupplierDeletionResponse)
@@ -567,6 +559,7 @@ async def request_my_shop_deletion(
     existing = (supplier.admin_notes or "").strip()
     supplier.admin_notes = f"{block}\n\n{existing}" if existing else block
     supplier.status = SupplierStatus.deletion_requested
+    supplier.deleted_at = datetime.now(timezone.utc)
 
     cancel_result = await db.execute(
         update(Product)
@@ -590,6 +583,35 @@ async def request_my_shop_deletion(
         logger.error("Заявку на видалення #%s збережено, сповіщення адмінам не пішло: %s", supplier.id, e)
 
     return SupplierDeletionResponse()
+
+
+def _naive_utc(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value
+    return None
+
+
+def _global_queue_position(row: dict, view: List[dict]) -> int:
+    """Скільки магазинів у глобальній черзі мають раніший queue_joined_at."""
+    current_ts = _naive_utc(row.get("queue_joined_at") or row.get("created_at"))
+    current_id = int(row["supplier_id"])
+    ahead = 0
+    for other in view:
+        other_ts = _naive_utc(other.get("queue_joined_at") or other.get("created_at"))
+        other_id = int(other["supplier_id"])
+        if current_ts is None:
+            if other_ts is not None or other_id < current_id:
+                ahead += 1
+            continue
+        if other_ts is None:
+            continue
+        if other_ts < current_ts or (other_ts == current_ts and other_id < current_id):
+            ahead += 1
+    return ahead
 
 
 def _widget_shop_from_row(row: dict) -> SupplierQueueShopProgress:
@@ -621,8 +643,8 @@ async def get_my_import_progress(
     authorization: Optional[str] = Header(default=None),
 ):
     """
-    Масив магазинів поточного користувача в XML-парсингу або AI-черзі.
-    Час магазину №2 = (залишок №1 + товари №2) * 15 / 60.
+    Прогрес лише магазинів поточного користувача (telegram_id / user_id).
+    queue_position — місце в глобальній черзі: скільки магазинів мають раніший queue_joined_at.
     """
     telegram_id = _telegram_id_from_authorization(authorization)
     if not telegram_id:
@@ -636,8 +658,14 @@ async def get_my_import_progress(
         return []
 
     view = await build_ai_queue_view(db)
-    mine = [row for row in view if int(row["supplier_id"]) in owner_ids]
-    return [_widget_shop_from_row(row) for row in mine]
+    mine = []
+    for row in view:
+        if int(row["supplier_id"]) not in owner_ids:
+            continue
+        payload = dict(row)
+        payload["queue_position"] = _global_queue_position(row, view)
+        mine.append(_widget_shop_from_row(payload))
+    return mine
 
 
 def _telegram_id_from_authorization(authorization: Optional[str]) -> Optional[int]:
@@ -668,9 +696,16 @@ async def verify_telegram_channel_or_raise(
     if not link:
         raise HTTPException(
             status_code=400,
-            detail="Бот не має доступу до каналу. Якщо канал приватний, додайте бота в адміністратори.",
+            detail="Немає доступу до каналу. Для публічних каналів нічого робити не потрібно. Для приватних — додайте акаунт-парсер у канал.",
         )
-    result = await verify_channel_access(link)
+    try:
+        result = await verify_channel_access(link)
+    except Exception as e:
+        logger.error("verify_telegram_channel_or_raise: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=400,
+            detail="Telethon-сесія зайнята. Спробуйте ще раз за кілька секунд.",
+        )
     if result.get("status") == "ok":
         return TelegramChannelVerifyResponse(message="Доступ підтверджено")
     if result.get("reason") == "not_enough_posts":
@@ -679,9 +714,19 @@ async def verify_telegram_channel_or_raise(
             status_code=400,
             detail=f"У каналі замало постів. Мінімум 30, знайдено: {count}.",
         )
+    if result.get("reason") == "session_locked":
+        raise HTTPException(
+            status_code=400,
+            detail="Telethon-сесія зайнята (перезапуск сервера). Спробуйте ще раз за кілька секунд.",
+        )
+    if result.get("reason") == "userbot_unauthorized":
+        raise HTTPException(
+            status_code=400,
+            detail="Юзербот не авторизований. Запустіть auth_scraper.py",
+        )
     raise HTTPException(
         status_code=400,
-        detail="Бот не має доступу до каналу. Якщо канал приватний, додайте бота в адміністратори.",
+        detail="Немає доступу до каналу. Для публічних каналів нічого робити не потрібно. Для приватних — додайте акаунт-парсер у канал.",
     )
 
 
@@ -745,15 +790,6 @@ async def register_partner(
         )
         db.add(user)
         await db.flush()
-
-    existing = (
-        await db.execute(select(Supplier).where(Supplier.user_id == user.id))
-    ).scalar_one_or_none()
-    if existing and existing.status not in (SupplierStatus.rejected, SupplierStatus.disabled):
-        raise HTTPException(
-            status_code=409,
-            detail="Цей Telegram-акаунт уже має заявку або магазин.",
-        )
 
     has_duplicates = await _has_duplicates(
         db, edrpou_ipn, yml_link, mydrop_api_key=extracted_key,

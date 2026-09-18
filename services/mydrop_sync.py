@@ -551,32 +551,71 @@ async def import_supplier_catalog_and_process_ai(supplier_id: int) -> Dict[str, 
             )
             return result
 
-        stats = await sync_supplier_products(
-            supplier_id,
-            api_key or "",
-            db,
-            yml_url=yml_url,
-        )
-        result.update(stats)
-
-        queued = int(
+        existing_count = int(
             (
                 await db.execute(
-                    select(func.count())
-                    .select_from(Product)
-                    .where(
+                    select(func.count(Product.id)).where(
                         Product.supplier_id == supplier_id,
-                        Product.ai_status == ProductAIStatus.pending,
+                        Product.status != ProductStatus.deleted,
                     )
                 )
-            ).scalar_one()
+            ).scalar()
             or 0
         )
-        result["ai_queued"] = queued
-        logger.info(
-            "Імпорт #%s: товари в AI-черзі (pending)=%s. Gemini обробить їх по 1 / 15с.",
-            supplier_id, queued,
-        )
+        first_xml_pull = existing_count == 0 or status_value == SupplierStatus.parsing.value
+        if first_xml_pull:
+            supplier.status = SupplierStatus.parsing
+            await db.commit()
+            logger.info("import_supplier_catalog: #%s статус=parsing, XML ще не в БД.", supplier_id)
+
+        try:
+            stats = await sync_supplier_products(
+                supplier_id,
+                api_key or "",
+                db,
+                yml_url=yml_url,
+            )
+            result.update(stats)
+
+            queued = int(
+                (
+                    await db.execute(
+                        select(func.count())
+                        .select_from(Product)
+                        .where(
+                            Product.supplier_id == supplier_id,
+                            Product.ai_status == ProductAIStatus.pending,
+                        )
+                    )
+                ).scalar_one()
+                or 0
+            )
+            result["ai_queued"] = queued
+            logger.info(
+                "Імпорт #%s: товари в AI-черзі (pending)=%s. Gemini обробить їх по 1 / 15с.",
+                supplier_id, queued,
+            )
+            if first_xml_pull:
+                fresh = await db.get(Supplier, supplier_id)
+                if fresh is not None:
+                    fresh_status = (
+                        fresh.status.value if hasattr(fresh.status, "value") else str(fresh.status)
+                    )
+                    if fresh_status == SupplierStatus.parsing.value:
+                        fresh.status = SupplierStatus.active
+                        await db.commit()
+                        logger.info(
+                            "import_supplier_catalog: #%s parsing→active після збереження pending=%s.",
+                            supplier_id, queued,
+                        )
+        except Exception:
+            if first_xml_pull:
+                logger.error(
+                    "import_supplier_catalog: #%s XML не збережено — статус лишається parsing, AI чекає.",
+                    supplier_id,
+                    exc_info=True,
+                )
+            raise
 
     logger.info(
         "import_supplier_catalog #%s завершено: created=%s updated=%s inactivated=%s variants=%s errors=%s ai_queued=%s",

@@ -39,7 +39,7 @@ from services import (
     payout_service, publisher_service,
     omnichannel_service as ads_service # <-- ОНОВЛЕНО
 )
-from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession, ensure_supplier_status_timestamps, ensure_user_settings_columns, ensure_supplier_telegram_source_columns, ensure_ai_categorization_rules_table
+from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession, ensure_supplier_status_timestamps, ensure_user_settings_columns, ensure_supplier_telegram_source_columns, ensure_supplier_parsing_status, ensure_ai_categorization_rules_table, ensure_supplier_history_log_table
 from services.ai_queue_worker import start_ai_product_queue
 from database.models import * # (Імпортуємо все)
 from config_reader import config
@@ -80,7 +80,7 @@ async def startup_event():
     try:
         await ensure_supplier_status_timestamps()
     except Exception as e:
-        logger.error("Не вдалося додати approved_at/deleted_at: %s", e, exc_info=True)
+        logger.error("Не вдалося додати approved_at/restored_at/deleted_at: %s", e, exc_info=True)
     try:
         await ensure_user_settings_columns()
     except Exception as e:
@@ -90,9 +90,17 @@ async def startup_event():
     except Exception as e:
         logger.error("Не вдалося додати source_type/telegram_channel_link: %s", e, exc_info=True)
     try:
+        await ensure_supplier_parsing_status()
+    except Exception as e:
+        logger.error("Не вдалося додати статус parsing: %s", e, exc_info=True)
+    try:
         await ensure_ai_categorization_rules_table()
     except Exception as e:
         logger.error("Не вдалося створити таблицю ai_categorization_rules: %s", e, exc_info=True)
+    try:
+        await ensure_supplier_history_log_table()
+    except Exception as e:
+        logger.error("Не вдалося створити таблицю supplier_history_log: %s", e, exc_info=True)
     try:
         await start_ai_product_queue()
     except Exception as e:

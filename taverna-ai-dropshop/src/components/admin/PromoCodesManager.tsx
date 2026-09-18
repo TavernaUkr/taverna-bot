@@ -6,7 +6,6 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   Dialog,
   DialogContent,
@@ -204,8 +203,8 @@ export function PromoCodesManager() {
         </Button>
       </div>
 
-      <ScrollArea className="h-[400px]">
-        <div className="space-y-3 pr-4">
+      <div className="overflow-y-auto pb-24">
+        <div className="space-y-3 pr-4 pb-24">
           {isLoading ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -278,7 +277,7 @@ export function PromoCodesManager() {
             ))
           )}
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Create/Edit Dialog */}
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  ArrowLeft, Users, Check, X, Loader2, DollarSign, ShoppingCart, Package,
+  ArrowLeft, Users, Check, X, Loader2, ShoppingCart, Package,
   Shield, UserCog, RefreshCw,
   Crown, Tag, Gift, Brain, BookOpen, MessageSquare, Trophy, Store, Megaphone, Wallet,
   Phone, Link2, Bot, Trash2, MessageCircle, History, AlertTriangle, RotateCcw,
@@ -10,9 +10,9 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { supabase } from '@/integrations/supabase/client';
 import { toast } from 'sonner';
+import { formatLocalTime } from '@/utils/dateFormatter';
 import { useTelegramAuthContext } from '@/components/TelegramAuthProvider';
 import { hapticSelection } from '@/lib/haptics';
 import { vibrate } from '@/hooks/useTelegramUI';
@@ -62,8 +62,9 @@ interface SupplierApplication {
   telegram_channel_link?: string | null;
   manager_telegram?: string | null;
   status: string;
-  created_at: string;
+  created_at?: string | null;
   approved_at?: string | null;
+  restored_at?: string | null;
   deleted_at?: string | null;
   reseller_probability: number | null;
   plagiarism_score: number | null;
@@ -110,19 +111,6 @@ function historyStatusClass(status?: string) {
     default:
       return "";
   }
-}
-
-function formatDate(value?: string | null): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "—";
-  return date.toLocaleString("uk-UA", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 }
 
 function managerTelegramUrl(raw?: string | null): string | null {
@@ -226,8 +214,9 @@ function mapSupplierApplication(r: BackendPendingSupplierApplication): SupplierA
     telegram_channel_link: r.telegram_channel_link || r.channel_link,
     manager_telegram: r.manager_telegram,
     status: r.status,
-    created_at: r.created_at || new Date().toISOString(),
+    created_at: r.created_at ?? null,
     approved_at: r.approved_at ?? null,
+    restored_at: r.restored_at ?? null,
     deleted_at: r.deleted_at ?? null,
     reseller_probability: null,
     plagiarism_score: null,
@@ -527,76 +516,33 @@ export default function AdminDashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
-      {/* Header */}
-      <div className="sticky top-0 z-40 bg-background/95 backdrop-blur border-b border-border">
-        <div className="flex items-center justify-between p-4">
-          <div className="flex items-center gap-3">
-            <Button variant="ghost" size="icon" className="text-foreground" onClick={() => navigate("/?tab=account")}>
-              <ArrowLeft className="h-5 w-5" />
-            </Button>
-            <div>
-              <h1 className="font-bold text-lg text-foreground flex items-center gap-2">
-                <Crown className="h-5 w-5 text-warning" />
-                Адмін-панель
-              </h1>
-              <p className="text-xs text-slate-600 dark:text-slate-300">Taverna · Повний контроль</p>
+    <div className="flex flex-col min-h-screen bg-background">
+      <Tabs value={activeTab} onValueChange={(v) => { hapticSelection(); setActiveTab(v); }} className="flex flex-1 flex-col min-h-0">
+        <div className="sticky top-0 z-40 bg-background/95 backdrop-blur border-b border-border">
+          <div className="flex items-center justify-between p-4 pb-2">
+            <div className="flex items-center gap-3">
+              <Button variant="ghost" size="icon" className="text-foreground" onClick={() => navigate("/?tab=account")}>
+                <ArrowLeft className="h-5 w-5" />
+              </Button>
+              <div>
+                <h1 className="font-bold text-lg text-foreground flex items-center gap-2">
+                  <Crown className="h-5 w-5 text-warning" />
+                  Адмін-панель
+                </h1>
+                <p className="text-xs text-slate-600 dark:text-slate-300">Taverna · Повний контроль</p>
+              </div>
             </div>
+            <Button variant="outline" size="sm" onClick={() => {
+              fetchApplications();
+              fetchDeletionList();
+              if (applicationsSubTab === 'history') fetchHistoryList();
+              fetchOrderStats();
+              toast.success('Дані оновлено');
+            }}>
+              <RefreshCw className="h-4 w-4" />
+            </Button>
           </div>
-          <Button variant="outline" size="sm" onClick={() => {
-            fetchApplications();
-            fetchDeletionList();
-            if (applicationsSubTab === 'history') fetchHistoryList();
-            fetchOrderStats();
-            toast.success('Дані оновлено');
-          }}>
-            <RefreshCw className="h-4 w-4" />
-          </Button>
-        </div>
-      </div>
-
-      {/* Stats Cards */}
-      <div className="p-4 grid grid-cols-3 gap-2">
-        <Card><CardContent className="p-3 text-center">
-          <ShoppingCart className="h-4 w-4 text-primary mx-auto mb-1" />
-          <p className="text-xl font-bold text-foreground">{orderStats.totalOrders}</p>
-          <p className="text-[10px] text-muted-foreground">Замовлень</p>
-        </CardContent></Card>
-        <Card><CardContent className="p-3 text-center">
-          <DollarSign className="h-4 w-4 text-green-500 mx-auto mb-1" />
-          <p className="text-xl font-bold text-foreground">{orderStats.totalMargin.toLocaleString()}₴</p>
-          <p className="text-[10px] text-muted-foreground">Прибуток</p>
-        </CardContent></Card>
-        <Card><CardContent className="p-3 text-center">
-          <Store className="h-4 w-4 text-amber-500 mx-auto mb-1" />
-          <p className="text-xl font-bold text-foreground">{orderStats.suppliersCount}</p>
-          <p className="text-[10px] text-muted-foreground">Магазинів</p>
-        </CardContent></Card>
-      </div>
-
-      {/* Alert badges */}
-      <div className="px-4 flex gap-2 flex-wrap">
-        {orderStats.pendingOrders > 0 && (
-          <Badge variant="outline" className="bg-yellow-500/10 text-yellow-600 border-yellow-500/30 gap-1">
-            <Package className="h-3 w-3" /> {orderStats.pendingOrders} нових замовлень
-          </Badge>
-        )}
-        {orderStats.openTickets > 0 && (
-          <Badge variant="outline" className="bg-blue-500/10 text-blue-600 border-blue-500/30 gap-1">
-            <MessageSquare className="h-3 w-3" /> {orderStats.openTickets} тікетів
-          </Badge>
-        )}
-        {pendingSuppliers.length + deletionRequests.length > 0 && (
-          <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/30 gap-1">
-            <Users className="h-3 w-3" /> {pendingSuppliers.length + deletionRequests.length} заявок
-          </Badge>
-        )}
-      </div>
-
-      {/* Tabs */}
-      <div className="p-4 min-w-0">
-        <Tabs value={activeTab} onValueChange={(v) => { hapticSelection(); setActiveTab(v); }}>
-          <div className="flex overflow-x-auto whitespace-nowrap flex-nowrap gap-2 pb-2 scrollbar-hide [&::-webkit-scrollbar]:hidden w-full min-w-0">
+          <div className="px-4 pb-2 flex overflow-x-auto whitespace-nowrap flex-nowrap gap-2 scrollbar-hide [&::-webkit-scrollbar]:hidden w-full min-w-0">
             <TabsList className="flex w-max flex-nowrap gap-2 mb-0 h-auto">
               <TabsTrigger value="overview" className="text-xs px-3 gap-1 flex-shrink-0">
                 <Crown className="h-3.5 w-3.5" /> Огляд
@@ -638,7 +584,29 @@ export default function AdminDashboard() {
               </TabsTrigger>
             </TabsList>
           </div>
+        </div>
 
+        {(orderStats.pendingOrders > 0 || orderStats.openTickets > 0 || pendingSuppliers.length + deletionRequests.length > 0) && (
+          <div className="px-4 pt-3 flex gap-2 flex-wrap">
+            {orderStats.pendingOrders > 0 && (
+              <Badge variant="outline" className="bg-yellow-500/10 text-yellow-600 border-yellow-500/30 gap-1">
+                <Package className="h-3 w-3" /> {orderStats.pendingOrders} нових замовлень
+              </Badge>
+            )}
+            {orderStats.openTickets > 0 && (
+              <Badge variant="outline" className="bg-blue-500/10 text-blue-600 border-blue-500/30 gap-1">
+                <MessageSquare className="h-3 w-3" /> {orderStats.openTickets} тікетів
+              </Badge>
+            )}
+            {pendingSuppliers.length + deletionRequests.length > 0 && (
+              <Badge variant="outline" className="bg-red-500/10 text-red-600 border-red-500/30 gap-1">
+                <Users className="h-3 w-3" /> {pendingSuppliers.length + deletionRequests.length} заявок
+              </Badge>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1 flex flex-col min-h-[50vh] w-full p-4 min-w-0 overflow-y-auto pb-24 bg-card rounded-t-2xl">
           {/* === ОГЛЯД === */}
           <TabsContent value="overview">
             <CommandCenter
@@ -725,14 +693,14 @@ export default function AdminDashboard() {
                 })}
               </div>
               {storesSubTab === 'add' ? (
-                <ScrollArea className="h-[calc(100vh-420px)]">
+                <div className="overflow-y-auto pb-24">
                   <div className="pr-4">
                     <ManualSupplierForm onSuccess={() => { setStoresSubTab('my'); fetchOrderStats(); }} />
                   </div>
-                </ScrollArea>
-              ) : (
-                <AdminStoreManager filter={storesSubTab === 'partners' ? 'partners' : storesSubTab === 'my' ? 'my' : 'all'} />
-              )}
+                  </div>
+                ) : (
+                  <AdminStoreManager filter={storesSubTab === 'partners' ? 'partners' : storesSubTab === 'my' ? 'my' : 'all'} />
+                )}
             </div>
           </TabsContent>
 
@@ -771,8 +739,8 @@ export default function AdminDashboard() {
                   exit={{ opacity: 0, y: -8 }}
                   transition={{ duration: 0.2, ease: "easeInOut" }}
                 >
-                  <ScrollArea className="h-[calc(100vh-430px)]">
-                    <div className="space-y-4 pr-4 pb-6">
+                  <div className="overflow-y-auto pb-24">
+                    <div className="space-y-4 pr-4 pb-24">
                       {applicationsSubTab === 'partnership' && (
                         isLoading ? (
                           <div className="flex items-center justify-center py-12">
@@ -1045,13 +1013,10 @@ export default function AdminDashboard() {
                                   </Badge>
                                 </div>
                                 <div className="space-y-1 text-xs text-gray-500 dark:text-gray-400">
-                                  <p>📅 Створено: {formatDate(app.created_at)}</p>
-                                  {app.approved_at ? (
-                                    <p>✅ Схвалено: {formatDate(app.approved_at)}</p>
-                                  ) : null}
-                                  {app.deleted_at ? (
-                                    <p>🗑 Видалено: {formatDate(app.deleted_at)}</p>
-                                  ) : null}
+                                  <p>🆕 Створено: {formatLocalTime(app.created_at)}</p>
+                                  <p>✅ Схвалено: {formatLocalTime(app.approved_at)}</p>
+                                  <p>♻️ Відновлено: {formatLocalTime(app.restored_at)}</p>
+                                  <p>🗑️ Видалено (Soft Delete): {formatLocalTime(app.deleted_at)}</p>
                                 </div>
                                 {app.status === "deleted" ? (
                                   <Button
@@ -1075,7 +1040,7 @@ export default function AdminDashboard() {
                         )
                       )}
                     </div>
-                  </ScrollArea>
+                  </div>
                 </motion.div>
               </AnimatePresence>
             </div>
@@ -1144,8 +1109,8 @@ export default function AdminDashboard() {
           <TabsContent value="roles">
             <AdminRolesManager />
           </TabsContent>
-        </Tabs>
-      </div>
+        </div>
+      </Tabs>
     </div>
   );
 }

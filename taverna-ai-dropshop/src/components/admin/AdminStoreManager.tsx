@@ -10,7 +10,6 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -230,8 +229,8 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
         </CardContent>
       </Card>
 
-      <ScrollArea className="h-[calc(100vh-480px)]">
-        <div className="space-y-3 pr-4">
+      <div className="overflow-y-auto pb-24">
+        <div className="space-y-3 pr-4 pb-24">
           {suppliers.length === 0 ? (
             <div className="text-center py-12">
               <Store className="h-12 w-12 text-slate-400 dark:text-slate-500 mx-auto mb-4" />
@@ -355,7 +354,7 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
             ))
           )}
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Transfer Ownership Dialog */}
       <Dialog open={!!transferDialog} onOpenChange={() => { if (!isTransferring) setTransferDialog(null); }}>

@@ -20,38 +20,63 @@ except ImportError:
     logger.warning("google-genai не встановлено в цьому Python. AI-сервіси буде пропущено.")
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
+_GEMINI_JSON_RE = re.compile(r"(\{.*\}|\[.*\])", re.DOTALL)
 DEFAULT_GEMINI_MODEL = "gemini-1.5-flash-latest"
+
+
+def extract_gemini_json(text: str):
+    """
+    Вирізає JSON з відповіді Gemini (thought_signature, markdown, зайвий текст).
+    Повертає dict/list або None. json.loads ніколи не кидає назовні.
+    """
+    if not text:
+        return None
+    raw = str(text).strip()
+    match = _GEMINI_JSON_RE.search(raw)
+    if match:
+        candidate = match.group(1).strip()
+    else:
+        candidate = raw
+        lowered = candidate.lstrip()
+        for prefix in ("```json", "```JSON", "```"):
+            if lowered.startswith(prefix):
+                candidate = lowered[len(prefix):].strip()
+                break
+        if candidate.endswith("```"):
+            candidate = candidate[:-3].strip()
+
+    parsed = _try_json_loads(candidate)
+    if parsed is not None:
+        return parsed
+
+    decoder = json.JSONDecoder()
+    for src in (candidate, raw):
+        for index, char in enumerate(src):
+            if char not in "{[":
+                continue
+            try:
+                obj, _end = decoder.raw_decode(src[index:])
+                return obj
+            except Exception:
+                continue
+    return None
+
+
+def _try_json_loads(blob: str):
+    try:
+        return json.loads(blob)
+    except Exception:
+        return None
 
 
 def _safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
     """
-    Акуратно дістає JSON з відповіді Gemini:
-    - прибирає ```json ... ```
-    - пробує знайти перший {...} блок
+    Акуратно дістає JSON-об'єкт з відповіді Gemini.
     """
-    if not text:
-        return None
-
-    raw = text.strip()
-
-    # 1) Якщо модель повернула fenced block ```json ... ```
-    m = _JSON_FENCE_RE.search(raw)
-    if m:
-        raw = m.group(1).strip()
-
-    # 2) Якщо далі все одно є зайвий текст — пробуємо вирізати перший {...}
-    # (простий, але практичний підхід)
-    first_brace = raw.find("{")
-    last_brace = raw.rfind("}")
-    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-        candidate = raw[first_brace:last_brace + 1].strip()
-    else:
-        candidate = raw
-
-    try:
-        return json.loads(candidate)
-    except Exception:
-        return None
+    parsed = extract_gemini_json(text)
+    if isinstance(parsed, dict):
+        return parsed
+    return None
 
 
 def _is_quota_error(exc: Exception) -> bool:
@@ -84,6 +109,25 @@ def _is_capacity_error(exc: Exception) -> bool:
 
 def _has_gemini_keys() -> bool:
     return bool(getattr(config, "GEMINI_API_KEYS", None))
+
+
+async def _aclose_genai_client(client) -> None:
+    """Закриває внутрішню HTTP-сесію google-genai (aiohttp/httpx), щоб не було Unclosed client session."""
+    if client is None:
+        return
+    try:
+        aio = getattr(client, "aio", None)
+        aclose = getattr(aio, "aclose", None) if aio is not None else None
+        if callable(aclose):
+            result = aclose()
+            if asyncio.iscoroutine(result):
+                await result
+            return
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    except Exception:
+        pass
 
 
 def get_gemini_client():
@@ -148,6 +192,8 @@ async def _generate_content(
                 )
                 continue
             raise
+        finally:
+            await _aclose_genai_client(client)
     raise last_error or AllKeysExhaustedError("Усі Gemini API ключі вичерпані.")
 
 

@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     openrouter_api_key: Optional[SecretStr] = None
     gemini_api_key: Optional[SecretStr] = None
     gemini_api_keys: str = ""
+
+    # --- Supabase Storage (фото/відео з Telegram-каналів) ---
+    supabase_url: Optional[str] = None
+    supabase_key: Optional[SecretStr] = None
+    supabase_service_role_key: Optional[SecretStr] = None
     
     # --- Google Drive ---
     service_account_json: Optional[str] = None

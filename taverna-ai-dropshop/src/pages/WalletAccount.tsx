@@ -17,7 +17,7 @@ import { ReceiptDialog } from "@/components/wallet/ReceiptDialog";
 import { ShopBalancesList } from "@/components/wallet/ShopBalancesList";
 import { ClientBonusAccount } from "@/components/wallet/ClientBonusAccount";
 import { RefundMethodPage } from "@/components/settings/RefundMethodPage";
-import { WalletOffers } from "@/components/wallet/WalletOffers";
+import { formatLocalTime } from "@/utils/dateFormatter";
 import { WalletOverview } from "@/components/wallet/WalletOverview";
 import { WalletActionBar } from "@/components/wallet/WalletActionBar";
 import { WalletRatingCard } from "@/components/wallet/WalletRatingCard";
@@ -433,7 +433,7 @@ export default function WalletAccount() {
                         {tx.description || TX_TITLE[tx.type]}
                       </p>
                       <p className="text-[11px] text-muted-foreground">
-                        {new Date(tx.created_at).toLocaleString("uk-UA")}
+                        {formatLocalTime(tx.created_at)}
                       </p>
                     </div>
                     <div className="text-right">

@@ -1,9 +1,11 @@
 # services/ai_queue_worker.py
 """
 Контрольована черга Gemini: 1 товар / 15 секунд (~4 на хвилину).
-Строго по постачальниках: спочатку один магазин, потім наступний.
+Строго по даті реєстрації постачальника: спочатку один магазин, потім наступний.
+Якщо найстаріший ще парсить XML — чекаємо, наступних не чіпаємо.
 Без asyncio.gather. 429/503 → знову pending.
 """
+import asyncio
 import logging
 import math
 from datetime import datetime, timedelta, timezone
@@ -63,37 +65,61 @@ def _created_sort_key(value: Any, supplier_id: int) -> tuple:
     return (0, str(value), int(supplier_id))
 
 
+def _pending_exists_clause():
+    return (
+        select(Product.id)
+        .where(
+            Product.supplier_id == Supplier.id,
+            *_PENDING_PRODUCT,
+        )
+        .correlate(Supplier)
+        .exists()
+    )
+
+
 async def fetch_strict_supplier_queue(db) -> List[Dict[str, Any]]:
     """
-    Унікальні постачальники з pending-товарами.
-    Хто раніше зареєстрував магазин (created_at) — той перший.
+    Черга магазинів за queue_joined_at ASC (відновлені — в кінці).
+    У черзі: status=parsing АБО є pending-товари.
     """
-    oldest = func.min(Product.created_at)
-    pending_count = func.count(Product.id)
     stmt = (
-        select(
-            Product.supplier_id,
-            oldest.label("oldest_pending"),
-            pending_count.label("pending_count"),
-            Supplier.created_at.label("registered_at"),
-        )
-        .join(Supplier, Supplier.id == Product.supplier_id)
+        select(Supplier)
         .where(
-            *_PENDING_PRODUCT,
             Supplier.status.notin_(BLOCKED_SUPPLIER_STATUSES),
+            or_(
+                Supplier.status == SupplierStatus.parsing,
+                _pending_exists_clause(),
+            ),
         )
-        .group_by(Product.supplier_id, Supplier.created_at)
-        .order_by(Supplier.created_at.asc(), Product.supplier_id.asc())
+        .order_by(Supplier.queue_joined_at.asc().nulls_last(), Supplier.id.asc())
     )
-    rows = (await db.execute(stmt)).all()
+    suppliers = (await db.execute(stmt)).scalars().all()
+    if not suppliers:
+        return []
+
+    supplier_ids = [int(row.id) for row in suppliers]
+    count_rows = (
+        await db.execute(
+            select(Product.supplier_id, func.count(Product.id))
+            .where(
+                Product.supplier_id.in_(supplier_ids),
+                *_PENDING_PRODUCT,
+            )
+            .group_by(Product.supplier_id)
+        )
+    ).all()
+    pending_map = {int(sid): int(cnt or 0) for sid, cnt in count_rows}
+
     return [
         {
-            "supplier_id": int(row.supplier_id),
-            "oldest_pending": row.oldest_pending,
-            "pending_count": int(row.pending_count or 0),
-            "registered_at": row.registered_at,
+            "supplier_id": int(row.id),
+            "pending_count": pending_map.get(int(row.id), 0),
+            "registered_at": getattr(row, "queue_joined_at", None) or row.created_at,
+            "queue_joined_at": getattr(row, "queue_joined_at", None) or row.created_at,
+            "is_parsing": _enum_str(row.status) == SupplierStatus.parsing.value,
+            "shop_name": _shop_name_of(row),
         }
-        for row in rows
+        for row in suppliers
     ]
 
 
@@ -121,134 +147,96 @@ def _supplier_is_approved(supplier: Supplier) -> bool:
 
 
 def is_fetching_xml(supplier: Optional[Supplier], total: int) -> bool:
-    """True: магазин схвалений, є YML, але товарів у базі ще немає (йде парсинг)."""
+    """True: магазин зараз парсить каталог і товарів у базі ще немає."""
     if supplier is None:
         return False
-    if int(total or 0) > 0:
+    if _enum_str(supplier.status) != SupplierStatus.parsing.value:
         return False
-    return _supplier_is_approved(supplier) and _has_valid_yml(supplier)
+    return int(total or 0) == 0
 
 
 async def build_ai_queue_view(db) -> List[Dict[str, Any]]:
     """
-    Глобальна черга магазинів за датою реєстрації (created_at).
-    items_ahead = сума pending усіх магазинів, зареєстрованих раніше.
-    queue_position = скільки магазинів у черзі перед цим.
-    estimated_minutes = ((items_ahead + pending цього) * 15) / 60.
+    Глобальна черга магазинів за queue_joined_at ASC.
+    У списку всі parsing АБО з pending-товарами. Відновлені — в кінці.
+    queue_position = реальне місце: 0 активний, далі 1, 2, 3...
     """
     queue = await fetch_strict_supplier_queue(db)
-    rows_by_id: Dict[int, Dict[str, Any]] = {}
+    if not queue:
+        return []
 
-    supplier_map: Dict[int, Supplier] = {}
-    if queue:
-        supplier_ids = [int(row["supplier_id"]) for row in queue]
-        suppliers = (
-            (await db.execute(select(Supplier).where(Supplier.id.in_(supplier_ids))))
-            .scalars()
-            .all()
-        )
-        supplier_map = {int(s.id): s for s in suppliers}
-
-        totals = (
-            await db.execute(
-                select(Product.supplier_id, func.count(Product.id))
-                .where(
-                    Product.supplier_id.in_(supplier_ids),
-                    Product.status != ProductStatus.deleted,
-                    Product.ai_status != ProductAIStatus.cancelled,
-                )
-                .group_by(Product.supplier_id)
-            )
-        ).all()
-        total_map = {int(sid): int(cnt) for sid, cnt in totals}
-
-        processed_rows = (
-            await db.execute(
-                select(Product.supplier_id, func.count(Product.id))
-                .where(
-                    Product.supplier_id.in_(supplier_ids),
-                    Product.status != ProductStatus.deleted,
-                    Product.ai_status == ProductAIStatus.completed,
-                )
-                .group_by(Product.supplier_id)
-            )
-        ).all()
-        processed_map = {int(sid): int(cnt) for sid, cnt in processed_rows}
-
-        for row in queue:
-            sid = int(row["supplier_id"])
-            supplier = supplier_map.get(sid)
-            total = total_map.get(sid, 0)
-            rows_by_id[sid] = {
-                "supplier_id": sid,
-                "shop_name": _shop_name_of(supplier) if supplier else f"Магазин #{sid}",
-                "pending_count": int(row["pending_count"]),
-                "processed": processed_map.get(sid, 0),
-                "total": total,
-                "created_at": getattr(supplier, "created_at", None) if supplier else row.get("registered_at"),
-                "oldest_pending": row.get("oldest_pending"),
-                "is_fetching_xml": is_fetching_xml(supplier, total),
-            }
-
-    fetching_candidates = (
-        (
-            await db.execute(
-                select(Supplier).where(Supplier.status.notin_(BLOCKED_SUPPLIER_STATUSES))
-            )
-        )
+    supplier_ids = [int(row["supplier_id"]) for row in queue]
+    suppliers = (
+        (await db.execute(select(Supplier).where(Supplier.id.in_(supplier_ids))))
         .scalars()
         .all()
     )
-    fetch_ids = [
-        int(s.id)
-        for s in fetching_candidates
-        if int(s.id) not in rows_by_id and _supplier_is_approved(s) and _has_valid_yml(s)
-    ]
-    product_totals: Dict[int, int] = {}
-    if fetch_ids:
-        count_rows = (
-            await db.execute(
-                select(Product.supplier_id, func.count(Product.id))
-                .where(
-                    Product.supplier_id.in_(fetch_ids),
-                    Product.status != ProductStatus.deleted,
-                    Product.ai_status != ProductAIStatus.cancelled,
-                )
-                .group_by(Product.supplier_id)
+    supplier_map = {int(s.id): s for s in suppliers}
+
+    totals = (
+        await db.execute(
+            select(Product.supplier_id, func.count(Product.id))
+            .where(
+                Product.supplier_id.in_(supplier_ids),
+                Product.status != ProductStatus.deleted,
+                Product.ai_status != ProductAIStatus.cancelled,
             )
-        ).all()
-        product_totals = {int(sid): int(cnt) for sid, cnt in count_rows}
+            .group_by(Product.supplier_id)
+        )
+    ).all()
+    total_map = {int(sid): int(cnt) for sid, cnt in totals}
 
-    for supplier in fetching_candidates:
-        sid = int(supplier.id)
-        if sid not in set(fetch_ids):
-            continue
-        if product_totals.get(sid, 0) != 0:
-            continue
-        rows_by_id[sid] = {
-            "supplier_id": sid,
-            "shop_name": _shop_name_of(supplier),
-            "pending_count": 0,
-            "processed": 0,
-            "total": 0,
-            "created_at": getattr(supplier, "created_at", None),
-            "oldest_pending": None,
-            "is_fetching_xml": True,
-        }
+    processed_rows = (
+        await db.execute(
+            select(Product.supplier_id, func.count(Product.id))
+            .where(
+                Product.supplier_id.in_(supplier_ids),
+                Product.status != ProductStatus.deleted,
+                Product.ai_status == ProductAIStatus.completed,
+            )
+            .group_by(Product.supplier_id)
+        )
+    ).all()
+    processed_map = {int(sid): int(cnt) for sid, cnt in processed_rows}
 
-    ordered = sorted(
-        rows_by_id.values(),
-        key=lambda row: _created_sort_key(row.get("created_at"), row["supplier_id"]),
+    display_rows: List[Dict[str, Any]] = []
+    for row in queue:
+        sid = int(row["supplier_id"])
+        supplier = supplier_map.get(sid)
+        total = total_map.get(sid, 0)
+        display_rows.append(
+            {
+                "supplier_id": sid,
+                "shop_name": _shop_name_of(supplier) if supplier else str(row.get("shop_name") or f"Магазин #{sid}"),
+                "pending_count": int(row["pending_count"] or 0),
+                "processed": processed_map.get(sid, 0),
+                "total": total,
+                "created_at": getattr(supplier, "created_at", None) if supplier else row.get("registered_at"),
+                "queue_joined_at": (
+                    getattr(supplier, "queue_joined_at", None) if supplier else None
+                ) or row.get("queue_joined_at") or row.get("registered_at"),
+                "is_fetching_xml": is_fetching_xml(supplier, total) or bool(row.get("is_parsing") and int(row["pending_count"] or 0) == 0),
+            }
+        )
+
+    display_rows.sort(
+        key=lambda row: _created_sort_key(
+            row.get("queue_joined_at") or row.get("created_at"),
+            row["supplier_id"],
+        ),
     )
-    pending_rows = [row for row in ordered if not row.get("is_fetching_xml")]
-    fetching_rows = [row for row in ordered if row.get("is_fetching_xml")]
-    display_rows = pending_rows + fetching_rows
 
     result: List[Dict[str, Any]] = []
     items_ahead = 0
     for index, row in enumerate(display_rows):
         pending = int(row["pending_count"] or 0)
-        fetching = bool(row.get("is_fetching_xml"))
+        fetching = bool(row.get("is_fetching_xml")) and index == 0
+        if index == 0:
+            status = "fetching_xml" if fetching else "processing"
+            is_processing = not fetching
+        else:
+            status = "waiting"
+            is_processing = False
         estimated = estimate_queue_minutes(
             items_ahead=items_ahead,
             pending_items=0 if fetching else pending,
@@ -267,10 +255,10 @@ async def build_ai_queue_view(db) -> List[Dict[str, Any]]:
                 "remaining_minutes": estimated,
                 "wait_minutes": minutes_for_items(items_ahead),
                 "created_at": row.get("created_at"),
-                "oldest_pending": row.get("oldest_pending"),
-                "is_processing": index == 0 and not fetching,
-                "is_fetching_xml": fetching,
-                "status": "fetching_xml" if fetching else ("processing" if index == 0 else "waiting"),
+                "queue_joined_at": row.get("queue_joined_at"),
+                "is_processing": is_processing,
+                "is_fetching_xml": fetching if index == 0 else False,
+                "status": status,
             }
         )
         items_ahead += pending
@@ -312,6 +300,11 @@ async def process_next_pending_product() -> None:
         logger.warning("AI-черга: GEMINI_API_KEYS немає — крок пропущено.")
         return
 
+    wait_for_xml = False
+    wait_supplier_id = 0
+    product = None
+    product_id = None
+
     async with AsyncSessionLocal() as db:
         try:
             await _reclaim_stale_processing(db)
@@ -319,60 +312,80 @@ async def process_next_pending_product() -> None:
             queue = await fetch_strict_supplier_queue(db)
             if not queue:
                 return
-            active_supplier_id = int(queue[0]["supplier_id"])
+            head = queue[0]
+            active_supplier_id = int(head["supplier_id"])
+            pending_count = int(head.get("pending_count") or 0)
+            is_parsing = bool(head.get("is_parsing"))
 
-            stmt = (
-                select(Product)
-                .where(
-                    Product.supplier_id == int(active_supplier_id),
-                    *_PENDING_PRODUCT,
+            if is_parsing and pending_count <= 0:
+                wait_for_xml = True
+                wait_supplier_id = active_supplier_id
+            elif pending_count > 0:
+                stmt = (
+                    select(Product)
+                    .where(
+                        Product.supplier_id == int(active_supplier_id),
+                        *_PENDING_PRODUCT,
+                    )
+                    .order_by(Product.created_at.asc(), Product.id.asc())
+                    .limit(1)
                 )
-                .order_by(Product.created_at.asc(), Product.id.asc())
-                .limit(1)
-            )
-            if engine is not None and engine.dialect.name == "postgresql":
-                stmt = stmt.with_for_update(skip_locked=True)
-            product = (await db.execute(stmt)).scalars().first()
+                if engine is not None and engine.dialect.name == "postgresql":
+                    stmt = stmt.with_for_update(skip_locked=True)
+                product = (await db.execute(stmt)).scalars().first()
 
-            if not product:
-                return
+                if product:
+                    supplier = await db.get(Supplier, product.supplier_id)
+                    supplier_status = (
+                        supplier.status.value if supplier and hasattr(supplier.status, "value") else (
+                            str(supplier.status) if supplier else ""
+                        )
+                    )
+                    if supplier_status in (
+                        SupplierStatus.deletion_requested.value,
+                        SupplierStatus.deleted.value,
+                        SupplierStatus.banned.value,
+                    ):
+                        product.ai_status = ProductAIStatus.cancelled
+                        await db.commit()
+                        logger.info(
+                            "AI-черга: товар #%s cancelled (магазин #%s статус=%s).",
+                            product.id,
+                            product.supplier_id,
+                            supplier_status,
+                        )
+                        return
 
-            supplier = await db.get(Supplier, product.supplier_id)
-            supplier_status = (
-                supplier.status.value if supplier and hasattr(supplier.status, "value") else (
-                    str(supplier.status) if supplier else ""
-                )
-            )
-            if supplier_status in (
-                SupplierStatus.deletion_requested.value,
-                SupplierStatus.deleted.value,
-                SupplierStatus.banned.value,
-            ):
-                product.ai_status = ProductAIStatus.cancelled
-                await db.commit()
-                logger.info(
-                    "AI-черга: товар #%s cancelled (магазин #%s статус=%s).",
-                    product.id,
-                    product.supplier_id,
-                    supplier_status,
-                )
-                return
-
-            product_id = product.id
-            product.ai_status = ProductAIStatus.processing
-            await db.commit()
-            await db.refresh(product)
-            logger.info(
-                "AI-черга: магазин #%s, товар #%s (строга черга).",
-                product.supplier_id,
-                product_id,
-            )
+                    product_id = product.id
+                    product.ai_status = ProductAIStatus.processing
+                    await db.commit()
+                    await db.refresh(product)
+                    logger.info(
+                        "AI-черга: магазин #%s, товар #%s (строга черга за датою реєстрації).",
+                        product.supplier_id,
+                        product_id,
+                    )
         except Exception as e:
             logger.error("AI-черга: не вдалося взяти pending-товар: %s", e, exc_info=True)
             await db.rollback()
             return
 
+    if wait_for_xml:
+        logger.info(
+            "AI-черга: магазин #%s парсить XML, pending ще немає — чекаємо, наступних не чіпаємо.",
+            wait_supplier_id,
+        )
+        await asyncio.sleep(AI_QUEUE_INTERVAL_SECONDS)
+        return
+
+    if product is None or product_id is None:
+        return
+
+    async with AsyncSessionLocal() as db:
         try:
+            product = await db.get(Product, product_id)
+            if product is None:
+                return
             ok = await processor.process_product(product, db)
             if ok:
                 product.ai_status = ProductAIStatus.completed

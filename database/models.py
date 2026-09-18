@@ -1,5 +1,6 @@
 # database/models.py
 import enum
+from datetime import datetime, timezone
 from sqlalchemy import (
     Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Float,
     Enum, UniqueConstraint, JSON, BigInteger, Table # <-- ДОДАВ Table
@@ -24,6 +25,7 @@ class SupplierStatus(str, enum.Enum):
     pending_ai_analysis = "pending_ai_analysis"
     ai_in_progress = "ai_in_progress"
     pending_admin_approval = "pending_admin_approval"
+    parsing = "parsing"
     active = "active"
     rejected = "rejected"
     disabled = "disabled"
@@ -191,13 +193,27 @@ class Supplier(Base):
     last_posted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     approved_at = Column(DateTime(timezone=True), nullable=True)
+    restored_at = Column(DateTime(timezone=True), nullable=True)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
+    queue_joined_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
 
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     user = relationship("User", back_populates="suppliers")
     
     channels = relationship("Channel", secondary=supplier_channels, back_populates="suppliers")
     products = relationship("Product", back_populates="supplier", cascade="all, delete-orphan")
+
+
+class SupplierHistoryLog(Base):
+    """Пам'ять ШІ після фізичного видалення магазину (лінк + причина)."""
+    __tablename__ = "supplier_history_log"
+
+    id = Column(Integer, primary_key=True)
+    original_supplier_id = Column(Integer, nullable=False, index=True)
+    supplier_name = Column(String(255), nullable=False)
+    source_link = Column(Text, nullable=True, index=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+    reason = Column(String(512), nullable=True)
 
 class Product(Base):
     __tablename__ = 'products'

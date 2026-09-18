@@ -9,11 +9,11 @@ import { Badge } from '@/components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { supabase } from '@/integrations/supabase/client';
 import { MOCK_ORDERS, MockOrder } from '@/data/mockOrders';
+import { formatLocalTime } from '@/utils/dateFormatter';
 
 const statusConfig: Record<string, { label: string; color: string; bgColor: string }> = {
   pending: { label: 'Очікує', color: 'text-yellow-600', bgColor: 'bg-yellow-100' },
@@ -149,8 +149,6 @@ export function OrdersManager() {
     }
   };
 
-  const formatDate = (d: string) => new Date(d).toLocaleDateString('uk-UA', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-
   const filteredOrders = orders.filter(o => {
     const status = o.status || 'pending';
     if (filterStatus !== "all" && status !== filterStatus) return false;
@@ -180,7 +178,7 @@ export function OrdersManager() {
   }
 
   return (
-    <ScrollArea className="h-[calc(100vh-380px)]">
+    <div className="overflow-y-auto pb-24">
       <div className="space-y-4 pr-4">
         {/* Search & Filter */}
         <div className="flex gap-2">
@@ -252,7 +250,7 @@ export function OrdersManager() {
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="font-semibold text-foreground">{orderNumber}</p>
-                    <p className="text-xs text-muted-foreground">{formatDate(order.created_at)}</p>
+                    <p className="text-xs text-muted-foreground">{formatLocalTime(order.created_at)}</p>
                   </div>
                   <Badge className={cn(st.bgColor, st.color, "border-0")}>{st.label}</Badge>
                 </div>
@@ -346,6 +344,6 @@ export function OrdersManager() {
           );
         })}
       </div>
-    </ScrollArea>
+    </div>
   );
 }
