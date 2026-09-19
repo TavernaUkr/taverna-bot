@@ -69,6 +69,7 @@ class ProductAPI(BaseModel):
     target_niche: Optional[str] = None
     gender: Optional[str] = None
     attributes: Optional[Dict[str, Any]] = None
+    search_tags: Optional[List[str]] = None
     supplier_name: Optional[str] = None
     
     options: List[ProductOptionAPI] = []
@@ -99,6 +100,12 @@ class FilterAttributeAPI(BaseModel):
     values: List[str] = []
 
 
+class DynamicFilterAPI(BaseModel):
+    """Унікальні опції однієї JSON-характеристики (Виробник, Пам'ять...)."""
+    name: str
+    options: List[str] = []
+
+
 class ProductFiltersAPI(BaseModel):
     """Унікальні PIM-значення для динамічної панелі фільтрів MiniApp."""
     target_niche: List[str] = []
@@ -107,6 +114,21 @@ class ProductFiltersAPI(BaseModel):
     attributes: List[FilterAttributeAPI] = []
     sub_categories: List[CategorySubAPI] = []
     total: int = 0
+    categories: List[str] = []
+    dynamic_filters: List[DynamicFilterAPI] = []
+
+
+class ProductListAPI(BaseModel):
+    """Пагінований каталог: GET /api/v1/products/."""
+    items: List[ProductAPI] = []
+    total: int = 0
+
+
+class ProductColorVariantAPI(BaseModel):
+    """Інший колір тієї ж моделі (окремий товар того ж постачальника)."""
+    product_id: int
+    color: str = ""
+    image_url: Optional[str] = None
 
 # --- МОДЕЛІ З `auth_handlers.py` ---
 class UserResponse(BaseModel):

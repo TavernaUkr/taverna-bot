@@ -82,8 +82,9 @@ export interface Category {
  */
 export function mapBackendProductToUi(bp: BackendProduct): Product {
   const variants = bp.variants ?? [];
-  const availableVariants = variants.filter((v) => v.is_available && v.quantity > 0);
-  const primaryVariant = availableVariants[0] ?? variants[0];
+  const stockedVariants = variants.filter((v) => (v.quantity || 0) > 0);
+  const availableVariants = stockedVariants.filter((v) => v.is_available);
+  const primaryVariant = availableVariants[0] ?? stockedVariants[0] ?? variants[0];
 
   const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
 
@@ -96,14 +97,47 @@ export function mapBackendProductToUi(bp: BackendProduct): Product {
   const season = bp.season?.trim() || undefined;
   const targetNiche = bp.target_niche?.trim() || undefined;
   const gender = bp.gender?.trim() || undefined;
-  const attributes =
-    bp.attributes && typeof bp.attributes === "object" && !Array.isArray(bp.attributes)
-      ? Object.fromEntries(
-          Object.entries(bp.attributes).filter(
-            ([key, value]) => key && value != null && String(value).trim()
-          ).map(([key, value]) => [key, String(value)])
-        )
-      : undefined;
+  const META_KEYS = new Set([
+    "source",
+    "source_url",
+    "telegram_message_id",
+    "vendor_code",
+    "sizes",
+    "media_urls",
+    "characteristics",
+    "search_tags",
+    "base_model_name",
+    "color",
+  ]);
+  const attributes: Record<string, string> | undefined = (() => {
+    const raw = bp.attributes;
+    if (!raw || typeof raw !== "object") return undefined;
+    const result: Record<string, string> = {};
+    const push = (key: string, value: unknown) => {
+      const name = String(key || "").trim();
+      if (!name || META_KEYS.has(name.toLowerCase()) || value == null || typeof value === "object") return;
+      const text = String(value).trim();
+      if (text) result[name] = text;
+    };
+    if (Array.isArray(raw)) {
+      for (const entry of raw) {
+        if (entry && typeof entry === "object" && "name" in entry) {
+          push(String((entry as { name?: unknown }).name || ""), (entry as { value?: unknown }).value);
+        }
+      }
+    } else {
+      const obj = raw as Record<string, unknown>;
+      if (Array.isArray(obj.characteristics)) {
+        for (const entry of obj.characteristics) {
+          if (entry && typeof entry === "object" && "name" in entry) {
+            push(String((entry as { name?: unknown }).name || ""), (entry as { value?: unknown }).value);
+          }
+        }
+      }
+      Object.entries(obj).forEach(([key, value]) => push(key, value));
+    }
+    return Object.keys(result).length ? result : undefined;
+  })();
 
   return {
     id: String(bp.id),
@@ -114,7 +148,7 @@ export function mapBackendProductToUi(bp: BackendProduct): Product {
     price: primaryVariant?.final_price ?? 0,
     currency: 'UAH',
     images: bp.pictures ?? [],
-    in_stock: availableVariants.length > 0,
+    in_stock: stockedVariants.length > 0,
     stock_quantity: totalStock,
     sizes: sizeOption?.values.map((v) => v.value),
     colors: colorOption?.values.map((v) => v.value),
@@ -124,6 +158,9 @@ export function mapBackendProductToUi(bp: BackendProduct): Product {
     gender,
     supplier_name: bp.supplier_name?.trim() || undefined,
     attributes,
+    ai_tags: Array.isArray(bp.search_tags)
+      ? bp.search_tags.map((tag) => String(tag).trim()).filter(Boolean)
+      : undefined,
     category: categoryTag
       ? { id: categoryTag, name: categoryTag, slug: categoryTag, parent_id: null }
       : null,
@@ -173,7 +210,7 @@ export function useProducts() {
       setIsLoading(true);
 
       const backendProducts = await fetchBackendProducts({
-        category: filters?.categoryId,
+        category: filters?.categoryId?.trim() || undefined,
         limit: 50,
         offset: 0,
       });
@@ -187,10 +224,11 @@ export function useProducts() {
       }
 
       if (filters?.categoryId) {
+        const key = filters.categoryId.trim().toLowerCase();
         mapped = mapped.filter(
           (p) =>
-            p.category?.id === filters.categoryId ||
-            p.category?.name === filters.categoryId
+            p.category?.id?.trim().toLowerCase() === key ||
+            p.category?.name?.trim().toLowerCase() === key
         );
       }
 

@@ -107,7 +107,7 @@ export const Promos = () => {
       description: "Перейдіть до товарів та зробіть замовлення",
     });
 
-    navigate("/search?all=true");
+    navigate("/catalog");
   };
 
   const handleBack = () => {

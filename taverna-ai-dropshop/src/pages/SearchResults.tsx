@@ -27,6 +27,8 @@ import {
 } from "@/utils/categoryParser";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
+import { readCharFilters, setCharFiltersOnParams, charFiltersKey, toggleCharValue } from "@/lib/catalogUrl";
+import { DynamicFilterBar, FilterSidebar } from "@/components/catalog/FilterSidebar";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Slider } from "@/components/ui/slider";
@@ -112,6 +114,17 @@ const defaultFilters: FilterState = {
   inStockOnly: false,
 };
 
+function matchesLabel(value: string | undefined | null, selected: string): boolean {
+  if (!value || !selected) return false;
+  const a = value.trim().toLowerCase();
+  const b = selected.trim().toLowerCase();
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function matchesAnyLabel(value: string | undefined | null, selected: string[]): boolean {
+  return selected.some((item) => matchesLabel(value, item));
+}
+
 export default function SearchResults() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -138,6 +151,11 @@ export default function SearchResults() {
     [seasonParam]
   );
   const urlGender = searchParams.get("gender") || "";
+  const urlCharFilters = useMemo(
+    () => readCharFilters(new URLSearchParams(searchString)),
+    [searchString]
+  );
+  const urlCharKey = useMemo(() => charFiltersKey(urlCharFilters), [urlCharFilters]);
   
   const [searchInput, setSearchInput] = useState(query);
   // Повний немодифікований каталог з FastAPI-бекенду (без фільтрів/пошуку).
@@ -150,6 +168,7 @@ export default function SearchResults() {
     niches: urlNiches,
     seasons: urlSeasons,
     subCategories: urlSubCategories,
+    attributes: urlCharFilters,
   }));
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [isFeedOpen, setIsFeedOpen] = useState(false);
@@ -164,6 +183,13 @@ export default function SearchResults() {
       return { ...prev, subCategories: urlSubCategories };
     });
   }, [urlSubKey]);
+
+  useEffect(() => {
+    setFilters((prev) => {
+      if (charFiltersKey(prev.attributes) === urlCharKey) return prev;
+      return { ...prev, attributes: urlCharFilters };
+    });
+  }, [urlCharKey, urlCharFilters]);
   
   // Available filter options extracted from products
   const [availableColors, setAvailableColors] = useState<string[]>([]);
@@ -180,14 +206,30 @@ export default function SearchResults() {
   const { isFavorite, toggleFavorite } = useFavoritesContext();
   const { addItem } = useCartContext();
 
-  // Завантажуємо повний каталог з нашого FastAPI-бекенду ОДИН РАЗ.
-  // Пошук/фільтри/категорії застосовуються далі на фронтенді (бекенд ще
-  // не приймає query-параметри пошуку — так само, як у useProducts.tsx).
+  // Завантажуємо каталог так само, як блок «Популярні»: без порожніх query-параметрів.
+  // Якщо в URL вже є категорія/ніша — передаємо лише непорожні фільтри.
   useEffect(() => {
     const loadCatalog = async () => {
       setIsLoading(true);
       try {
-        const backendProducts = await fetchBackendProductsPaged();
+        const queryFilters: {
+          category?: string;
+          sub_category?: string[];
+          season?: string[];
+          target_niche?: string[];
+          gender?: string;
+          characteristics?: Record<string, string[]>;
+        } = {};
+        if (urlCategory.trim()) queryFilters.category = urlCategory.trim();
+        if (urlSubCategories.length) queryFilters.sub_category = urlSubCategories;
+        if (urlSeasons.length) queryFilters.season = urlSeasons;
+        if (urlNiches.length) queryFilters.target_niche = urlNiches;
+        if (urlGender.trim()) queryFilters.gender = urlGender.trim();
+        if (Object.keys(urlCharFilters).length) {
+          queryFilters.characteristics = urlCharFilters;
+        }
+
+        const backendProducts = await fetchBackendProductsPaged(queryFilters);
         const mapped = backendProducts
           .map(mapBackendProductToUi)
           .filter((p) => p.in_stock);
@@ -230,7 +272,7 @@ export default function SearchResults() {
       }
     };
     loadCatalog();
-  }, []);
+  }, [urlCategory, urlSubKey, nicheParam, seasonParam, urlGender, urlCharKey]);
 
   // Динамічні лічильники підкатегорій з бекенду під вибрані фільтри.
   useEffect(() => {
@@ -257,7 +299,18 @@ export default function SearchResults() {
         setAvailableNiches(mergeUniqueLabels(pimFilters.target_niche || [], FALLBACK_NICHES));
         setAvailableSeasons(mergeUniqueLabels(pimFilters.season || [], FALLBACK_SEASONS));
         if (pimFilters.gender?.length) setAvailableGenders(pimFilters.gender);
-        if (pimFilters.attributes?.length) setAvailableAttributes(pimFilters.attributes);
+        const dynamicAttrs = (pimFilters.dynamic_filters || []).map((item) => ({
+          name: item.name,
+          values: item.options || [],
+        }));
+        const attrMap = new Map<string, string[]>();
+        for (const item of [...dynamicAttrs, ...(pimFilters.attributes || [])]) {
+          if (!item?.name) continue;
+          if (!attrMap.has(item.name)) attrMap.set(item.name, item.values || []);
+        }
+        setAvailableAttributes(
+          Array.from(attrMap.entries()).map(([name, values]) => ({ name, values }))
+        );
         setAvailableSubCategories(pimFilters.sub_categories || []);
       } catch {
         // fallback нижче з товарів
@@ -291,7 +344,7 @@ export default function SearchResults() {
     // Категорії з URL (AI текстові назви) + чекбокси фільтрів
     if (urlCategory) {
       filtered = filtered.filter(
-        (p) => p.category?.id === urlCategory || p.category?.name === urlCategory
+        (p) => matchesLabel(p.category?.id, urlCategory) || matchesLabel(p.category?.name, urlCategory)
       );
     }
     const selectedSubs = Array.from(
@@ -302,25 +355,22 @@ export default function SearchResults() {
       )
     );
     if (selectedSubs.length > 0) {
-      const selectedKeys = new Set(selectedSubs.map((name) => name.toLowerCase()));
-      filtered = filtered.filter(
-        (p) => p.sub_category && selectedKeys.has(p.sub_category.toLowerCase())
-      );
+      filtered = filtered.filter((p) => matchesAnyLabel(p.sub_category, selectedSubs));
     }
     if (urlGender) {
-      filtered = filtered.filter((p) => p.gender === urlGender);
+      filtered = filtered.filter((p) => matchesLabel(p.gender, urlGender));
     }
     if (filters.categories.length > 0) {
-      filtered = filtered.filter((p) => p.category && filters.categories.includes(p.category.id));
+      filtered = filtered.filter((p) => p.category && matchesAnyLabel(p.category.id, filters.categories));
     }
     if (filters.niches.length > 0) {
-      filtered = filtered.filter((p) => p.target_niche && filters.niches.includes(p.target_niche));
+      filtered = filtered.filter((p) => matchesAnyLabel(p.target_niche, filters.niches));
     }
     if (filters.seasons.length > 0) {
-      filtered = filtered.filter((p) => p.season && filters.seasons.includes(p.season));
+      filtered = filtered.filter((p) => matchesAnyLabel(p.season, filters.seasons));
     }
     if (filters.genders.length > 0) {
-      filtered = filtered.filter((p) => p.gender && filters.genders.includes(p.gender));
+      filtered = filtered.filter((p) => matchesAnyLabel(p.gender, filters.genders));
     }
     const attrEntries = Object.entries(filters.attributes).filter(([, values]) => values.length > 0);
     if (attrEntries.length > 0) {
@@ -512,19 +562,12 @@ export default function SearchResults() {
   };
 
   const toggleAttribute = (key: string, value: string) => {
-    setFilters((prev) => {
-      const current = prev.attributes[key] || [];
-      const next = current.includes(value)
-        ? current.filter((item) => item !== value)
-        : [...current, value];
-      const attributes = { ...prev.attributes };
-      if (next.length === 0) {
-        delete attributes[key];
-      } else {
-        attributes[key] = next;
-      }
-      return { ...prev, attributes };
-    });
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      const chars = toggleCharValue(readCharFilters(next), key, value);
+      setCharFiltersOnParams(next, chars);
+      return next;
+    }, { replace: true });
   };
 
   const clearFilters = () => {
@@ -532,6 +575,9 @@ export default function SearchResults() {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       next.delete("sub_category");
+      for (const key of Array.from(next.keys())) {
+        if (key.startsWith("char_")) next.delete(key);
+      }
       return next;
     }, { replace: true });
   };
@@ -555,8 +601,22 @@ export default function SearchResults() {
     (filters.minPrice > 0 ? 1 : 0) + 
     (filters.maxPrice < priceRange.max ? 1 : 0);
 
+  const dynamicFilters = useMemo(
+    () =>
+      availableAttributes
+        .filter((attr) => attr.name && attr.values?.length)
+        .map((attr) => ({ name: attr.name, options: attr.values })),
+    [availableAttributes]
+  );
+
   const FilterContent = () => (
     <div className="space-y-4">
+      <FilterSidebar
+        filters={dynamicFilters}
+        selected={filters.attributes}
+        onToggle={toggleAttribute}
+      />
+
       {/* Price Range */}
       <div className="space-y-3">
         <h4 className="font-medium text-foreground">Ціна (₴)</h4>
@@ -680,29 +740,6 @@ export default function SearchResults() {
             </AccordionContent>
           </AccordionItem>
         )}
-
-        {availableAttributes.map((attr) => (
-          <AccordionItem key={attr.name} value={`attr-${attr.name}`}>
-            <AccordionTrigger className="text-sm font-medium">
-              {attr.name} ({attr.values.length})
-            </AccordionTrigger>
-            <AccordionContent>
-              <ScrollArea className="h-40">
-                <div className="space-y-2 pr-4">
-                  {attr.values.map((value) => (
-                    <label key={value} className="flex items-center gap-2 cursor-pointer">
-                      <Checkbox
-                        checked={(filters.attributes[attr.name] || []).includes(value)}
-                        onCheckedChange={() => toggleAttribute(attr.name, value)}
-                      />
-                      <span className="text-sm">{value}</span>
-                    </label>
-                  ))}
-                </div>
-              </ScrollArea>
-            </AccordionContent>
-          </AccordionItem>
-        ))}
 
         {/* Categories */}
         {categories.length > 0 && (
@@ -843,9 +880,9 @@ export default function SearchResults() {
   );
 
   return (
-    <div className="min-h-screen bg-background w-full max-w-[100vw] overflow-x-hidden">
+    <div className="min-h-screen bg-background w-full max-w-[100vw] overflow-x-hidden pb-40">
       {/* Header */}
-      <div className="sticky top-0 z-40 bg-card border-b border-border w-full max-w-[100vw] overflow-x-hidden">
+      <div className="sticky top-0 z-50 bg-card border-b border-border w-full max-w-[100vw] overflow-x-hidden">
         <form onSubmit={handleSearch} className="flex items-center gap-2 p-3 min-w-0">
           <button
             type="button"
@@ -1037,6 +1074,11 @@ export default function SearchResults() {
         )}
 
         <div className="mb-4">
+          <DynamicFilterBar
+            filters={dynamicFilters}
+            selected={filters.attributes}
+            onToggle={toggleAttribute}
+          />
           <PimFilterPills
             seasons={availableSeasons}
             niches={availableNiches}
@@ -1097,7 +1139,7 @@ export default function SearchResults() {
             )}
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-3 pb-20">
+          <div className="grid grid-cols-2 gap-3">
             {products.map((product) => (
               <ProductCard
                 key={product.id}

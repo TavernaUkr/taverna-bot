@@ -4,8 +4,9 @@ import asyncio
 import logging
 import re
 import sqlite3
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Optional, Union
 from uuid import uuid4
 
 from telethon import TelegramClient
@@ -149,6 +150,196 @@ def _media_filename_and_type(message) -> tuple[str, str]:
     return f"{uuid4()}.bin", mime or "application/octet-stream"
 
 
+def _telegram_media_folder_path(supplier_name: str, supplier_id: int, message_id) -> str:
+    safe_name = "".join(
+        c for c in (supplier_name or "") if c.isalnum() or c in (" ", "_")
+    ).replace(" ", "_")
+    if not safe_name:
+        safe_name = "shop"
+    return f"telegram_media/{safe_name}_{int(supplier_id or 0)}/post_{int(message_id or 0)}"
+
+
+MIN_PRODUCT_TEXT_LEN = 12
+
+
+def _message_text(message) -> str:
+    return (
+        getattr(message, "message", None)
+        or getattr(message, "text", None)
+        or ""
+    ).strip()
+
+
+def _message_has_media(message) -> bool:
+    return bool(
+        getattr(message, "media", None)
+        or getattr(message, "photo", None)
+        or getattr(message, "video", None)
+    )
+
+
+def _is_short_product_text(text: str) -> bool:
+    """Порожній або закороткий підпис — не самостійний товар (альбом / forward)."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return True
+    if len(cleaned) >= MIN_PRODUCT_TEXT_LEN:
+        return False
+    return not bool(re.search(r"\d", cleaned))
+
+
+def is_album_extra_message(message) -> bool:
+    """Медіа без нормального тексту товару — частина альбому або forward після поста."""
+    return _message_has_media(message) and _is_short_product_text(_message_text(message))
+
+
+@dataclass
+class AlbumStitchContext:
+    """Пам'ять парсера: останній товарний пост, щоб доклеїти альбомні фото."""
+    last_product_message_id: int = 0
+    last_extra_message_id: int = 0
+    last_grouped_id: Any = None
+    pending_attachments: list = field(default_factory=list)
+    pending_album_ids: list = field(default_factory=list)
+
+    def belongs_to_previous(self, message) -> bool:
+        if not self.last_product_message_id:
+            return False
+        grouped_id = getattr(message, "grouped_id", None)
+        if grouped_id and self.last_grouped_id and grouped_id == self.last_grouped_id:
+            return True
+        msg_id = int(getattr(message, "id", 0) or 0)
+        if not msg_id:
+            return False
+        if msg_id == self.last_product_message_id + 1:
+            return True
+        return bool(self.last_extra_message_id and msg_id == self.last_extra_message_id + 1)
+
+    def remember_product(self, message) -> None:
+        msg_id = int(getattr(message, "id", 0) or 0)
+        self.last_product_message_id = msg_id
+        self.last_extra_message_id = msg_id
+        self.last_grouped_id = getattr(message, "grouped_id", None)
+
+    def remember_extra(self, message) -> None:
+        msg_id = int(getattr(message, "id", 0) or 0)
+        if msg_id:
+            self.last_extra_message_id = msg_id
+        grouped_id = getattr(message, "grouped_id", None)
+        if grouped_id:
+            self.last_grouped_id = grouped_id
+
+    def take_attachments(self) -> list:
+        items = list(self.pending_attachments)
+        self.pending_attachments = []
+        return items
+
+    def take_album_ids(self) -> list:
+        items = list(self.pending_album_ids)
+        self.pending_album_ids = []
+        return items
+
+
+def _append_media_to_post(post: dict, urls: list[str]) -> None:
+    if not urls:
+        return
+    images = post.setdefault("image_urls", [])
+    formatted = post.get("formatted") or ""
+    for url in urls:
+        if not url or url in images:
+            continue
+        images.append(url)
+        formatted = f"{formatted}\nФото товару: {url}".strip()
+    post["formatted"] = formatted
+
+
+async def _stitch_channel_messages(
+    client: TelegramClient,
+    messages: list,
+    *,
+    username,
+    chat_id,
+    upload_media: bool,
+    supplier_name: str,
+    supplier_id: int,
+    stitch_ctx: Optional[AlbumStitchContext] = None,
+) -> list[dict]:
+    """
+    Хронологічно склеює альбоми: фото без тексту йдуть у попередній товар,
+    а не створюють окремий пост для Gemini.
+    """
+    ctx = stitch_ctx or AlbumStitchContext()
+    ordered = sorted(messages, key=lambda item: int(getattr(item, "id", 0) or 0))
+    posts_by_id: dict[int, dict] = {}
+
+    for message in ordered:
+        msg_id = int(getattr(message, "id", 0) or 0)
+        if not msg_id:
+            continue
+        text = _message_text(message)
+        has_media = _message_has_media(message)
+        short = _is_short_product_text(text)
+
+        if has_media and short and ctx.belongs_to_previous(message):
+            parent_id = ctx.last_product_message_id
+            urls: list[str] = []
+            if upload_media:
+                urls = await extract_and_upload_message_media(
+                    client,
+                    message,
+                    supplier_name=supplier_name,
+                    supplier_id=supplier_id,
+                    folder_message_id=parent_id,
+                )
+            if parent_id in posts_by_id:
+                if urls:
+                    _append_media_to_post(posts_by_id[parent_id], urls)
+                else:
+                    posts_by_id[parent_id].setdefault("album_message_ids", []).append(msg_id)
+            elif urls:
+                ctx.pending_attachments.append((parent_id, urls))
+            else:
+                ctx.pending_album_ids.append((parent_id, msg_id))
+            logger.info(
+                "telegram_parser: медіа поста #%s приклеєно до товару #%s (альбом/наступне фото).",
+                msg_id, parent_id,
+            )
+            ctx.remember_extra(message)
+            continue
+
+        if short:
+            logger.info(
+                "telegram_parser: пропущено порожній/короткий пост #%s (не створюємо товар-привид).",
+                msg_id,
+            )
+            continue
+
+        public_urls: list[str] = []
+        if upload_media and has_media:
+            public_urls = await extract_and_upload_message_media(
+                client,
+                message,
+                supplier_name=supplier_name,
+                supplier_id=supplier_id,
+            )
+        formatted = _format_post(message, public_urls)
+        if not formatted:
+            continue
+        posts_by_id[msg_id] = {
+            "message_id": msg_id,
+            "formatted": formatted,
+            "text": text,
+            "username": username,
+            "chat_id": chat_id,
+            "image_urls": list(public_urls),
+            "grouped_id": getattr(message, "grouped_id", None),
+            "album_message_ids": [],
+        }
+        ctx.remember_product(message)
+
+    return list(posts_by_id.values())
+
+
 def _coerce_telegram_message_id(raw) -> Optional[int]:
     if raw is None or raw == "":
         return None
@@ -184,7 +375,14 @@ def _normalize_image_urls(raw) -> list[str]:
     return urls
 
 
-async def extract_and_upload_message_media(client: TelegramClient, message) -> list[str]:
+async def extract_and_upload_message_media(
+    client: TelegramClient,
+    message,
+    *,
+    supplier_name: str,
+    supplier_id: int,
+    folder_message_id: Optional[int] = None,
+) -> list[str]:
     """
     Якщо в пості є медіа — качає в пам'ять і кладе в Supabase Storage.
     Помилка завантаження не валить парсинг тексту: повертає [].
@@ -206,6 +404,11 @@ async def extract_and_upload_message_media(client: TelegramClient, message) -> l
             )
             return []
         file_name, content_type = _media_filename_and_type(message)
+        folder_path = _telegram_media_folder_path(
+            supplier_name,
+            supplier_id,
+            folder_message_id if folder_message_id is not None else getattr(message, "id", 0),
+        )
         loop = asyncio.get_running_loop()
         public_url = await loop.run_in_executor(
             None,
@@ -213,6 +416,7 @@ async def extract_and_upload_message_media(client: TelegramClient, message) -> l
             bytes(media_bytes),
             file_name,
             content_type,
+            folder_path,
         )
         if public_url:
             return [public_url]
@@ -227,6 +431,76 @@ async def extract_and_upload_message_media(client: TelegramClient, message) -> l
             getattr(message, "id", "?"), e,
         )
         return []
+
+
+async def hydrate_posts_media(
+    channel_link: str,
+    posts: list[dict],
+    keep_message_ids: set[int],
+    *,
+    supplier_name: str,
+    supplier_id: int,
+) -> None:
+    """
+    Качає фото в Storage лише для постів, які Gemini визнав товарами.
+    Інформаційні пости не чіпаємо.
+    """
+    if not posts or not keep_message_ids:
+        return
+    id_to_post = {
+        int(post["message_id"]): post
+        for post in posts
+        if post.get("message_id")
+    }
+    parent_of: dict[int, int] = {}
+    download_ids: list[int] = []
+    keep = {int(mid) for mid in keep_message_ids if int(mid)}
+    for mid in keep:
+        post = id_to_post.get(mid)
+        if not post:
+            continue
+        download_ids.append(mid)
+        parent_of[mid] = mid
+        for extra in post.get("album_message_ids") or []:
+            try:
+                extra_id = int(extra)
+            except (TypeError, ValueError):
+                continue
+            if extra_id:
+                download_ids.append(extra_id)
+                parent_of[extra_id] = mid
+    unique_ids = list(dict.fromkeys(download_ids))
+    if not unique_ids:
+        return
+
+    channel_ref = _normalize_channel_ref(channel_link)
+    async with _client_lock:
+        try:
+            client = await _ensure_client()
+            entity = await client.get_entity(channel_ref)
+            fetched = await client.get_messages(entity, ids=unique_ids)
+        except Exception as e:
+            logger.warning("hydrate_posts_media: не вдалося довантажити фото: %s", e)
+            return
+        if fetched is None:
+            return
+        messages = fetched if isinstance(fetched, list) else [fetched]
+        for message in messages:
+            if message is None:
+                continue
+            msg_id = int(getattr(message, "id", 0) or 0)
+            parent_id = parent_of.get(msg_id)
+            post = id_to_post.get(parent_id) if parent_id else None
+            if post is None:
+                continue
+            urls = await extract_and_upload_message_media(
+                client,
+                message,
+                supplier_name=supplier_name,
+                supplier_id=supplier_id,
+                folder_message_id=parent_id,
+            )
+            _append_media_to_post(post, urls)
 
 
 def _format_post(message, public_urls: Optional[list[str]] = None) -> Optional[str]:
@@ -330,6 +604,8 @@ async def get_recent_channel_posts(
     channel_link: str,
     limit: int = 15,
     upload_media: bool = True,
+    supplier_name: str = "",
+    supplier_id: int = 0,
 ) -> str:
     """
     Читає останні пости публічного Telegram-каналу через Telethon.
@@ -384,11 +660,20 @@ async def get_recent_channel_posts(
 
         chunks = []
         try:
+            raw_messages = []
             async for message in client.iter_messages(entity, limit=take):
-                public_urls: list[str] = []
-                if upload_media:
-                    public_urls = await extract_and_upload_message_media(client, message)
-                formatted = _format_post(message, public_urls)
+                raw_messages.append(message)
+            stitched = await _stitch_channel_messages(
+                client,
+                raw_messages,
+                username=getattr(entity, "username", None),
+                chat_id=getattr(entity, "id", None),
+                upload_media=upload_media,
+                supplier_name=supplier_name,
+                supplier_id=supplier_id,
+            )
+            for post in stitched:
+                formatted = post.get("formatted")
                 if formatted:
                     chunks.append(formatted)
         except ChannelPrivateError as e:
@@ -424,6 +709,9 @@ async def fetch_channel_posts_page(
     limit: int = 10,
     offset_id: int = 0,
     upload_media: bool = True,
+    supplier_name: str = "",
+    supplier_id: int = 0,
+    stitch_ctx: Optional[AlbumStitchContext] = None,
 ) -> tuple[list[dict], int, int, bool]:
     """
     Одна сторінка каналу через Telethon iter_messages.
@@ -490,22 +778,21 @@ async def fetch_channel_posts_page(
 
         flood_hit = False
         try:
+            raw_messages = []
             async for message in client.iter_messages(entity, **iter_kwargs):
                 fetched += 1
                 next_offset = int(getattr(message, "id", 0) or 0)
-                public_urls: list[str] = []
-                if upload_media:
-                    public_urls = await extract_and_upload_message_media(client, message)
-                formatted = _format_post(message, public_urls)
-                if not formatted:
-                    continue
-                posts.append({
-                    "message_id": int(getattr(message, "id", 0) or 0),
-                    "formatted": formatted,
-                    "text": (getattr(message, "message", None) or "").strip(),
-                    "username": username,
-                    "chat_id": chat_id,
-                })
+                raw_messages.append(message)
+            posts = await _stitch_channel_messages(
+                client,
+                raw_messages,
+                username=username,
+                chat_id=chat_id,
+                upload_media=upload_media,
+                supplier_name=supplier_name,
+                supplier_id=supplier_id,
+                stitch_ctx=stitch_ctx,
+            )
         except ChannelPrivateError as e:
             raise TelegramChannelParseError(
                 f"Канал приватний або акаунт-парсер не має доступу до {channel_link}."
@@ -650,16 +937,171 @@ def _safe_json_array(text: str) -> list[dict]:
     return []
 
 
-def _normalize_parsed_product(item: dict) -> Optional[dict]:
+def _clean_client_description(text: str) -> str:
+    """Прибирає з опису посилання, дроп/РРЦ і артикули, зберігаючи переноси \\n."""
+    cleaned = (text or "").replace("\\n", "\n")
+    cleaned = re.sub(r"https?://\S+", "", cleaned)
+    cleaned = re.sub(
+        r"(?i)\b(дроп|drop|ррц|роздрібна\s*ціна|оптова?\s*ціна|опт)\b[:\s]*[\d.,]*\s*(грн|uah|₴)?",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"(?i)\bартикул\b\s*[:#]?\s*\S+", "", cleaned)
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in cleaned.split("\n")]
+    out: list[str] = []
+    blank = 0
+    for line in lines:
+        if not line:
+            blank += 1
+            if blank <= 1:
+                out.append("")
+            continue
+        blank = 0
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+_CHAR_META_KEYS = {
+    "source",
+    "source_url",
+    "telegram_message_id",
+    "vendor_code",
+    "sizes",
+    "media_urls",
+    "characteristics",
+    "search_tags",
+    "base_model_name",
+    "color",
+}
+
+
+def _normalize_characteristics(raw) -> list[dict]:
+    """Масив [{"name": "...", "value": "..."}] з відповіді Gemini (або старого dict)."""
+    items = []
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    elif isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = entry.get("name") or entry.get("key") or entry.get("title")
+            val = entry.get("value") if "value" in entry else entry.get("val")
+            if key:
+                items.append((key, val))
+    result: list[dict] = []
+    seen = set()
+    for key, val in items:
+        name = str(key or "").strip()[:80]
+        value = "" if val is None else str(val).strip()[:200]
+        if not name or not value or name.lower() in _CHAR_META_KEYS:
+            continue
+        fold = name.casefold()
+        if fold in seen:
+            continue
+        seen.add(fold)
+        result.append({"name": name, "value": value})
+        if len(result) >= 20:
+            break
+    return result
+
+
+def _ground_characteristic_pairs(pairs: list[dict], source_text: str) -> list[dict]:
+    """Лишає лише пари, чиє значення реально є в оригінальному тексті."""
+    blob = (source_text or "").casefold()
+    if not blob:
+        return list(pairs or [])
+    grounded: list[dict] = []
+    for pair in pairs or []:
+        value = str(pair.get("value") or "").strip()
+        if not value:
+            continue
+        needle = value.casefold()
+        tokens = [tok for tok in re.split(r"\W+", needle, flags=re.UNICODE) if len(tok) >= 3]
+        if needle in blob or (tokens and all(tok in blob for tok in tokens)):
+            grounded.append(pair)
+    return grounded
+
+
+def _normalize_search_tags(raw) -> list[str]:
+    chunks = []
+    if isinstance(raw, list):
+        chunks = raw
+    elif isinstance(raw, str):
+        chunks = re.split(r"[,;/|]+", raw)
+    seen = set()
+    tags: list[str] = []
+    for chunk in chunks:
+        value = str(chunk or "").strip().lower()[:40]
+        if not value:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        tags.append(value)
+        if len(tags) >= 16:
+            break
+    return tags
+
+
+def _normalize_sizes(raw) -> list[str]:
+    chunks = []
+    if isinstance(raw, list):
+        chunks = raw
+    elif isinstance(raw, str):
+        chunks = re.split(r"[,;/|]+", raw)
+    seen = set()
+    sizes: list[str] = []
+    for chunk in chunks:
+        value = str(chunk or "").strip()
+        if not value:
+            continue
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        sizes.append(value[:40])
+        if len(sizes) >= 40:
+            break
+    return sizes
+
+
+def _coerce_is_product(item: dict) -> bool:
+    """False лише якщо Gemini явно сказав, що це не товар."""
+    if not isinstance(item, dict):
+        return False
+    raw = item.get("is_product")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"false", "0", "no", "ні", "n", "off"}:
+        return False
+    if text in {"true", "1", "yes", "так", "y", "on"}:
+        return True
+    return bool(raw)
+
+
+def _normalize_parsed_product(item: dict, source_text: str = "") -> Optional[dict]:
+    if not _coerce_is_product(item):
+        return None
     name = str(item.get("name") or "").strip()
     if not name:
         return None
-    description = str(item.get("description") or "").strip()
+    description = _clean_client_description(str(item.get("description") or ""))
     image_urls = _normalize_image_urls(item.get("image_urls"))
     if not image_urls:
-        image_urls = extract_photo_urls_from_text(description)
+        image_urls = extract_photo_urls_from_text(str(item.get("description") or ""))
     telegram_message_id = _coerce_telegram_message_id(
         item.get("telegram_message_id") or item.get("message_id") or item.get("post_id")
+    )
+    characteristics = _ground_characteristic_pairs(
+        _normalize_characteristics(
+            item.get("characteristics")
+            if item.get("characteristics") is not None
+            else item.get("attributes")
+        ),
+        source_text,
     )
     return {
         "name": name,
@@ -668,14 +1110,85 @@ def _normalize_parsed_product(item: dict) -> Optional[dict]:
         "vendor_code": str(item.get("vendor_code") or "").strip(),
         "image_urls": image_urls,
         "telegram_message_id": telegram_message_id,
+        "characteristics": characteristics,
+        "sizes": _normalize_sizes(item.get("sizes")),
+        "search_tags": _normalize_search_tags(item.get("search_tags")),
+        "niche": str(item.get("niche") or item.get("target_niche") or "").strip()[:100],
+        "season": str(item.get("season") or "").strip()[:50],
+        "base_model_name": str(item.get("base_model_name") or "").strip()[:200],
+        "color": str(item.get("color") or "").strip()[:80],
     }
+
+
+_TELEGRAM_PARSE_SYSTEM_PROMPT = """
+ТИ ПРАЦЮЄШ ДВОМА КРОКАМИ В ОДНОМУ JSON. ЗАБОРОНЕНО вигадувати дані.
+Використовуй ТІЛЬКИ інформацію з оригінального тексту поста.
+Працюєш українською. Поверни виключно JSON-масив об'єктів. Без markdown.
+
+СПОЧАТКУ для КОЖНОГО поста визнач is_product.
+Якщо це інформаційний пост, правила доставки, новини магазину, графік роботи,
+опитування, реклама без товару чи просто текст БЕЗ конкретного товару для продажу —
+поверни is_product: false і всі інші поля залиш порожніми (name="", characteristics=[], sizes=[]).
+Такий пост НЕ є товаром.
+
+ПОРЯДОК (суворо) для is_product: true:
+ЧАСТИНА 1 (Екстракція) — спочатку заповни characteristics і sizes. Лише факти з поста.
+  Бренд, Матеріал, Пам'ять, Вага, Країна, Колір тощо — якщо їх НЕМАЄ в тексті, не додавай.
+ЧАСТИНА 2 (Аналіз) — ЛИШЕ після characteristics напиши description, потім ЖОРСТКО визнач
+  niche і season. Категорію/нішу НЕ став, поки не витягнув характеристики.
+search_tags — масив коротких рядків з характеристик і типу товару (напр. ["кросівки","зима","nike","шкіра"]).
+
+Формат ОДНОГО об'єкта:
+{
+  "is_product": true,
+  "name": "Комерційна назва для клієнта",
+  "price": "1234",
+  "characteristics": [
+    {"name": "Матеріал", "value": "шкіра натуральна"},
+    {"name": "Виробництво", "value": "Китай"},
+    {"name": "Сезон", "value": "весна, літо"}
+  ],
+  "sizes": ["40", "41", "42"],
+  "description": "Короткий вступ.\\n\\n✅ Перевага з поста\\n🛡️ Ще одна перевага з поста",
+  "search_tags": ["кросівки", "зима", "nike", "шкіра"],
+  "vendor_code": "артикул або порожній рядок",
+  "base_model_name": "Напівчеревики ESDY з швидкою шнурівкою",
+  "color": "мультикам",
+  "niche": "Мілітарі",
+  "season": "Демісезон",
+  "image_urls": ["https://..."],
+  "telegram_message_id": 123
+}
+
+ЖОРСТКІ ПРАВИЛА:
+0) is_product — обов'язкове boolean. false = не зберігати, не парсити далі.
+1) characteristics — масив об'єктів для ВСІХ знайдених технічних даних.
+   Якщо в пості факту немає — НЕ додавай пару. Не вигадуй Китай, шкіру, мембрану тощо.
+   Якщо технічних даних немає — [].
+2) sizes — усі згадані розміри. Якщо немає — []. Не пиши розміри в description.
+3) description — лише художній рерайт НАЯВНИХ переваг ПІСЛЯ characteristics.
+   Жодної технічної інформації (розмірів, матеріалів, країн). Без цін і лінків.
+   Кожен пункт списку з нового рядка (\\n) і емодзі.
+4) search_tags — 4–12 коротких слів/фраз з characteristics, sizes, назви, ніші, сезону.
+5) vendor_code — артикул з поста, якщо є. Інакше "".
+5a) base_model_name — назва моделі БЕЗ кольору (однакова для олива/мультикам цієї моделі).
+5b) color — колір з тексту («мультикам», «олива»). Якщо немає — "".
+6) niche — одне з: Мілітарі, Повсякденний, Спорт, Риболовля та Полювання,
+   Туризм, Домашній, Професійний, Свято. Обирай після characteristics.
+7) season — одне з: Зима, Літо, Демісезон, Всесезон. Якщо сезону немає — "Всесезон".
+8) price — лише цифри роздрібної ціни. Без «грн». Не плутай з дроп-ціною.
+9) telegram_message_id візьми з рядка «Пост #123».
+10) Якщо в тексті є «Фото товару: [url]» — збережи URL у image_urls.
+11) Якщо товарів немає — поверни [].
+"""
 
 
 async def parse_telegram_posts_to_products(posts_text: str) -> list[dict]:
     """
     Gemini витягує товари з тексту постів Telegram-каналу.
 
-    Повертає список словників: name, price, description, vendor_code, image_urls.
+    Повертає список словників: name, price, description, characteristics,
+    sizes, vendor_code, niche, season, image_urls.
     429/503 — ротація ключів і повтор. Помилка не піднімається нагору: [].
     """
     blob = (posts_text or "").strip()
@@ -693,17 +1206,12 @@ async def parse_telegram_posts_to_products(posts_text: str) -> list[dict]:
         return []
 
     prompt = (
-        f"Ось текст кількох постів з Telegram-каналу магазину: {blob}. "
-        "Знайди всі товари. Для кожного товару витягни дані і поверни СУВОРИЙ JSON масив об'єктів. "
-        "Формат об'єкта: { 'name': 'Назва товару', 'price': 'Ціна (тільки цифри)', "
-        "'description': 'Повний опис, розміри, тканина', "
-        "'vendor_code': 'Артикул (якщо є, інакше згенеруй з назви)', "
-        "'image_urls': ['https://...'], "
-        "'telegram_message_id': 123 }. "
-        "telegram_message_id обов'язково візьми з рядка 'Пост #123' того поста, де цей товар. "
-        "Якщо в тексті є посилання на фотографії (Фото товару: [url]), "
-        "обов'язково збережи їх у масив 'image_urls' в JSON. "
-        "Якщо товарів немає, поверни []."
+        "Ось текст кількох постів з Telegram-каналу магазину.\n"
+        "Для КОЖНОГО поста спочатку постав is_product true/false. "
+        "Якщо false — інші поля порожні. "
+        "Якщо true — витягни characteristics і sizes, "
+        "потім на їх основі description, niche, season і search_tags.\n\n"
+        f"{blob}"
     )
 
     last_error: Optional[Exception] = None
@@ -713,6 +1221,7 @@ async def parse_telegram_posts_to_products(posts_text: str) -> list[dict]:
                 try:
                     raw = await _generate_content(
                         prompt,
+                        system_instruction=_TELEGRAM_PARSE_SYSTEM_PROMPT,
                         temperature=0.1,
                         max_output_tokens=8192,
                         response_mime_type="application/json",
@@ -723,18 +1232,24 @@ async def parse_telegram_posts_to_products(posts_text: str) -> list[dict]:
                         raise
                     raw = await _generate_content(
                         prompt,
+                        system_instruction=_TELEGRAM_PARSE_SYSTEM_PROMPT,
                         temperature=0.1,
                         max_output_tokens=8192,
                         model_name=model_name,
                     )
                 items = []
+                skipped = 0
                 for item in _safe_json_array(raw):
-                    normalized = _normalize_parsed_product(item)
+                    if not _coerce_is_product(item):
+                        skipped += 1
+                        continue
+                    normalized = _normalize_parsed_product(item, blob)
                     if normalized:
                         items.append(normalized)
                 logger.info(
-                    "parse_telegram_posts_to_products: Gemini повернув %s товарів.",
+                    "parse_telegram_posts_to_products: Gemini повернув %s товарів, пропущено не-товарів: %s.",
                     len(items),
+                    skipped,
                 )
                 return items
             except Exception as e:

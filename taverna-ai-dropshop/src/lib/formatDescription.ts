@@ -10,13 +10,13 @@
  * `<img onerror=...>` в описі від постачальника). Оскільки описи товарів
  * фактично текстові (лише `<br />` для абзаців), безпечніше і достатньо
  * показати їх як звичайний текст зі збереженими переносами рядків
- * (в парі з CSS-класом `whitespace-pre-line`, який вже використовується
- * в `ProductDetail.tsx`).
+ * (в парі з CSS-класом `whitespace-pre-wrap` у `ProductDetail.tsx`).
  */
 export function formatProductDescription(raw?: string | null): string {
   if (!raw) return "";
 
   return raw
+    .replace(/\\n/g, "\n")
     // <br>, <br/>, <br />, <BR> -> перенос рядка
     .replace(/<br\s*\/?>/gi, "\n")
     // </p>, </div> -> абзац (подвійний перенос)

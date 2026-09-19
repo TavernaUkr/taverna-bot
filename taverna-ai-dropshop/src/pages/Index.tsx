@@ -138,7 +138,7 @@ const CatalogTab = ({
   const displayProducts = products.length > 0 ? products : fallbackProducts;
   
   return (
-    <div className="space-y-6 pb-28 animate-fade-in">
+    <div className="space-y-6 pb-4 animate-fade-in">
       <PromoHeroBanner />
 
       {/* Categories */}
@@ -146,8 +146,9 @@ const CatalogTab = ({
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-lg font-bold text-foreground">Категорії</h2>
           <button 
+            type="button"
             onClick={onOpenAllCategories}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 active:scale-95 transition-all min-h-[36px]"
+            className="relative z-10 flex items-center gap-1 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 active:scale-95 transition-all min-h-[36px]"
           >
             Всі <ChevronRight className="h-4 w-4" />
           </button>
@@ -169,7 +170,7 @@ const CatalogTab = ({
               icon={IconComponent}
               count={cat.product_count || 0}
               gradient={dynamicGradient}
-              onClick={() => navigate(`/search?category=${encodeURIComponent(cat.name)}`)}
+              onClick={() => navigate(`/catalog?category=${encodeURIComponent(cat.name)}`)}
             />
           );})}
         </div>
@@ -180,8 +181,9 @@ const CatalogTab = ({
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-lg font-bold text-foreground">Популярні товари</h2>
           <button 
-            onClick={onViewAllProducts}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 active:scale-95 transition-all min-h-[36px]"
+            type="button"
+            onClick={() => navigate("/catalog")}
+            className="relative z-10 flex items-center gap-1 px-3 py-1.5 rounded-lg bg-primary/10 text-primary text-sm font-medium hover:bg-primary/20 active:scale-95 transition-all min-h-[36px]"
           >
             Всі товари <ChevronRight className="h-4 w-4" />
           </button>
@@ -228,7 +230,7 @@ const CatalogTab = ({
 };
 
 const LiveTab = () => (
-  <div className="space-y-4 pb-28 animate-fade-in">
+  <div className="space-y-4 pb-4 animate-fade-in">
     <div className="flex items-center gap-2">
       <h2 className="text-lg font-bold text-foreground">Live Активність</h2>
       <span className="w-2 h-2 rounded-full bg-live animate-pulse-live" />
@@ -241,7 +243,7 @@ const LiveTab = () => (
 
 const AccountTab = () => {
   return (
-    <div className="space-y-4 pb-28 animate-fade-in">
+    <div className="space-y-4 pb-4 animate-fade-in">
       {/* Profile Dashboard with full functionality - no duplicate buttons */}
       <ProfileDashboard />
     </div>
@@ -315,7 +317,7 @@ const Index = () => {
 
   const handleSearch = (query: string) => {
     setIsSearchOpen(false);
-    navigate(`/search?q=${encodeURIComponent(query)}`);
+    navigate(`/catalog?q=${encodeURIComponent(query)}`);
   };
 
   const handleUpdateQuantity = async (id: string, quantity: number) => {
@@ -393,7 +395,7 @@ const Index = () => {
     if (niche) params.set("target_niche", niche);
     if (season) params.set("season", season);
     if (subcategoryId) params.set("sub_category", subcategoryId);
-    navigate(`/search?${params.toString()}`);
+    navigate(`/catalog?${params.toString()}`);
   };
 
   const handleTabChange = (tab: string) => {
@@ -407,7 +409,7 @@ const Index = () => {
   };
 
   const handleViewAllProducts = () => {
-    navigate('/search?all=true');
+    navigate("/catalog");
   };
 
   const renderTabContent = () => {
@@ -460,7 +462,7 @@ const Index = () => {
         onRatingsClick={() => navigate("/ratings")}
       />
       
-      <main className="relative z-0 px-3 pt-3 pb-4 w-full max-w-md mx-auto min-w-0">
+      <main className="relative z-0 px-3 pt-3 pb-40 w-full max-w-md mx-auto min-w-0">
         {renderTabContent()}
       </main>
 

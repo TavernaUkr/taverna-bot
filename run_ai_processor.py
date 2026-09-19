@@ -95,6 +95,13 @@ async def main() -> None:
 
             try:
                 ok = await processor.process_product(product, db)
+                if ok is None:
+                    await db.commit()
+                    stats["ok"] += 1
+                    print(f"ℹ️ Товар #{product_id} пропущено: це не товар (is_product=false).")
+                    if i < limit - 1:
+                        await asyncio.sleep(4)
+                    continue
                 if ok:
                     await db.commit()
                     stats["ok"] += 1

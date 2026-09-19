@@ -102,7 +102,7 @@ export const Header = ({
     : [];
 
   const moreHints: RotatingHintItem[] = [
-    { id: "search", icon: Search, label: "Пошук", tone: "primary", onClick: () => requireAuth(() => onSearchClick?.(), "/search") },
+    { id: "search", icon: Search, label: "Пошук", tone: "primary", onClick: () => requireAuth(() => onSearchClick?.(), "/catalog") },
     { id: "ratings", icon: Trophy, label: "Рейтинги", tone: "rating", onClick: () => requireAuth(() => (onRatingsClick ? onRatingsClick() : navigate("/ratings")), "/ratings") },
     { id: "promo", icon: Gift, label: "Акції", tone: "promo", onClick: () => requireAuth(() => (onPromoClick ? onPromoClick() : navigate("/promos")), "/promos") },
     { id: "referrals", icon: Users, label: "Реферали", tone: "referral", onClick: () => requireAuth(() => setIsReferralsOpen(true), "/") },
@@ -114,7 +114,7 @@ export const Header = ({
 
   return (
     <>
-      <header className="sticky top-0 z-40 bg-card border-b border-border w-full max-w-[100vw] relative overflow-visible">
+      <header className="sticky top-0 z-50 bg-card border-b border-border w-full max-w-[100vw] relative overflow-visible">
         <div className="flex items-center gap-2 px-2 py-1.5 w-full max-w-md mx-auto min-w-0">
           <button onClick={() => setIsInfoOpen(true)} className="relative active:scale-95 transition-transform shrink-0">
             <img

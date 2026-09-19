@@ -1,4 +1,5 @@
 import { ShoppingCart, Heart, Package, Star, TrendingUp, Store } from "lucide-react";
+import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { LowStockBadge } from "./product/LowStockBadge";
 import { VerifiedBadge } from "./ui/verified-badge";
@@ -120,6 +121,7 @@ export const ProductCard = ({
   const isVerifiedSupplier = supplierVerified || (supplierRating !== undefined && supplierRating >= 4.5);
 
   const handleAddToCart = (e: React.MouseEvent) => {
+    e.preventDefault();
     e.stopPropagation();
     vibrate("light");
     if (hasOptions) {
@@ -143,15 +145,17 @@ export const ProductCard = ({
   };
 
   const handleToggleFavorite = (e: React.MouseEvent) => {
+    e.preventDefault();
     e.stopPropagation();
     vibrate("light");
     onToggleFavorite?.();
   };
 
   return (
-    <div
+    <Link
+      to={`/product/${id}`}
       className={cn(
-        "group relative bg-card rounded-xl overflow-hidden border border-border active:scale-[0.98] transition-transform duration-150",
+        "group relative block bg-card rounded-xl overflow-hidden border border-border active:scale-[0.98] transition-transform duration-150 cursor-pointer",
         isBoosted && "ring-1.5 ring-primary/40"
       )}
       onClick={onClick}
@@ -172,7 +176,7 @@ export const ProductCard = ({
             muted
             loop
             playsInline
-            className="absolute inset-0 w-full h-full object-cover opacity-0 group-hover:opacity-100 transition-opacity duration-300 z-10"
+            className="absolute inset-0 w-full h-full object-cover opacity-0 group-hover:opacity-100 transition-opacity duration-300 z-10 pointer-events-none"
             onMouseEnter={(e) => e.currentTarget.play()}
             onMouseLeave={(e) => { e.currentTarget.pause(); e.currentTarget.currentTime = 0; }}
           />
@@ -201,6 +205,7 @@ export const ProductCard = ({
 
         {/* Favorite button */}
         <button
+          type="button"
           onClick={handleToggleFavorite}
           className={cn(
             "absolute right-2 w-8 h-8 rounded-full flex items-center justify-center z-20",
@@ -240,6 +245,7 @@ export const ProductCard = ({
             модалку вибору варіанту замість "наосліп" додавання без variant_id */}
         {inStock && (
           <button
+            type="button"
             onClick={handleAddToCart}
             aria-label={hasOptions ? "Обрати розмір/колір" : "Додати в кошик"}
             title={hasOptions ? "Обрати розмір/колір" : "Додати в кошик"}
@@ -344,7 +350,13 @@ export const ProductCard = ({
         </div>
 
         {/* Find similar */}
-        <div className="mt-2 pt-2 border-t border-border/50">
+        <div
+          className="mt-2 pt-2 border-t border-border/50"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+        >
           <FindSimilarButton
             productName={name}
             productCategory={category}
@@ -366,6 +378,6 @@ export const ProductCard = ({
         stockQuantity={stockQuantity}
         onAddToCart={handleVariantAddToCart}
       />
-    </div>
+    </Link>
   );
 };

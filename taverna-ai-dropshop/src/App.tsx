@@ -106,6 +106,7 @@ function AnimatedRoutes() {
             <Route path="/partner" element={<SupplierRegistration />} />
             <Route path="/supplier" element={<SupplierDashboard />} />
             <Route path="/product/:id" element={<ProductDetail />} />
+            <Route path="/catalog" element={<SearchResults />} />
             <Route path="/search" element={<SearchResults />} />
             <Route path="/manager" element={<Manager />} />
             <Route path="/admin-dashboard" element={<AdminDashboard />} />
@@ -143,6 +144,23 @@ function AnimatedRoutes() {
   );
 }
 
+function GlobalFloatingWidgets() {
+  const location = useLocation();
+  const hideGlobalButtons =
+    location.pathname.includes("/product/") ||
+    location.pathname.includes("/supplier/");
+
+  if (hideGlobalButtons) return null;
+
+  return (
+    <>
+      <FloatingToolsContainer />
+      <FloatingDevRoleSwitcher />
+      <GlobalAIWidget />
+    </>
+  );
+}
+
 const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
@@ -154,10 +172,7 @@ const App = () => (
             <BrowserRouter>
               <FloatingToolsProvider>
                 <AnimatedRoutes />
-                <FloatingToolsContainer />
-                <FloatingDevRoleSwitcher />
-                {/* Глобальний віджет черги: поза <Routes>, не розмонтовується при навігації */}
-                <GlobalAIWidget />
+                <GlobalFloatingWidgets />
               </FloatingToolsProvider>
             </BrowserRouter>
 

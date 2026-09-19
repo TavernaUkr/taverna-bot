@@ -6,15 +6,35 @@ Round-robin ротація Gemini API-ключів.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
-from config_reader import config
+from config_reader import config, sanitize_gemini_api_key
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_COOLDOWN = timedelta(hours=1)
+
+
+def build_genai_client(api_key: str):
+    """
+    google-genai хибно вважає ключі AQ... OAuth-токенами і шле Bearer → 401.
+    Примусово ставимо заголовок x-goog-api-key.
+    """
+    try:
+        from google import genai
+    except ImportError as e:
+        raise RuntimeError("google-genai не встановлено") from e
+    key = sanitize_gemini_api_key(api_key)
+    if not key:
+        raise ValueError("Порожній Gemini API-ключ")
+    return genai.Client(
+        api_key=key,
+        vertexai=False,
+        http_options={"headers": {"x-goog-api-key": key}},
+    )
 
 
 class AllKeysExhaustedError(Exception):
@@ -33,9 +53,18 @@ class GeminiKeyManager:
         self._cooldown = cooldown
         self._index = 0
         self._slots: List[Dict[str, object]] = []
+        if keys is None:
+            raw_blob = os.environ.get("GEMINI_API_KEYS") or os.environ.get("GEMINI_API_KEY") or ""
+            raw_keys = sanitize_gemini_api_key(raw_blob).replace(";", ",").split(",")
+        else:
+            raw_keys = list(keys)
+        self.keys = [
+            sanitize_gemini_api_key(k)
+            for k in raw_keys
+            if str(k or "").strip()
+        ]
         seen = set()
-        for raw in keys or []:
-            key = str(raw or "").strip()
+        for key in self.keys:
             if not key or key in seen:
                 continue
             seen.add(key)
@@ -46,6 +75,7 @@ class GeminiKeyManager:
                     "exhausted_at": None,
                 }
             )
+        self.keys = [str(slot["key"]) for slot in self._slots]
         if self._slots:
             logger.info("GeminiKeyManager: завантажено %s ключ(ів).", len(self._slots))
         else:
@@ -93,7 +123,7 @@ class GeminiKeyManager:
             )
 
     def mark_key_exhausted(self, key: str) -> None:
-        raw = str(key or "").strip()
+        raw = sanitize_gemini_api_key(key)
         if not raw:
             return
         with self._lock:

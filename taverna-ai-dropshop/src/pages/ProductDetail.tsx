@@ -10,10 +10,12 @@ import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import {
   fetchProductById,
+  fetchProductColorVariants,
   BackendApiError,
   type BackendProduct,
   type BackendProductVariant,
   type BackendProductOption,
+  type BackendProductColorVariant,
 } from "@/lib/backendApi";
 import { formatProductDescription } from "@/lib/formatDescription";
 import { useCartContext } from "@/contexts/CartContext";
@@ -32,10 +34,8 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { ProductVariantSelector } from "@/components/product/ProductVariantSelector";
-import { ShareButton } from "@/components/product/ShareButton";
 import { AIVerdict } from "@/components/product/AIVerdict";
 import { LowStockBadge } from "@/components/product/LowStockBadge";
-import { ProductSpecs } from "@/components/product/ProductSpecs";
 import { ReportProductModal } from "@/components/product/ReportProductModal";
 import { WarrantyModal } from "@/components/product/WarrantyModal";
 import { ReturnPolicyModal } from "@/components/product/ReturnPolicyModal";
@@ -68,6 +68,7 @@ interface Product {
   in_stock?: boolean;
   stock_quantity?: number;
   attributes?: Record<string, unknown>;
+  characteristics?: { name: string; value: string }[];
   warranty_info?: string; // AI-generated warranty info
   supplier_id?: string;
   video_url?: string;
@@ -87,16 +88,46 @@ interface Product {
   options?: BackendProductOption[];
 }
 
-/**
- * Мапить товар з нашого FastAPI-бекенду (GET /api/v1/products/{id}) у формат,
- * який очікує UI сторінки товару. Той самий підхід, що в useProducts.tsx
- * (mapBackendProductToUi), але з локальним типом Product цієї сторінки —
- * тут `category` без `null` (лише `undefined`), тож тримаємо мапер окремо.
- */
+const CHARACTERISTIC_META_KEYS = new Set([
+  "source",
+  "source_url",
+  "telegram_message_id",
+  "vendor_code",
+  "sizes",
+  "media_urls",
+  "characteristics",
+  "search_tags",
+  "base_model_name",
+  "color",
+]);
+
+function mapProductCharacteristics(raw?: Record<string, unknown> | null): { name: string; value: string }[] {
+  if (!raw || typeof raw !== "object") return [];
+  const pairs: { name: string; value: string }[] = [];
+  const fromArray = raw.characteristics;
+  if (Array.isArray(fromArray)) {
+    for (const entry of fromArray) {
+      if (!entry || typeof entry !== "object") continue;
+      const row = entry as { name?: unknown; value?: unknown };
+      const name = String(row.name || "").trim();
+      const value = String(row.value ?? "").trim();
+      if (name && value) pairs.push({ name, value });
+    }
+    if (pairs.length) return pairs;
+  }
+  for (const [key, value] of Object.entries(raw)) {
+    if (CHARACTERISTIC_META_KEYS.has(key.toLowerCase())) continue;
+    if (value == null || typeof value === "object") continue;
+    const text = String(value).trim();
+    if (key && text) pairs.push({ name: key, value: text });
+  }
+  return pairs;
+}
 function mapBackendProductToDetail(bp: BackendProduct): Product {
   const variants = bp.variants ?? [];
-  const availableVariants = variants.filter((v) => v.is_available && v.quantity > 0);
-  const primaryVariant = availableVariants[0] ?? variants[0];
+  const stockedVariants = variants.filter((v) => (v.quantity || 0) > 0);
+  const availableVariants = stockedVariants.filter((v) => v.is_available);
+  const primaryVariant = availableVariants[0] ?? stockedVariants[0] ?? variants[0];
   const totalStock = variants.reduce((sum, v) => sum + (v.quantity || 0), 0);
 
   const options = bp.options ?? [];
@@ -115,7 +146,7 @@ function mapBackendProductToDetail(bp: BackendProduct): Product {
     sizes: sizeOption?.values.map((v) => v.value),
     colors: colorOption?.values.map((v) => v.value),
     vendor_code: bp.sku,
-    in_stock: availableVariants.length > 0,
+    in_stock: stockedVariants.length > 0,
     stock_quantity: totalStock,
     category: categoryTag
       ? {
@@ -129,6 +160,8 @@ function mapBackendProductToDetail(bp: BackendProduct): Product {
       : undefined,
     variants,
     options,
+    attributes: bp.attributes ?? undefined,
+    characteristics: mapProductCharacteristics(bp.attributes as Record<string, unknown> | undefined),
   };
 }
 
@@ -156,6 +189,7 @@ const ProductDetail = () => {
   const [selectedImage, setSelectedImage] = useState(0);
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
   const [selectedColor, setSelectedColor] = useState<string | null>(null);
+  const [relatedColors, setRelatedColors] = useState<BackendProductColorVariant[]>([]);
   const [quantity, setQuantity] = useState(1);
   const [activeTab, setActiveTab] = useState("description");
   const [isGalleryOpen, setIsGalleryOpen] = useState(false);
@@ -176,7 +210,7 @@ const ProductDetail = () => {
     if (!product?.variants?.length) return undefined;
 
     const hasSize = !!product.sizes?.length;
-    const hasColor = !!product.colors?.length;
+    const hasColor = relatedColors.length <= 1 && !!product.colors?.length;
 
     // Товар без розмірів/кольорів -> завжди один (перший доступний) варіант.
     if (!hasSize && !hasColor) {
@@ -201,7 +235,7 @@ const ProductDetail = () => {
       if (hasColor && !ids.includes(colorValueId as number)) return false;
       return true;
     });
-  }, [product, selectedSize, selectedColor]);
+  }, [product, selectedSize, selectedColor, relatedColors]);
 
   // Ціна/наявність, що реально відповідають ОБРАНІЙ комбінації розмір+колір
   // (а не просто першому варіанту товару в каталозі).
@@ -210,6 +244,9 @@ const ProductDetail = () => {
   const isSelectedVariantAvailable = selectedVariant
     ? selectedVariant.is_available && selectedVariant.quantity > 0
     : product?.in_stock ?? false;
+
+  const showRelatedColors = relatedColors.length > 1;
+  const showInlineColors = !showRelatedColors && !!product?.colors?.length;
 
   // Якщо переключили варіант і в ньому залишків менше за обрану кількість — коригуємо кількість.
   useEffect(() => {
@@ -233,6 +270,8 @@ const ProductDetail = () => {
         return;
       }
 
+      setRelatedColors([]);
+
       // GET /api/v1/products/{id} — окремий ендпоінт, не тягне весь каталог.
       const backendProduct = await fetchProductById(id);
 
@@ -244,10 +283,21 @@ const ProductDetail = () => {
 
       const productData = mapBackendProductToDetail(backendProduct);
       setProduct(productData);
+      setSelectedImage(0);
+      setSelectedSize(null);
+      setSelectedColor(null);
 
       // Auto-select first color if available
       if (productData.colors?.length) {
         setSelectedColor(productData.colors[0]);
+      }
+
+      try {
+        const variants = await fetchProductColorVariants(id);
+        setRelatedColors(Array.isArray(variants) ? variants : []);
+      } catch (colorErr) {
+        console.error("Error fetching product colors:", colorErr);
+        setRelatedColors([]);
       }
     } catch (err) {
       const message = err instanceof BackendApiError ? err.message : "Товар не знайдено";
@@ -283,12 +333,12 @@ const ProductDetail = () => {
       toast.error("Оберіть розмір");
       return;
     }
-    if (product.colors?.length && !selectedColor) {
+    if (showInlineColors && !selectedColor) {
       toast.error("Оберіть колір");
       return;
     }
     // Розмір/колір обрано, але саме такої комбінації немає серед варіантів товару
-    if ((product.sizes?.length || product.colors?.length) && !selectedVariant) {
+    if ((product.sizes?.length || showInlineColors) && !selectedVariant) {
       toast.error("Цієї комбінації розмір/колір немає в наявності");
       return;
     }
@@ -316,23 +366,16 @@ const ProductDetail = () => {
     toast.success(`${product.name} додано до кошика`);
   };
 
-  const handleShare = async () => {
+  const handleShare = () => {
     if (!product) return;
-    
-    if (navigator.share) {
-      try {
-        await navigator.share({
-          title: product.name,
-          text: `${product.name} - ${product.price} ₴`,
-          url: window.location.href,
-        });
-      } catch {
-        // User cancelled
-      }
-    } else {
-      navigator.clipboard.writeText(window.location.href);
-      toast.success("Посилання скопійовано");
+    const productUrl = `${window.location.origin}/product/${product.id}`;
+    const telegramUrl = `https://t.me/share/url?url=${encodeURIComponent(productUrl)}`;
+    const tg = (window as unknown as { Telegram?: { WebApp?: { openTelegramLink?: (url: string) => void } } }).Telegram?.WebApp;
+    if (tg?.openTelegramLink) {
+      tg.openTelegramLink(telegramUrl);
+      return;
     }
+    window.open(telegramUrl, "_blank");
   };
 
   const handleSubmitReview = async () => {
@@ -416,9 +459,9 @@ const ProductDetail = () => {
   const productIsFavorite = isFavorite(product.id);
 
   return (
-    <div className="min-h-screen bg-background pb-28">
+    <div className="min-h-screen bg-background pb-40">
       {/* Header */}
-      <header className="sticky top-0 z-40 bg-card/95 backdrop-blur-md border-b border-border">
+      <header className="sticky top-0 z-50 bg-card/95 backdrop-blur-md border-b border-border">
         <div className="flex items-center justify-between h-14 px-4">
           <button
             onClick={() => navigate(-1)}
@@ -512,7 +555,7 @@ const ProductDetail = () => {
                 <BreadcrumbItem>
                   <BreadcrumbLink asChild>
                     <Link 
-                      to={`/search?category=${product.category.parent.id}`}
+                      to={`/catalog?category=${encodeURIComponent(product.category.parent.id)}`}
                       className="text-muted-foreground hover:text-foreground"
                     >
                       {product.category.parent.name}
@@ -528,7 +571,7 @@ const ProductDetail = () => {
                 <BreadcrumbItem>
                   <BreadcrumbLink asChild>
                     <Link 
-                      to={`/search?category=${product.category.id}`}
+                      to={`/catalog?category=${encodeURIComponent(product.category.id)}`}
                       className="text-muted-foreground hover:text-foreground"
                     >
                       {product.category.name}
@@ -697,9 +740,19 @@ const ProductDetail = () => {
             )}
           </div>
           {/* Title with Share Button */}
-          <div className="flex items-start justify-between gap-2">
-            <h1 className="text-xl font-bold text-foreground flex-1">{product.name}</h1>
-            <ShareButton productId={product.id} productName={product.name} />
+          <div className="flex flex-row justify-between items-start gap-4">
+            <h1 className="whitespace-normal break-words text-xl font-bold w-full pr-2 text-foreground">
+              {product.name}
+            </h1>
+            <button
+              type="button"
+              onClick={handleShare}
+              className="p-2 bg-gray-100 rounded-full shrink-0"
+              aria-label="Поділитися"
+              title="Поділитися"
+            >
+              <Share2 className="w-5 h-5 text-gray-500" />
+            </button>
           </div>
           
           {/* Rating Summary */}
@@ -765,10 +818,65 @@ const ProductDetail = () => {
           />
         )}
 
-        {product.colors && product.colors.length > 0 && (
+        {showRelatedColors && (
+          <div className="space-y-2">
+            <div className="text-sm font-medium">Колір</div>
+            <div className="flex flex-wrap gap-3">
+              {relatedColors.map((variant) => {
+                const isActive = String(variant.product_id) === String(product.id);
+                const label = variant.color || "колір";
+                return (
+                  <button
+                    key={variant.product_id}
+                    type="button"
+                    onClick={() => {
+                      if (isActive) return;
+                      hapticImpact("light");
+                      navigate(`/product/${variant.product_id}`);
+                    }}
+                    className="flex flex-col items-center gap-1 min-w-[56px] active:scale-95"
+                    aria-label={label}
+                    aria-current={isActive ? "true" : undefined}
+                  >
+                    {variant.image_url ? (
+                      <span
+                        className={cn(
+                          "h-12 w-12 rounded-full overflow-hidden border-2 bg-muted",
+                          isActive ? "border-primary" : "border-transparent"
+                        )}
+                      >
+                        <img
+                          src={variant.image_url}
+                          alt={label}
+                          className="h-full w-full object-cover"
+                        />
+                      </span>
+                    ) : (
+                      <span
+                        className={cn(
+                          "h-12 min-w-[48px] px-2 rounded-full border text-xs flex items-center justify-center",
+                          isActive ? "border-primary bg-primary/10" : "border-border bg-muted/50"
+                        )}
+                      >
+                        {label}
+                      </span>
+                    )}
+                    {variant.color && variant.image_url ? (
+                      <span className="text-[11px] text-muted-foreground max-w-[72px] truncate">
+                        {variant.color}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {showInlineColors && (
           <ProductVariantSelector
             label="Колір"
-            options={product.colors}
+            options={product.colors ?? []}
             selected={selectedColor}
             onSelect={(color) => {
               setSelectedColor(color);
@@ -786,11 +894,11 @@ const ProductDetail = () => {
         )}
 
         {/* Validation message */}
-        {((product.sizes?.length && !selectedSize) || (product.colors?.length && !selectedColor)) && (
+        {((product.sizes?.length && !selectedSize) || (showInlineColors && !selectedColor)) && (
           <p className="text-sm text-warning bg-warning/10 rounded-lg px-3 py-2">
             ⚠️ {!selectedSize && product.sizes?.length ? "Оберіть розмір" : ""} 
-            {!selectedSize && product.sizes?.length && !selectedColor && product.colors?.length ? " та " : ""}
-            {!selectedColor && product.colors?.length ? "Оберіть колір" : ""}
+            {!selectedSize && product.sizes?.length && showInlineColors && !selectedColor ? " та " : ""}
+            {showInlineColors && !selectedColor ? "Оберіть колір" : ""}
           </p>
         )}
 
@@ -885,37 +993,40 @@ const ProductDetail = () => {
               {product.ai_description && (
                 <div className="bg-gradient-to-r from-primary/5 to-accent/5 rounded-xl p-4 border border-primary/10">
                   <p className="text-sm font-medium text-primary mb-2">✨ Повний опис від AI</p>
-                  <p className="text-sm text-foreground whitespace-pre-line leading-relaxed">
-                    {product.ai_description}
+                  <p className="text-left text-sm leading-relaxed text-gray-700 whitespace-pre-wrap">
+                    {formatProductDescription(product.ai_description)}
                   </p>
                 </div>
               )}
               
-              {/* Original Description — <br /> та інші HTML-теги з фіда постачальника
-                  прибираємо (formatProductDescription), переноси рядків лишаємо
-                  завдяки whitespace-pre-line */}
-              <p className="text-sm text-muted-foreground whitespace-pre-line leading-relaxed">
+              {/* Опис: HTML-теги прибираємо, \\n лишаємо (whitespace-pre-wrap) */}
+              <p className="text-left text-sm leading-relaxed text-gray-700 whitespace-pre-wrap">
                 {formatProductDescription(product.description) || "Опис товару відсутній"}
               </p>
             </div>
           </TabsContent>
 
           <TabsContent value="specs" className="mt-4">
-            <ProductSpecs
-              attributes={product.attributes}
-              categoryName={product.category?.name}
-              sizes={product.sizes}
-              colors={product.colors}
-              brand={product.brand}
-              model={product.model}
-            />
-            
-            {/* Vendor code always shown */}
+            {(product.characteristics?.length ?? 0) > 0 ? (
+              <div>
+                {product.characteristics!.map((char, index) => (
+                  <div key={`${char.name}-${index}`} className="flex justify-between py-2 border-b">
+                    <span className="text-gray-500">{char.name}</span>
+                    <span className="font-medium text-right">{char.value}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-6">
+                Характеристики не вказані
+              </p>
+            )}
+
             {product.vendor_code && (
-              <div className="mt-4 pt-4 border-t border-border">
-                <div className="flex justify-between py-2">
-                  <span className="text-sm text-muted-foreground">Артикул</span>
-                  <span className="text-sm font-medium font-mono">{product.vendor_code}</span>
+              <div className="mt-4 pt-2">
+                <div className="flex justify-between py-2 border-b">
+                  <span className="text-gray-500">Артикул</span>
+                  <span className="font-medium text-right font-mono">{product.vendor_code}</span>
                 </div>
               </div>
             )}
@@ -1056,7 +1167,7 @@ const ProductDetail = () => {
         </Tabs>
       </div>
 
-      <div className="fixed bottom-0 left-0 right-0 bg-card border-t border-border p-4 safe-area-pb z-50">
+      <div className="fixed bottom-0 left-0 right-0 z-50 border-t border-border p-4 safe-area-pb bg-card">
         <div className="flex items-center gap-3">
           <div className="flex-1">
             <span className="text-xs text-muted-foreground">Разом:</span>
@@ -1069,7 +1180,7 @@ const ProductDetail = () => {
             disabled={
               !isSelectedVariantAvailable ||
               (!!product.sizes?.length && !selectedSize) ||
-              (!!product.colors?.length && !selectedColor)
+              (showInlineColors && !selectedColor)
             }
             className={cn(
               "flex-1 py-6 rounded-xl font-semibold text-base",
@@ -1077,7 +1188,7 @@ const ProductDetail = () => {
             )}
           >
             <ShoppingCart className="h-5 w-5" />
-            {(product.sizes?.length && !selectedSize) || (product.colors?.length && !selectedColor)
+            {(product.sizes?.length && !selectedSize) || (showInlineColors && !selectedColor)
               ? "Оберіть варіант"
               : !isSelectedVariantAvailable
                 ? "Немає в наявності"

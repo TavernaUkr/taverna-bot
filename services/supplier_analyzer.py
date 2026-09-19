@@ -14,7 +14,7 @@ except ImportError:
     genai_errors = None  # type: ignore
 
 from config_reader import config
-from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager
+from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager, build_genai_client
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ class SupplierAnalyzer:
                 active_key = self._key_manager.get_next_active_key()
             except AllKeysExhaustedError as e:
                 raise Exception("429 Rate Limit") from e
-            client = genai.Client(api_key=active_key)
+            client = build_genai_client(active_key)
             cfg_kwargs: Dict[str, Any] = {
                 "temperature": 0.2,
                 "max_output_tokens": 800,

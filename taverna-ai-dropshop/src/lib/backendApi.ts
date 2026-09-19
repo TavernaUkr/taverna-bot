@@ -57,11 +57,18 @@ export interface BackendProduct {
   season?: string | null;
   target_niche?: string | null;
   gender?: string | null;
-  attributes?: Record<string, string> | null;
+  attributes?: Record<string, unknown> | null;
+  search_tags?: string[] | null;
   supplier_name?: string | null;
   options: BackendProductOption[];
   variants: BackendProductVariant[];
   share_url: string;
+}
+
+export interface BackendProductColorVariant {
+  product_id: number;
+  color: string;
+  image_url?: string | null;
 }
 
 export interface BackendCategorySub {
@@ -87,6 +94,11 @@ export interface BackendFilterAttribute {
   values: string[];
 }
 
+export interface BackendDynamicFilter {
+  name: string;
+  options: string[];
+}
+
 export interface BackendProductFilters {
   target_niche: string[];
   season: string[];
@@ -94,6 +106,38 @@ export interface BackendProductFilters {
   attributes: BackendFilterAttribute[];
   sub_categories?: BackendCategorySub[];
   total?: number;
+  categories?: string[];
+  dynamic_filters?: BackendDynamicFilter[];
+}
+
+export interface BackendProductList {
+  items: BackendProduct[];
+  total: number;
+}
+
+type QueryValue = string | string[] | undefined;
+
+export type BackendProductsQuery = {
+  category?: QueryValue;
+  main_category?: QueryValue;
+  sub_category?: QueryValue;
+  season?: QueryValue;
+  target_niche?: QueryValue;
+  niche?: QueryValue;
+  gender?: QueryValue;
+  /** JSON-характеристики: ключ «Виробник» → query ?char_Виробник=Китай */
+  characteristics?: Record<string, QueryValue>;
+  limit?: number;
+  offset?: number;
+};
+
+function unwrapProductList(data: BackendProduct[] | BackendProductList | null | undefined): BackendProductList {
+  if (Array.isArray(data)) {
+    return { items: data, total: data.length };
+  }
+  const items = Array.isArray(data?.items) ? data.items : [];
+  const total = typeof data?.total === "number" ? data.total : items.length;
+  return { items, total };
 }
 
 // --- Помилки ----------------------------------------------------------------
@@ -200,8 +244,6 @@ async function backendGet<T>(
 export const CATEGORIES_ENDPOINT = `${API_BASE_URL}/api/v1/products/categories`;
 export const FILTERS_ENDPOINT = `${API_BASE_URL}/api/v1/products/filters`;
 
-type QueryValue = string | string[] | undefined;
-
 function appendQueryValues(params: URLSearchParams, key: string, value: QueryValue) {
   if (!value) return;
   const items = Array.isArray(value) ? value : [value];
@@ -209,6 +251,19 @@ function appendQueryValues(params: URLSearchParams, key: string, value: QueryVal
     const trimmed = String(item).trim();
     if (trimmed) params.append(key, trimmed);
   }
+}
+
+function appendCharFilters(
+  params: URLSearchParams,
+  characteristics?: Record<string, QueryValue>
+) {
+  if (!characteristics) return;
+  Object.entries(characteristics).forEach(([name, value]) => {
+    const trimmedName = String(name || "").trim();
+    if (!trimmedName) return;
+    const key = trimmedName.startsWith("char_") ? trimmedName : `char_${trimmedName}`;
+    appendQueryValues(params, key, value);
+  });
 }
 
 /** Отримати AI-категорії для меню MiniApp (без сирих MyDrop ID). */
@@ -238,46 +293,47 @@ export async function fetchBackendFilters(
   return backendGet<BackendProductFilters>(qs ? `${FILTERS_ENDPOINT}?${qs}` : FILTERS_ENDPOINT);
 }
 
-/** Отримати товари з нашого FastAPI-бекенду (пагінація, щоб не вішати сервер). */
-export async function fetchBackendProducts(filters?: {
-  category?: QueryValue;
-  main_category?: QueryValue;
-  sub_category?: QueryValue;
-  season?: QueryValue;
-  target_niche?: QueryValue;
-  niche?: QueryValue;
-  gender?: QueryValue;
-  limit?: number;
-  offset?: number;
-}): Promise<BackendProduct[]> {
+/** Каталог: GET /api/v1/products/?limit=50&offset=0. Порожні фільтри не передаємо. */
+export async function fetchBackendProductList(
+  filters?: BackendProductsQuery
+): Promise<BackendProductList> {
   const params = new URLSearchParams();
   appendQueryValues(params, "category", filters?.category ?? filters?.main_category);
   appendQueryValues(params, "sub_category", filters?.sub_category);
   appendQueryValues(params, "season", filters?.season);
   appendQueryValues(params, "target_niche", filters?.target_niche ?? filters?.niche);
   appendQueryValues(params, "gender", filters?.gender);
+  appendCharFilters(params, filters?.characteristics);
   const limit = Math.min(Math.max(filters?.limit ?? 50, 1), 100);
   const offset = Math.max(filters?.offset ?? 0, 0);
   params.set("limit", String(limit));
   params.set("offset", String(offset));
-  return backendGet<BackendProduct[]>(`${PRODUCTS_ENDPOINT}?${params.toString()}`);
+  const data = await backendGet<BackendProduct[] | BackendProductList>(
+    `${PRODUCTS_ENDPOINT}?${params.toString()}`
+  );
+  return unwrapProductList(data);
+}
+
+/** Отримати товари з нашого FastAPI-бекенду (пагінація, щоб не вішати сервер). */
+export async function fetchBackendProducts(
+  filters?: BackendProductsQuery
+): Promise<BackendProduct[]> {
+  const { items } = await fetchBackendProductList(filters);
+  return items;
 }
 
 /** Кілька сторінок по 50, максимум 500 товарів — без одного гігантського запиту. */
 export async function fetchBackendProductsPaged(
-  filters?: Omit<
-    NonNullable<Parameters<typeof fetchBackendProducts>[0]>,
-    "limit" | "offset"
-  >,
+  filters?: Omit<BackendProductsQuery, "limit" | "offset">,
   maxItems = 500
 ): Promise<BackendProduct[]> {
   const all: BackendProduct[] = [];
   const pageSize = 50;
   let offset = 0;
   while (all.length < maxItems) {
-    const page = await fetchBackendProducts({ ...filters, limit: pageSize, offset });
-    all.push(...page);
-    if (page.length < pageSize) break;
+    const page = await fetchBackendProductList({ ...filters, limit: pageSize, offset });
+    all.push(...page.items);
+    if (page.items.length < pageSize || all.length >= page.total) break;
     offset += pageSize;
   }
   return all;
@@ -322,6 +378,18 @@ export async function fetchProductById(id: string | number): Promise<BackendProd
   }
 
   return (await response.json()) as BackendProduct;
+}
+
+/**
+ * Інші кольори тієї ж моделі: GET /api/v1/products/{id}/colors
+ * Порожній масив, якщо базової моделі ще немає в attributes.
+ */
+export async function fetchProductColorVariants(
+  id: string | number
+): Promise<BackendProductColorVariant[]> {
+  const url = `${PRODUCTS_ENDPOINT}${encodeURIComponent(String(id))}/colors`;
+  const data = await backendGet<BackendProductColorVariant[]>(url);
+  return Array.isArray(data) ? data : [];
 }
 
 /**

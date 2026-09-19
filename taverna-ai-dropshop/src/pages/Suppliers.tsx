@@ -148,7 +148,7 @@ const Suppliers = () => {
 
   const handleSearch = (query: string) => {
     setIsSearchOpen(false);
-    navigate(`/search?q=${encodeURIComponent(query)}`);
+    navigate(`/catalog?q=${encodeURIComponent(query)}`);
   };
 
   return (

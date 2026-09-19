@@ -5,13 +5,15 @@ import logging
 import re
 from typing import Any, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, or_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.db import AsyncSessionLocal
 from database.models import (
     Product,
     ProductAIStatus,
+    ProductOption,
+    ProductOptionValue,
     ProductStatus,
     ProductVariant,
     Supplier,
@@ -19,9 +21,13 @@ from database.models import (
 )
 from services.product_service import calculate_final_price
 from services.telegram_parser import (
+    AlbumStitchContext,
     TelegramChannelParseError,
     fetch_channel_posts_page,
     parse_telegram_posts_to_products,
+    _normalize_characteristics,
+    _normalize_search_tags,
+    hydrate_posts_media,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,6 +132,194 @@ async def _find_live_product(
     return None
 
 
+async def _find_product_by_vendor_or_name(
+    db: AsyncSession,
+    supplier_id: int,
+    *,
+    vendor_code: str,
+    name: str,
+) -> Optional[Product]:
+    """Той самий товар: supplier_id + (артикул АБО точна назва)."""
+    vendor = (vendor_code or "").strip()
+    title = (name or "").strip()
+    filters = []
+    if vendor:
+        vendor_json = Product.attributes["vendor_code"].as_string()
+        filters.append(Product.supplier_sku == vendor)
+        filters.append(func.lower(vendor_json) == vendor.casefold())
+    if title:
+        filters.append(func.lower(Product.name) == title.casefold())
+    if not filters:
+        return None
+    stmt = (
+        select(Product)
+        .where(
+            Product.supplier_id == supplier_id,
+            Product.status.notin_((ProductStatus.deleted, ProductStatus.archived)),
+            or_(*filters),
+        )
+        .order_by(Product.id.asc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalars().first()
+
+
+_ATTR_META_KEYS = {
+    "source",
+    "source_url",
+    "telegram_message_id",
+    "vendor_code",
+    "sizes",
+    "media_urls",
+    "characteristics",
+    "search_tags",
+    "base_model_name",
+    "color",
+}
+
+
+def _product_attributes_from_item(
+    item: dict,
+    *,
+    source_url: str,
+    message_id: int,
+    vendor_code: str,
+) -> dict:
+    pairs = _normalize_characteristics(
+        item.get("characteristics")
+        if item.get("characteristics") is not None
+        else item.get("attributes")
+    )
+    attrs = {
+        "source": "telegram",
+        "source_url": source_url,
+        "telegram_message_id": message_id,
+        "vendor_code": vendor_code,
+        "characteristics": pairs,
+    }
+    model_name = str(item.get("base_model_name") or "").strip()[:200]
+    if model_name:
+        attrs["base_model_name"] = model_name
+    shade = str(item.get("color") or "").strip()[:80]
+    if not shade:
+        for pair in pairs:
+            name = str(pair.get("name") or "").strip().casefold()
+            if name in {"колір", "цвет", "color", "забарвлення"}:
+                shade = str(pair.get("value") or "").strip()[:80]
+                if shade:
+                    break
+    if shade:
+        attrs["color"] = shade
+    if not model_name:
+        title = str(item.get("name") or "").strip()
+        if title and shade and title.casefold().endswith(shade.casefold()):
+            title = title[: len(title) - len(shade)].rstrip(" -,/()")
+        if title:
+            attrs["base_model_name"] = title[:200]
+    tags = _normalize_search_tags(item.get("search_tags"))
+    if tags:
+        attrs["search_tags"] = tags
+    for pair in pairs:
+        name = str(pair.get("name") or "").strip()
+        text = str(pair.get("value") or "").strip()
+        if not name or not text or name.lower() in _ATTR_META_KEYS:
+            continue
+        attrs[name] = text
+    sizes = item.get("sizes") if isinstance(item.get("sizes"), list) else []
+    clean_sizes = [str(size).strip() for size in sizes if str(size).strip()]
+    if clean_sizes:
+        attrs["sizes"] = clean_sizes
+    return attrs
+
+
+async def _upsert_size_option(db: AsyncSession, product_id: int, sizes: list[str]) -> None:
+    """Розміри Telegram-товару → ProductOption «Розмір» + ProductOptionValue."""
+    values = []
+    seen = set()
+    for raw in sizes or []:
+        value = str(raw or "").strip()[:100]
+        if not value:
+            continue
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(value)
+    if not values:
+        return
+
+    option = (
+        await db.execute(
+            select(ProductOption).where(
+                ProductOption.product_id == product_id,
+                ProductOption.name == "Розмір",
+            )
+        )
+    ).scalar_one_or_none()
+    if option is None:
+        option = ProductOption(product_id=product_id, name="Розмір")
+        db.add(option)
+        await db.flush()
+
+    existing_rows = (
+        await db.execute(
+            select(ProductOptionValue).where(ProductOptionValue.option_id == option.id)
+        )
+    ).scalars().all()
+    existing = {str(row.value).casefold() for row in existing_rows}
+    for value in values:
+        if value.casefold() in existing:
+            continue
+        db.add(ProductOptionValue(option_id=option.id, value=value))
+        existing.add(value.casefold())
+
+
+def _merge_picture_urls(existing, extra: list[str]) -> list[str]:
+    merged: list[str] = []
+    for raw in list(existing or []) + list(extra or []):
+        url = str(raw or "").strip()
+        if url.startswith("http") and url not in merged:
+            merged.append(url)
+    return merged
+
+
+async def attach_telegram_album_media(
+    db: AsyncSession,
+    *,
+    supplier_id: int,
+    attachments: list,
+) -> int:
+    """Додає фото альбому в pictures / attributes.media_urls уже існуючого товару."""
+    updated = 0
+    for parent_message_id, urls in attachments or []:
+        clean_urls = [str(url).strip() for url in (urls or []) if str(url).strip().startswith("http")]
+        if not parent_message_id or not clean_urls:
+            continue
+        sku = live_message_sku(supplier_id, int(parent_message_id), 1)
+        source_url = _source_url_for_message(None, None, int(parent_message_id))
+        product = await _find_live_product(
+            db, supplier_id, sku, int(parent_message_id), source_url
+        )
+        if product is None:
+            logger.info(
+                "attach_telegram_album_media: товар для поста #%s ще немає — фото відкладено.",
+                parent_message_id,
+            )
+            continue
+        product.pictures = _merge_picture_urls(product.pictures, clean_urls)
+        attrs = product.attributes if isinstance(product.attributes, dict) else {}
+        attrs["media_urls"] = _merge_picture_urls(attrs.get("media_urls"), product.pictures)
+        product.attributes = attrs
+        updated += 1
+    if updated:
+        await db.commit()
+        logger.info(
+            "attach_telegram_album_media: оновлено %s товар(ів) постачальника #%s.",
+            updated, supplier_id,
+        )
+    return updated
+
+
 async def upsert_parsed_telegram_items(
     db: AsyncSession,
     *,
@@ -162,23 +356,58 @@ async def upsert_parsed_telegram_items(
         sku = live_message_sku(supplier_id, message_id, index)
         gemini_vendor = str(item.get("vendor_code") or "").strip()
         pictures = _item_pictures(item)
-        attrs = {
-            "source": "telegram",
-            "source_url": source_url,
-            "telegram_message_id": message_id,
-            "vendor_code": gemini_vendor or sku,
-        }
+        attrs = _product_attributes_from_item(
+            item,
+            source_url=source_url,
+            message_id=message_id,
+            vendor_code=gemini_vendor or sku,
+        )
+        if pictures:
+            attrs["media_urls"] = pictures
+        sizes = item.get("sizes") if isinstance(item.get("sizes"), list) else []
+        niche = str(item.get("niche") or "").strip()[:100] or None
+        season = str(item.get("season") or "").strip()[:50] or None
         existing = await _find_live_product(db, supplier_id, sku, message_id, source_url)
+        if existing is None:
+            existing = await _find_product_by_vendor_or_name(
+                db,
+                supplier_id,
+                vendor_code=gemini_vendor,
+                name=name,
+            )
         try:
             if existing:
                 existing.description = description
                 if not existing.is_ai_processed:
                     existing.name = name
+                    if niche:
+                        existing.target_niche = niche
+                    if season:
+                        existing.season = season
                 if pictures:
-                    existing.pictures = pictures
+                    existing.pictures = _merge_picture_urls(existing.pictures, pictures)
                 attrs_old = existing.attributes if isinstance(existing.attributes, dict) else {}
-                attrs_old.update(attrs)
-                existing.attributes = attrs_old
+                merged_media = _merge_picture_urls(
+                    attrs_old.get("media_urls"),
+                    existing.pictures if isinstance(existing.pictures, list) else pictures,
+                )
+                if merged_media:
+                    attrs["media_urls"] = merged_media
+                old_pairs = attrs_old.get("characteristics")
+                if not attrs.get("characteristics") and isinstance(old_pairs, list) and old_pairs:
+                    attrs["characteristics"] = old_pairs
+                    for pair in old_pairs:
+                        if not isinstance(pair, dict):
+                            continue
+                        key = str(pair.get("name") or "").strip()
+                        val = str(pair.get("value") or "").strip()
+                        if key and val and key.lower() not in _ATTR_META_KEYS and key not in attrs:
+                            attrs[key] = val
+                if not attrs.get("base_model_name") and attrs_old.get("base_model_name"):
+                    attrs["base_model_name"] = attrs_old.get("base_model_name")
+                if not attrs.get("color") and attrs_old.get("color"):
+                    attrs["color"] = attrs_old.get("color")
+                existing.attributes = attrs
                 variant = (
                     await db.execute(
                         select(ProductVariant).where(ProductVariant.product_id == existing.id)
@@ -187,6 +416,13 @@ async def upsert_parsed_telegram_items(
                 if variant:
                     variant.base_price = base_price
                     variant.final_price = final_price
+                    blob = f"{name} {description or ''}".lower()
+                    if any(mark in blob for mark in ("немає в наявності", "продано", "sold out")):
+                        variant.quantity = 0
+                        variant.is_available = False
+                    else:
+                        variant.quantity = max(int(variant.quantity or 0), 1)
+                        variant.is_available = True
                 else:
                     db.add(
                         ProductVariant(
@@ -195,18 +431,24 @@ async def upsert_parsed_telegram_items(
                             base_price=base_price,
                             final_price=final_price,
                             quantity=1,
-                            is_available=False,
+                            is_available=True if is_edit else False,
                         )
                     )
+                await _upsert_size_option(db, existing.id, sizes)
                 await db.commit()
                 saved += 1
+                logger.info(
+                    "upsert_parsed_telegram_items: оновлено товар #%s (артикул/назва), нові фото в кінець.",
+                    existing.id,
+                )
                 continue
 
             if is_edit:
                 logger.info(
-                    "upsert_parsed_telegram_items: товар для msg %s не знайдено — створюю новий.",
+                    "upsert_parsed_telegram_items: редагування поста #%s — товар не знайдено, новий НЕ створюємо.",
                     message_id,
                 )
+                continue
             product = Product(
                 supplier_id=supplier_id,
                 supplier_sku=sku,
@@ -214,6 +456,8 @@ async def upsert_parsed_telegram_items(
                 description=description,
                 pictures=pictures,
                 attributes=attrs,
+                target_niche=niche,
+                season=season,
                 ai_status=ProductAIStatus.pending,
                 status=ProductStatus.inactive,
                 is_ai_processed=False,
@@ -230,6 +474,7 @@ async def upsert_parsed_telegram_items(
                     is_available=False,
                 )
             )
+            await _upsert_size_option(db, product.id, sizes)
             await db.commit()
             saved += 1
         except Exception as e:
@@ -330,6 +575,10 @@ async def _save_batch_products(
     saved = 0
     for message_id, items in grouped.items():
         meta = meta_by_id.get(message_id) or {}
+        post_urls = meta.get("image_urls") if isinstance(meta.get("image_urls"), list) else []
+        if post_urls:
+            for item in items:
+                item["image_urls"] = _merge_picture_urls(item.get("image_urls"), post_urls)
         source_url = _source_url_for_message(
             meta.get("username"),
             meta.get("chat_id"),
@@ -388,6 +637,7 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
     total_saved = 0
     batch_index = 0
     import_ok = False
+    stitch_ctx = AlbumStitchContext()
     try:
         while scanned < IMPORT_POST_LIMIT:
             take = min(IMPORT_BATCH_SIZE, IMPORT_POST_LIMIT - scanned)
@@ -396,7 +646,10 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
                     channel_link,
                     limit=take,
                     offset_id=offset_id,
-                    upload_media=True,
+                    upload_media=False,
+                    supplier_name=getattr(supplier, "name", "") or "",
+                    supplier_id=int(supplier.id),
+                    stitch_ctx=stitch_ctx,
                 )
             except TelegramChannelParseError as e:
                 logger.error("run_telegram_import: канал #%s (%s): %s", supplier_id, channel_link, e)
@@ -409,6 +662,13 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
                 break
 
             scanned += int(fetched or 0)
+            leftover_media = stitch_ctx.take_attachments()
+            if leftover_media:
+                await attach_telegram_album_media(
+                    db,
+                    supplier_id=supplier_id,
+                    attachments=leftover_media,
+                )
             if fetched <= 0:
                 if done:
                     import_ok = True
@@ -433,7 +693,36 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
                         batch_index, supplier_id, e, exc_info=True,
                     )
                     parsed_products = []
+                album_ids = stitch_ctx.take_album_ids()
+                keep_ids = {
+                    int(message_id)
+                    for message_id, _item in _assign_batch_message_ids(parsed_products, posts)
+                } if parsed_products else set()
+                orphan_extras: dict[int, list[int]] = {}
+                for parent_id, extra_id in album_ids:
+                    parent = int(parent_id)
+                    extra = int(extra_id)
+                    if parent in keep_ids:
+                        for post in posts:
+                            if int(post.get("message_id") or 0) == parent:
+                                post.setdefault("album_message_ids", []).append(extra)
+                                break
+                    else:
+                        orphan_extras.setdefault(parent, []).append(extra)
                 if parsed_products:
+                    try:
+                        await hydrate_posts_media(
+                            channel_link,
+                            posts,
+                            keep_ids,
+                            supplier_name=getattr(supplier, "name", "") or "",
+                            supplier_id=int(supplier.id),
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "run_telegram_import: не вдалося довантажити фото батча %s: %s",
+                            batch_index, e,
+                        )
                     saved = await _save_batch_products(
                         db,
                         supplier_id=supplier_id,
@@ -446,6 +735,37 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
                         "run_telegram_import: #%s батч %s без товарів — далі.",
                         supplier_id, batch_index,
                     )
+                if orphan_extras:
+                    fake_posts = [
+                        {
+                            "message_id": parent_id,
+                            "album_message_ids": extra_ids,
+                            "image_urls": [],
+                            "formatted": "",
+                        }
+                        for parent_id, extra_ids in orphan_extras.items()
+                    ]
+                    try:
+                        await hydrate_posts_media(
+                            channel_link,
+                            fake_posts,
+                            set(orphan_extras.keys()),
+                            supplier_name=getattr(supplier, "name", "") or "",
+                            supplier_id=int(supplier.id),
+                        )
+                        await attach_telegram_album_media(
+                            db,
+                            supplier_id=supplier_id,
+                            attachments=[
+                                (post["message_id"], post.get("image_urls") or [])
+                                for post in fake_posts
+                            ],
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "run_telegram_import: альбомні фото попереднього товару не додано: %s",
+                            e,
+                        )
                 if not done and scanned < IMPORT_POST_LIMIT:
                     await asyncio.sleep(IMPORT_BATCH_SLEEP_SEC)
 

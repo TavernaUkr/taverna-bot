@@ -387,9 +387,17 @@ async def process_next_pending_product() -> None:
             if product is None:
                 return
             ok = await processor.process_product(product, db)
+            if ok is None:
+                product.ai_status = ProductAIStatus.cancelled
+                product.is_ai_processed = False
+                product.status = ProductStatus.inactive
+                await db.commit()
+                logger.info("AI-черга: товар #%s cancelled (не товар).", product_id)
+                return
             if ok:
                 product.ai_status = ProductAIStatus.completed
                 product.is_ai_processed = True
+                product.status = ProductStatus.active
                 await db.commit()
                 logger.info("AI-черга: товар #%s completed.", product_id)
                 return

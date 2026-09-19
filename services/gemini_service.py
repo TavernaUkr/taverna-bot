@@ -4,7 +4,7 @@ import re
 import logging
 import json
 from config_reader import config
-from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager
+from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager, build_genai_client
 from typing import Optional, Dict, Any, List
 
 logger = logging.getLogger(__name__)
@@ -142,7 +142,7 @@ def get_gemini_client():
     except AllKeysExhaustedError:
         logger.warning("Усі Gemini API ключі тимчасово вичерпані.")
         return None
-    return genai.Client(api_key=api_key)
+    return build_genai_client(api_key)
 
 
 async def _generate_content(
@@ -174,7 +174,7 @@ async def _generate_content(
             api_key = manager.get_next_active_key()
         except AllKeysExhaustedError as e:
             raise RuntimeError(str(e)) from e
-        client = genai.Client(api_key=api_key)
+        client = build_genai_client(api_key)
         try:
             response = await client.aio.models.generate_content(
                 model=model_name,
@@ -223,11 +223,15 @@ async def rewrite_text_with_ai(text_to_rewrite: str, product_name: str) -> str:
         rewritten_text = await _generate_content(
             prompt,
             system_instruction=(
-                "Ти – професійний копірайтер для Телеграм-магазину 'TAVERNA'. "
-                "Твоє завдання – переписати опис товару. Стиль: впевнений, професійний, з акцентом на якість. "
-                "Структуруй текст, використовуй марковані списки (▪️ або ✅). "
-                "Використовуй доречні емодзі (🛡️, 💪, 🔥). "
-                "НЕ додавай ціну, артикул, посилання або заклики до дії. Тільки опис."
+                "ТИ ПРОФЕСІЙНИЙ КОПІРАЙТЕР преміум-маркетплейсу. "
+                "Твоє завдання — повністю переписати текст. Зроби його унікальним, емоційним та продаючим. "
+                "ЖОДНИХ слідів оригінального постачальника. Жодного опту, дропу, посилань чи розмірів у цьому полі. "
+                "СТРУКТУРА: "
+                "Короткий вступ. "
+                "Потім список переваг. Кожен пункт списку ПОВИНЕН починатися з нового рядка (\\n) "
+                "і тематичного емодзі (✅, 🛡️, 💧, 🧵 тощо). "
+                "Поверни суворо відформатований рядок із \\n. "
+                "НЕ додавай ціну, артикул, посилання або заклики до дії."
             ),
             temperature=0.7,
             max_output_tokens=4096,

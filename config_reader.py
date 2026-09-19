@@ -10,6 +10,24 @@ if not env_path.exists():
     env_path = Path(".env")
 logging.info(f"Завантаження .env з: {env_path.resolve()}")
 
+
+def sanitize_gemini_api_key(raw: object) -> str:
+    """Прибирає пробіли, BOM, невидимі символи і обгорткові лапки з одного ключа."""
+    key = str(raw or "")
+    for junk in ("\ufeff", "\u200b", "\u200c", "\u200d", "\xa0"):
+        key = key.replace(junk, "")
+    key = key.replace("\r", "").replace("\n", "").strip()
+    key = key.strip("'").strip('"').strip("`").strip()
+    while key and key[0] in "'\"`":
+        key = key[1:].strip()
+    while key and key[-1] in "'\"`":
+        key = key[:-1].strip()
+    if key.lower().startswith("bearer "):
+        key = key[7:].strip()
+        key = key.strip("'").strip('"').strip("`").strip()
+    return key
+
+
 class Settings(BaseSettings):
     # --- Telegram Bot ---
     bot_token: SecretStr
@@ -147,17 +165,19 @@ class Settings(BaseSettings):
         """
         keys: list[str] = []
         seen = set()
-        raw = (self.gemini_api_keys or "").replace(";", ",")
-        for part in raw.split(","):
-            key = part.strip().strip('"').strip("'")
+        blob = sanitize_gemini_api_key(self.gemini_api_keys or "")
+        raw_keys = blob.replace(";", ",").split(",")
+        for part in raw_keys:
+            key = sanitize_gemini_api_key(part)
             if key and key not in seen:
                 seen.add(key)
                 keys.append(key)
         if self.gemini_api_key:
-            single = self.gemini_api_key.get_secret_value().strip()
+            single = sanitize_gemini_api_key(self.gemini_api_key.get_secret_value())
             if single and single not in seen:
                 keys.append(single)
         return keys
+
 
 try:
     config = Settings()

@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     from google import genai
@@ -18,12 +18,12 @@ except ImportError:
     types = None  # type: ignore
     genai_errors = None  # type: ignore
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config_reader import config
-from database.models import AICategorizationRule, Product, ProductAIStatus
-from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager
+from database.models import AICategorizationRule, Product, ProductAIStatus, ProductStatus, ProductVariant
+from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager, build_genai_client
 
 logger = logging.getLogger(__name__)
 
@@ -190,14 +190,77 @@ _SEASON_ALIASES = {
 
 _EMPTY_VALUES = {"", "null", "none", "n/a", "nil", "-"}
 
-_SYSTEM_PROMPT = """
-Ти — Senior Category Manager маркетплейсу «TAVERNA».
-Твоє завдання: класифікувати товар за ЖОРСТКОЮ таксономією і написати продаючий опис.
-Працюєш українською. Поверни виключно один JSON-об'єкт.
-Жодного тексту до або після JSON. Без markdown. Без коментарів. Без HTML.
+
+def _coerce_is_product(item: dict) -> bool:
+    if not isinstance(item, dict):
+        return False
+    raw = item.get("is_product")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"false", "0", "no", "ні", "n", "off"}:
+        return False
+    if text in {"true", "1", "yes", "так", "y", "on"}:
+        return True
+    return bool(raw)
+
+
+_ATTR_META_KEYS = {
+    "source",
+    "source_url",
+    "telegram_message_id",
+    "vendor_code",
+    "sizes",
+    "media_urls",
+    "characteristics",
+    "search_tags",
+    "base_model_name",
+    "color",
+}
+
+_EXTRACT_SYSTEM_PROMPT = """
+ЧАСТИНА 1 — ЕКСТРАКЦІЯ. ТИ ПРАЦЮЄШ У СУВОРОМУ РЕЖИМІ EXTRACTION.
+ЗАБОРОНЕНО вигадувати дані. ЗАБОРОНЕНО визначати категорію, нішу чи сезон.
+Використовуй ТІЛЬКИ інформацію з оригінального тексту.
+Працюєш українською. Поверни виключно один JSON-об'єкт. Без markdown.
+
+СПОЧАТКУ визнач is_product.
+Проаналізуй текст. Якщо це інформаційний пост, правила доставки, новини магазину,
+графік роботи, опитування чи просто текст без конкретного товару для продажу —
+поверни is_product: false. Всі інші поля залиш порожніми (name="", characteristics=[], sizes=[]).
 
 Формат:
-{"name":"...","target_niche":"...","main_category":"...","sub_category":"...","season":null,"gender":null,"attributes":{"Ключ":"Значення"},"description":"..."}
+{"is_product": true, "name":"...","base_model_name":"Напівчеревики ESDY з швидкою шнурівкою","color":"мультикам","characteristics":[{"name":"Бренд","value":"Nike"},{"name":"Матеріал","value":"шкіра"}],"sizes":["40","41"]}
+
+Правила:
+- is_product: обов'язкове boolean. false = зупинити обробку, це не товар.
+- name: чиста комерційна назва до 80 символів. Без артикулів, цін, HTML.
+- base_model_name: базова модель БЕЗ кольору (напр. «Напівчеревики ESDY з швидкою шнурівкою»).
+  Однакова для всіх кольорів цієї моделі. Якщо кольору в назві немає — скопіюй name.
+- color: колір з тексту (напр. «мультикам», «олива», «чорний»). Якщо кольору немає — "".
+- characteristics: ТІЛЬКИ факти з тексту (Бренд, Матеріал, Пам'ять, Вага, Країна, Колір, Сезон тощо).
+  Формат: [{"name":"Ключ","value":"значення з тексту"}]. Якщо факту немає — не додавай. [] дозволений.
+- sizes: усі згадані розміри як масив рядків. Якщо немає — [].
+- НЕ пиши description, main_category, niche, season у цій відповіді.
+"""
+
+_ANALYZE_SYSTEM_PROMPT = """
+ЧАСТИНА 2 — АНАЛІЗ. Характеристики й розміри ВЖЕ витягнуті. НЕ вигадуй нових фактів.
+Працюєш українською. Поверни виключно один JSON-об'єкт. Без markdown.
+
+ПОРЯДОК РОБОТИ (суворо):
+1) Спочатку напиши description — художній рерайт НАЯВНИХ переваг з тексту і characteristics.
+   Жодної технічної інформації (розмірів, матеріалів, країн) у description. Без цін і лінків.
+   Структура з \\n: короткий вступ, порожній рядок, список переваг з емодзі з нового рядка.
+2) ПОТІМ, спираючись на characteristics + sizes + назву, ЖОРСТКО визнач:
+   main_category, sub_category, target_niche, season, gender.
+3) search_tags — масив 4–12 коротких рядків для пошуку (напр. ["кросівки","зима","nike","шкіра"]).
+   Бери слова з характеристик, типу товару, сезону, бренду, ніші. Без речень. Без дублікатів.
+
+Формат:
+{"name":"...","description":"...","main_category":"...","sub_category":"...","target_niche":"...","season":null,"gender":null,"search_tags":["кросівки","зима","nike","шкіра"]}
 
 ТИ МАЄШ ПРАВО ОБИРАТИ `main_category` ВИКЛЮЧНО З ЦЬОГО СПИСКУ (без відхилень):
 ['Одяг', 'Взуття', 'Аксесуари', 'Тактичне спорядження', 'Рюкзаки та сумки', 'Головні убори', 'Електроніка', 'Дім та побут', 'Автотовари', 'Дитячі товари', 'Краса та здоров'я', 'Інше'].
@@ -211,24 +274,30 @@ _SYSTEM_PROMPT = """
 - Якщо це баф, балаклава, шапка — main_category = "Головні убори".
 - Якщо це рюкзак, сумка, бананка — main_category = "Рюкзаки та сумки".
 - НЕ став вузький тип у main_category. "Куртки", "Халати", "Смартфони" — це sub_category.
-- sub_category генеруй самостійно (наприклад: "Зимові куртки", "Махрові халати", "Смартфони").
-
-Інші поля:
-- name: чиста комерційна назва українською, до 80 символів. Без артикулів, цін, HTML.
-- season: "Зима", "Літо", "Демісезон", "Всесезон" або null, якщо сезон не логічний.
-- gender: "Чоловічий", "Жіночий", "Унісекс", "Дитячий" або null, якщо стать не застосовується.
-- attributes: динамічний JSON 3–8 характеристик саме для цього типу товару.
-  Факти лише з вхідних даних, не вигадуй.
-- description: якісний SEO-текст українською, 400–900 символів, з релевантними емодзі.
-  Структура: суть, «Переваги», «Характеристики». Без HTML і без цін.
+- sub_category — вузький тип з назви/характеристик (наприклад: "Зимові куртки").
+- season: "Зима", "Літо", "Демісезон", "Всесезон" або null.
+- gender: "Чоловічий", "Жіночий", "Унісекс", "Дитячий" або null.
 """
 
 
 def _strip_html(text: Optional[str]) -> str:
     if not text:
         return ""
-    cleaned = _HTML_RE.sub(" ", str(text))
-    return re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = str(text).replace("\\n", "\n")
+    cleaned = re.sub(r"<br\s*/?>", "\n", cleaned, flags=re.I)
+    cleaned = _HTML_RE.sub(" ", cleaned)
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in cleaned.split("\n")]
+    out: list[str] = []
+    blank = 0
+    for line in lines:
+        if not line:
+            blank += 1
+            if blank <= 1:
+                out.append("")
+            continue
+        blank = 0
+        out.append(line)
+    return "\n".join(out).strip()
 
 
 def _safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
@@ -272,17 +341,41 @@ async def load_ai_categorization_rules_text(db: AsyncSession) -> str:
     return _build_rules_text(rows)
 
 
-def _clip(value: str, max_len: int) -> str:
-    value = (value or "").strip()
+def _clean_text(raw: Any) -> str:
+    """Прибирає зайві пробіли/переноси, які Gemini інколи лишає в текстових полях."""
+    return re.sub(r"\s+", " ", str(raw if raw is not None else "")).strip()
+
+
+def _clip(value: Any, max_len: int) -> str:
+    value = _clean_text(value)
     if len(value) <= max_len:
         return value
     return value[: max_len - 1].rstrip() + "…"
 
 
+def _color_from_pairs(pairs: list[dict]) -> str:
+    for pair in pairs or []:
+        name = str(pair.get("name") or "").strip().casefold()
+        if name in {"колір", "цвет", "color", "забарвлення"}:
+            return str(pair.get("value") or "").strip()[:80]
+    return ""
+
+
+def _fallback_base_model(name: str, color: str) -> str:
+    title = (name or "").strip()
+    shade = (color or "").strip()
+    if title and shade:
+        folded = title.casefold()
+        needle = shade.casefold()
+        if folded.endswith(needle):
+            title = title[: len(title) - len(shade)].rstrip(" -,/()")
+    return title[:200]
+
+
 def _is_empty(raw: Any) -> bool:
     if raw is None:
         return True
-    return str(raw).strip().lower() in _EMPTY_VALUES
+    return _clean_text(raw).lower() in _EMPTY_VALUES
 
 
 def _normalize_enum(
@@ -293,7 +386,7 @@ def _normalize_enum(
 ) -> Optional[str]:
     if _is_empty(raw):
         return default
-    value = str(raw).strip()
+    value = _clean_text(raw)
     if _NUMERIC_RE.match(value):
         return default
     if value in allowed:
@@ -302,22 +395,136 @@ def _normalize_enum(
 
 
 def _normalize_attributes(raw: Any) -> Dict[str, str]:
-    if not isinstance(raw, dict):
-        return {}
-    cleaned: Dict[str, str] = {}
-    for key, value in raw.items():
+    pairs = _characteristic_pairs(raw)
+    return {pair["name"]: pair["value"] for pair in pairs}
+
+
+def _characteristic_pairs(raw: Any) -> list[dict]:
+    items = []
+    if isinstance(raw, dict):
+        items = list(raw.items())
+    elif isinstance(raw, list):
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            key = entry.get("name") or entry.get("key") or entry.get("title")
+            val = entry.get("value") if "value" in entry else entry.get("val")
+            if key:
+                items.append((key, val))
+    cleaned: list[dict] = []
+    seen = set()
+    for key, value in items:
         name = _clip(str(key), 80)
-        if not name or _is_empty(value):
+        if not name or name.lower() in _ATTR_META_KEYS or _is_empty(value):
             continue
         if isinstance(value, (dict, list)):
-            text = _clip(json.dumps(value, ensure_ascii=False), 200)
-        else:
-            text = _clip(str(value), 200)
-        if text:
-            cleaned[name] = text
-        if len(cleaned) >= 12:
+            continue
+        text = str(value).strip()[:200]
+        fold = name.casefold()
+        if not text or fold in seen:
+            continue
+        seen.add(fold)
+        cleaned.append({"name": name, "value": text})
+        if len(cleaned) >= 20:
             break
     return cleaned
+
+
+def _ground_characteristic_pairs(pairs: list[dict], source_text: str) -> list[dict]:
+    blob = (source_text or "").casefold()
+    if not blob:
+        return list(pairs or [])
+    grounded: list[dict] = []
+    for pair in pairs or []:
+        value = str(pair.get("value") or "").strip()
+        if not value:
+            continue
+        needle = value.casefold()
+        tokens = [tok for tok in re.split(r"\W+", needle, flags=re.UNICODE) if len(tok) >= 3]
+        if needle in blob or (tokens and all(tok in blob for tok in tokens)):
+            grounded.append(pair)
+    return grounded
+
+
+def _existing_characteristic_pairs(raw: Any) -> list[dict]:
+    if isinstance(raw, dict) and isinstance(raw.get("characteristics"), list):
+        return _characteristic_pairs(raw.get("characteristics"))
+    return _characteristic_pairs(raw)
+
+
+def _merge_extracted_attributes(
+    existing: Any,
+    pairs: list[dict],
+    search_tags: Optional[list] = None,
+    base_model_name: Optional[str] = None,
+    color: Optional[str] = None,
+) -> dict:
+    old = existing if isinstance(existing, dict) else {}
+    merged: Dict[str, Any] = {}
+    for key, value in old.items():
+        if str(key).lower() in _ATTR_META_KEYS and key not in ("characteristics", "search_tags"):
+            merged[key] = value
+    merged["characteristics"] = pairs
+    for pair in pairs:
+        name = str(pair.get("name") or "").strip()
+        text = str(pair.get("value") or "").strip()
+        if name and text and name.lower() not in _ATTR_META_KEYS:
+            merged[name] = text
+    tags = _normalize_search_tags(
+        search_tags if search_tags is not None else old.get("search_tags")
+    )
+    if tags:
+        merged["search_tags"] = tags
+    model = _clip(base_model_name, 200) or _clip(old.get("base_model_name"), 200)
+    if model:
+        merged["base_model_name"] = model
+    shade = _clip(color, 80) or _clip(old.get("color"), 80)
+    if shade:
+        merged["color"] = shade
+    return merged
+
+
+def _normalize_search_tags(raw: Any) -> list[str]:
+    chunks: list = []
+    if isinstance(raw, list):
+        chunks = raw
+    elif isinstance(raw, str):
+        chunks = re.split(r"[,;/|]+", raw)
+    seen = set()
+    tags: list[str] = []
+    for chunk in chunks:
+        value = str(chunk or "").strip().lower()[:40]
+        if not value or value in _EMPTY_VALUES:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        tags.append(value)
+        if len(tags) >= 16:
+            break
+    return tags
+
+
+def _normalize_sizes(raw: Any) -> list[str]:
+    chunks = []
+    if isinstance(raw, list):
+        chunks = raw
+    elif isinstance(raw, str):
+        chunks = re.split(r"[,;/|]+", raw)
+    seen = set()
+    sizes: list[str] = []
+    for chunk in chunks:
+        value = str(chunk or "").strip()[:40]
+        if not value:
+            continue
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        sizes.append(value)
+        if len(sizes) >= 40:
+            break
+    return sizes
 
 
 def _product_text(*parts: Optional[str]) -> str:
@@ -348,7 +555,7 @@ def _normalize_open_label(
 
 
 def _extract_ai_fields(data: Dict[str, Any], source_text: str) -> Optional[Dict[str, Any]]:
-    name = _clip(str(data.get("name") or ""), 512)
+    name = _clip(data.get("name"), 512)
     main_category = _normalize_enum(
         data.get("main_category") or data.get("primary_category") or data.get("category"),
         PRIMARY_CATEGORIES,
@@ -359,11 +566,19 @@ def _extract_ai_fields(data: Dict[str, Any], source_text: str) -> Optional[Dict[
         TARGET_NICHES,
         _NICHE_ALIASES,
     )
-    sub_category = _clip(str(data.get("sub_category") or ""), 150)
+    sub_category = _clip(data.get("sub_category"), 150)
     season = _normalize_enum(data.get("season"), SEASONS, _SEASON_ALIASES)
     gender = _normalize_enum(data.get("gender"), GENDERS, _GENDER_ALIASES)
-    attributes = _normalize_attributes(data.get("attributes"))
-    description = _strip_html(str(data.get("description") or ""))
+    attributes = _ground_characteristic_pairs(
+        _characteristic_pairs(
+            data.get("characteristics")
+            if data.get("characteristics") is not None
+            else data.get("attributes")
+        ),
+        source_text,
+    )
+    description = _strip_html(data.get("description"))
+    search_tags = _normalize_search_tags(data.get("search_tags"))
 
     fields = {
         "name": name,
@@ -372,8 +587,11 @@ def _extract_ai_fields(data: Dict[str, Any], source_text: str) -> Optional[Dict[
         "sub_category": sub_category,
         "season": season,
         "gender": gender,
-        "attributes": attributes,
+        "attributes": {pair["name"]: pair["value"] for pair in attributes},
+        "characteristics": attributes,
         "description": description,
+        "search_tags": search_tags,
+        "sizes": _normalize_sizes(data.get("sizes")),
     }
     fields = _apply_hard_rules(fields, source_text)
 
@@ -415,27 +633,48 @@ class ProductAIProcessor:
     def is_ready(self) -> bool:
         return bool(genai is not None and self._key_manager and self._key_manager.has_keys())
 
-    def _build_user_prompt(self, product: Product) -> str:
-        raw_name = (product.name or "").strip()
-        raw_category = (product.category or "").strip()
-        raw_sub = (getattr(product, "sub_category", None) or "").strip()
-        raw_season = (getattr(product, "season", None) or "").strip()
+    def _source_blob(self, product: Product) -> str:
         raw_description = _strip_html(product.description)[:4000]
-        sku = (product.supplier_sku or "").strip()
-
+        existing_pairs = _existing_characteristic_pairs(getattr(product, "attributes", None))
+        existing_json = json.dumps(existing_pairs, ensure_ascii=False) if existing_pairs else "[]"
         return (
-            f"Назва: {raw_name}\n"
-            f"Артикул: {sku}\n"
-            f"Сира категорія (від постачальника): {raw_category or 'немає'}\n"
-            f"Сира підкатегорія: {raw_sub or 'немає'}\n"
-            f"Сирий сезон: {raw_season or 'немає'}\n"
-            f"Опис:\n{raw_description or 'немає'}\n\n"
+            f"Назва: {(product.name or '').strip()}\n"
+            f"Артикул: {(product.supplier_sku or '').strip()}\n"
+            f"Сира категорія (від постачальника): {(product.category or '').strip() or 'немає'}\n"
+            f"Сира підкатегорія: {(getattr(product, 'sub_category', None) or '').strip() or 'немає'}\n"
+            f"Сирий сезон: {(getattr(product, 'season', None) or '').strip() or 'немає'}\n"
+            f"Уже витягнуті характеристики:\n{existing_json}\n"
+            f"Опис:\n{raw_description or 'немає'}\n"
+        )
+
+    def _build_extract_prompt(self, product: Product) -> str:
+        return (
+            "ЧАСТИНА 1. Спочатку постав is_product true/false. "
+            "Якщо false — name/characteristics/sizes порожні. "
+            "Якщо true — витягни name, base_model_name, color, characteristics і sizes.\n"
+            "base_model_name — модель без кольору. color — колір з тексту.\n"
+            "Не став категорію і не пиши опис.\n\n"
+            f"{self._source_blob(product)}"
+        )
+
+    def _build_analyze_prompt(
+        self,
+        product: Product,
+        pairs: list[dict],
+        sizes: list[str],
+    ) -> str:
+        facts = json.dumps(pairs, ensure_ascii=False)
+        size_json = json.dumps(sizes, ensure_ascii=False)
+        return (
+            "ЧАСТИНА 2. Характеристики вже витягнуті. Не додавай нових фактів.\n"
+            "Спочатку description, потім категорії, потім search_tags.\n\n"
+            f"{self._source_blob(product)}\n"
+            f"characteristics (готово):\n{facts}\n"
+            f"sizes (готово):\n{size_json}\n\n"
             f"main_category обирай ТІЛЬКИ з: {', '.join(PRIMARY_CATEGORIES)}\n"
             f"target_niche обирай ТІЛЬКИ з: {', '.join(TARGET_NICHES)}\n"
-            "sub_category — вузький тип (Зимові куртки, Махрові халати, Смартфони).\n"
-            f"season: {', '.join(SEASONS)} або null, якщо сезон не застосовується.\n"
-            "gender: Чоловічий / Жіночий / Унісекс / Дитячий або null, "
-            "якщо стать не застосовується.\n"
+            f"season: {', '.join(SEASONS)} або null.\n"
+            "gender: Чоловічий / Жіночий / Унісекс / Дитячий або null.\n"
         )
 
     def _raise_capacity_if_needed(self, exc: Exception) -> None:
@@ -476,13 +715,14 @@ class ProductAIProcessor:
         model_name: str,
         user_prompt: str,
         rules_text: str = "",
+        system_instruction: Optional[str] = None,
     ) -> str:
         if genai is None or types is None or not self._key_manager:
             raise Exception("Gemini client is not configured")
 
-        system_instruction = _SYSTEM_PROMPT
+        instruction = (system_instruction or _ANALYZE_SYSTEM_PROMPT).strip()
         if rules_text:
-            system_instruction = f"{rules_text.strip()}\n\n{_SYSTEM_PROMPT.strip()}"
+            instruction = f"{rules_text.strip()}\n\n{instruction}"
 
         last_error: Optional[Exception] = None
         attempts = max(1, self._key_manager.key_count)
@@ -492,14 +732,15 @@ class ProductAIProcessor:
             except AllKeysExhaustedError as e:
                 raise GeminiCapacityError(429, str(e)) from e
 
-            client = genai.Client(api_key=active_key)
+            client = build_genai_client(active_key)
             try:
                 response = await client.aio.models.generate_content(
                     model=model_name,
                     contents=user_prompt,
                     config=types.GenerateContentConfig(
-                        system_instruction=system_instruction,
+                        system_instruction=instruction,
                         response_mime_type="application/json",
+                        temperature=0.1,
                     ),
                 )
             except Exception as e:
@@ -545,14 +786,15 @@ class ProductAIProcessor:
             "API Quota/Rate Limit Exceeded",
         ) from last_error
 
-    async def process_product(self, product: Product, db_session: AsyncSession) -> bool:
+    async def process_product(self, product: Product, db_session: AsyncSession) -> Optional[bool]:
         """
-        Відправляє товар у Gemini і оновлює PIM-поля:
-        name / category / sub_category / season / target_niche / gender /
-        attributes / ai_category / description / is_ai_processed.
+        Відправляє товар у Gemini двома кроками (екстракція → аналіз)
+        і оновлює PIM-поля + search_tags у attributes JSON.
         Commit робить викликач.
 
         Повертає True лише якщо JSON розпарсився і поля записано.
+        None — пост не є товаром (is_product=false): cancelled, нічого не активуємо.
+        False — збій відповіді Gemini.
         """
         if not self.is_ready:
             logger.warning(
@@ -562,32 +804,70 @@ class ProductAIProcessor:
             return False
 
         product_id = product.id
-        source_text = _product_text(product.name, product.description, product.sub_category)
         rules_text = await load_ai_categorization_rules_text(db_session)
-        prompt = self._build_user_prompt(product)
-        if rules_text:
-            prompt = f"{rules_text}\n\n{prompt}"
+        extract_prompt = self._build_extract_prompt(product)
+        source_text = self._source_blob(product)
         models_to_try = (self.model_name, self.fallback_model)
 
         for attempt, model_name in enumerate(models_to_try):
             try:
-                content = await self._complete(model_name, prompt, rules_text=rules_text)
+                extract_content = await self._complete(
+                    model_name,
+                    extract_prompt,
+                    system_instruction=_EXTRACT_SYSTEM_PROMPT,
+                )
+                extract_data = _safe_json_loads(extract_content) or {}
+                if extract_data and not _coerce_is_product(extract_data):
+                    product.ai_status = ProductAIStatus.cancelled
+                    product.status = ProductStatus.inactive
+                    product.is_ai_processed = False
+                    logger.info(
+                        "AI: #%s не товар (is_product=false) — cancelled, аналіз пропущено.",
+                        product_id,
+                    )
+                    return None
+                extracted_pairs = _ground_characteristic_pairs(
+                    _characteristic_pairs(
+                        extract_data.get("characteristics")
+                        if extract_data.get("characteristics") is not None
+                        else extract_data.get("attributes")
+                    ),
+                    source_text,
+                )
+                if not extracted_pairs:
+                    extracted_pairs = _existing_characteristic_pairs(product.attributes)
+                extracted_sizes = _normalize_sizes(extract_data.get("sizes"))
+                extracted_color = _clip(extract_data.get("color"), 80) or _color_from_pairs(extracted_pairs)
+                extracted_model = _clip(extract_data.get("base_model_name"), 200) or _fallback_base_model(
+                    extract_data.get("name") or product.name,
+                    extracted_color,
+                )
+                if extracted_color and not _color_from_pairs(extracted_pairs):
+                    extracted_pairs.append({"name": "Колір", "value": extracted_color})
 
-                cleaned_content = content.replace("```json", "").replace("```", "").strip()
-                start_idx = cleaned_content.find("{")
-                end_idx = cleaned_content.rfind("}")
-                if start_idx != -1 and end_idx != -1:
-                    cleaned_content = cleaned_content[start_idx:end_idx + 1]
-                data = _safe_json_loads(cleaned_content)
+                analyze_prompt = self._build_analyze_prompt(
+                    product, extracted_pairs, extracted_sizes
+                )
+                analyze_content = await self._complete(
+                    model_name,
+                    analyze_prompt,
+                    rules_text=rules_text,
+                    system_instruction=_ANALYZE_SYSTEM_PROMPT,
+                )
+                data = _safe_json_loads(analyze_content)
                 if not data:
                     logger.warning(
-                        "Gemini повернув невалідний JSON для товару #%s. Raw: %s",
+                        "Gemini (аналіз) повернув невалідний JSON для товару #%s. Raw: %s",
                         product_id,
-                        content[:500],
+                        analyze_content[:500],
                     )
                     return False
 
-                fields = _extract_ai_fields(data, source_text)
+                if not data.get("name"):
+                    data["name"] = extract_data.get("name") or product.name
+                data["characteristics"] = extracted_pairs
+                data["sizes"] = extracted_sizes
+                fields = _extract_ai_fields(data, f"{source_text}\n{json.dumps(extracted_pairs, ensure_ascii=False)}")
                 if not fields:
                     logger.warning(
                         "Gemini повернув порожні або невалідні поля для товару #%s: %s",
@@ -596,24 +876,40 @@ class ProductAIProcessor:
                     )
                     return False
 
-                product.name = fields["name"]
-                product.category = fields["main_category"]
-                product.sub_category = fields["sub_category"]
-                product.season = fields["season"]
-                product.target_niche = fields["target_niche"]
-                product.gender = fields["gender"]
-                product.attributes = fields["attributes"] or None
+                product.name = _clean_text(fields["name"])
+                product.category = _clean_text(fields["main_category"])
+                product.sub_category = _clean_text(fields["sub_category"])
+                product.season = _clean_text(fields["season"]) or None
+                product.target_niche = _clean_text(fields["target_niche"])
+                product.gender = _clean_text(fields["gender"]) or None
+                product.attributes = _merge_extracted_attributes(
+                    product.attributes,
+                    fields.get("characteristics") or extracted_pairs,
+                    search_tags=fields.get("search_tags"),
+                    base_model_name=extracted_model,
+                    color=extracted_color,
+                )
                 product.ai_category = _clip(
                     f"{fields['target_niche']} / {fields['main_category']} / {fields['sub_category']}",
                     255,
                 )
-                product.description = fields["description"]
+                product.description = _strip_html(fields["description"])
                 product.is_ai_processed = True
                 product.ai_status = ProductAIStatus.completed
+                product.status = ProductStatus.active
+                sizes_for_option = fields.get("sizes") or extracted_sizes
+                if sizes_for_option:
+                    from services.telegram_sync import _upsert_size_option
+                    await _upsert_size_option(db_session, product_id, sizes_for_option)
+                await db_session.execute(
+                    update(ProductVariant)
+                    .where(ProductVariant.product_id == product_id)
+                    .values(is_available=True)
+                )
 
                 await db_session.flush()
                 logger.info(
-                    "✅ AI PIM #%s → «%s» / [%s | %s -> %s | %s | %s] (%s)",
+                    "✅ AI PIM #%s → «%s» / [%s | %s -> %s | %s | %s] tags=%s (%s)",
                     product_id,
                     fields["name"],
                     fields["target_niche"],
@@ -621,6 +917,7 @@ class ProductAIProcessor:
                     fields["sub_category"],
                     fields["season"] or "—",
                     fields["gender"] or "—",
+                    (fields.get("search_tags") or [])[:6],
                     model_name,
                 )
                 return True

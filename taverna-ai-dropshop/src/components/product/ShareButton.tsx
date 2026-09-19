@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Share2, Copy, Check, Send } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -17,9 +16,7 @@ interface ShareButtonProps {
 export const ShareButton = ({ productId, productName }: ShareButtonProps) => {
   const [copied, setCopied] = useState(false);
 
-  // Telegram Mini App deep link format
-  const botUsername = "TavernaBot";
-  const shareLink = `https://t.me/${botUsername}/app?startapp=product_${productId}`;
+  const shareLink = `${typeof window !== "undefined" ? window.location.origin : ""}/product/${productId}`;
   const shareText = `${productName} — в Taverna Drop Shop`;
 
   const handleCopyLink = async () => {
@@ -34,7 +31,7 @@ export const ShareButton = ({ productId, productName }: ShareButtonProps) => {
   };
 
   const handleShareTelegram = () => {
-    const telegramUrl = `https://t.me/share/url?url=${encodeURIComponent(shareLink)}&text=${encodeURIComponent(shareText)}`;
+    const telegramUrl = `https://t.me/share/url?url=${encodeURIComponent(shareLink)}`;
     window.open(telegramUrl, "_blank");
   };
 
@@ -72,29 +69,31 @@ export const ShareButton = ({ productId, productName }: ShareButtonProps) => {
         }));
       }
       // Fallback to opening share URL
-      tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(shareLink)}&text=${encodeURIComponent(shareText)}`);
+      tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(shareLink)}`);
     };
 
     return (
-      <Button
-        variant="outline"
-        size="lg"
+      <button
+        type="button"
         onClick={handleTelegramShare}
-        className="flex-1 gap-2"
+        className="p-2 bg-gray-100 rounded-full shrink-0"
+        aria-label="Поділитися"
       >
-        <Send className="h-5 w-5" />
-        Поділитись
-      </Button>
+        <Share2 className="w-5 h-5 text-gray-500" />
+      </button>
     );
   }
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="lg" className="flex-1 gap-2">
-          <Share2 className="h-5 w-5" />
-          Поділитись
-        </Button>
+        <button
+          type="button"
+          className="p-2 bg-gray-100 rounded-full shrink-0"
+          aria-label="Поділитися"
+        >
+          <Share2 className="w-5 h-5 text-gray-500" />
+        </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48">
         <DropdownMenuItem onClick={handleShareTelegram}>

@@ -1,11 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, text, bindparam
 from sqlalchemy.orm import selectinload
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import logging
+from pydantic import BaseModel
 
-from database.db import get_db, AsyncSessionLocal
+from database.db import get_db, AsyncSessionLocal, engine as db_engine
 from database.models import Product, ProductStatus, ProductAIStatus, ProductVariant, ProductOption
 from api_models import (
     ProductAPI,
@@ -15,6 +16,8 @@ from api_models import (
     CategoryNicheAPI,
     ProductFiltersAPI,
     FilterAttributeAPI,
+    DynamicFilterAPI,
+    ProductColorVariantAPI,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +60,186 @@ def _merge_query_lists(*groups: Optional[List[str]]) -> List[str]:
     return _normalize_query_list(merged)
 
 
+def _escape_ilike(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _ilike_any(column, values: Optional[List[str]]):
+    """OR по ilike: ігнорує регістр і зайві пробіли навколо значення."""
+    patterns = []
+    for raw in values or []:
+        text = (raw or "").strip()
+        if text:
+            patterns.append(_escape_ilike(text))
+    if not patterns:
+        return None
+    return or_(*(column.ilike(f"%{p}%", escape="\\") for p in patterns))
+
+
+_ATTR_META_KEYS = {
+    "source",
+    "source_url",
+    "telegram_message_id",
+    "vendor_code",
+    "sizes",
+    "media_urls",
+    "characteristics",
+    "search_tags",
+    "base_model_name",
+    "color",
+}
+
+
+def _session_is_postgres(db: AsyncSession) -> bool:
+    bind = getattr(db, "bind", None)
+    if bind is None:
+        sync_session = getattr(db, "sync_session", None)
+        bind = getattr(sync_session, "bind", None) if sync_session is not None else None
+    dialect_name = getattr(getattr(bind, "dialect", None), "name", "") or ""
+    if not dialect_name and db_engine is not None:
+        dialect_name = db_engine.dialect.name
+    return str(dialect_name).startswith("postgres")
+
+
+def _parse_char_filters(query_params) -> Dict[str, List[str]]:
+    """
+    З query читає динамічні характеристики: ?char_Виробник=Китай&char_Пам'ять=256GB
+    Кілька значень — через повтор параметра або CSV.
+    """
+    grouped: Dict[str, List[str]] = {}
+    getter = getattr(query_params, "getlist", None)
+    keys = list(query_params.keys()) if query_params is not None else []
+    for key in keys:
+        if not str(key).startswith("char_"):
+            continue
+        name = str(key)[5:].strip()
+        if not name or len(name) > 80 or any(ch in name for ch in '"\\\x00\n\r'):
+            continue
+        raw_values = getter(key) if callable(getter) else [query_params.get(key)]
+        grouped[name] = _normalize_query_list(list(raw_values or []))
+    return {name: values for name, values in grouped.items() if values}
+
+
+def _characteristic_sql_match(name: str, value: str, *, is_postgres: bool, suffix: str):
+    """
+    Товар підходить, якщо значення є:
+    - у пласкому ключі attributes->>'Виробник' / json_extract($.Виробник)
+    - або в масиві attributes->'characteristics' як {name, value}
+    """
+    name_key = f"cn_{suffix}"
+    value_key = f"cv_{suffix}"
+    pattern = f"%{_escape_ilike(value.strip())}%"
+    if is_postgres:
+        sql = text(
+            f"""
+            (
+              lower(CAST(products.attributes AS jsonb) ->> :{name_key})
+                  LIKE lower(:{value_key}) ESCAPE '\\'
+              OR EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements(
+                  CASE
+                    WHEN jsonb_typeof(
+                      COALESCE(CAST(products.attributes AS jsonb)->'characteristics', '[]'::jsonb)
+                    ) = 'array'
+                    THEN COALESCE(CAST(products.attributes AS jsonb)->'characteristics', '[]'::jsonb)
+                    ELSE '[]'::jsonb
+                  END
+                ) AS elem
+                WHERE elem->>'name' = :{name_key}
+                  AND lower(COALESCE(elem->>'value', ''))
+                      LIKE lower(:{value_key}) ESCAPE '\\'
+              )
+            )
+            """
+        )
+    else:
+        sql = text(
+            f"""
+            (
+              lower(CAST(
+                json_extract(products.attributes, '$."' || replace(:{name_key}, '"', '') || '"')
+                AS TEXT
+              )) LIKE lower(:{value_key}) ESCAPE '\\'
+              OR EXISTS (
+                SELECT 1
+                FROM json_each(
+                  CASE
+                    WHEN json_type(json_extract(products.attributes, '$.characteristics')) = 'array'
+                    THEN json_extract(products.attributes, '$.characteristics')
+                    ELSE '[]'
+                  END
+                ) AS je
+                WHERE json_extract(je.value, '$.name') = :{name_key}
+                  AND lower(CAST(json_extract(je.value, '$.value') AS TEXT))
+                      LIKE lower(:{value_key}) ESCAPE '\\'
+              )
+            )
+            """
+        )
+    return sql.bindparams(
+        bindparam(name_key, name),
+        bindparam(value_key, pattern),
+    )
+
+
+def _apply_characteristic_filters(
+    stmt,
+    char_filters: Optional[Dict[str, List[str]]],
+    *,
+    is_postgres: bool,
+):
+    """AND між різними характеристиками, OR між кількома значеннями однієї."""
+    if not char_filters:
+        return stmt
+    for name_idx, (name, values) in enumerate(char_filters.items()):
+        parts = []
+        for value_idx, raw in enumerate(values):
+            text_value = (raw or "").strip()
+            if not text_value:
+                continue
+            parts.append(
+                _characteristic_sql_match(
+                    name,
+                    text_value,
+                    is_postgres=is_postgres,
+                    suffix=f"{name_idx}_{value_idx}",
+                )
+            )
+        if parts:
+            stmt = stmt.where(or_(*parts) if len(parts) > 1 else parts[0])
+    return stmt
+
+
+def _iter_characteristic_pairs(raw) -> List[Tuple[str, str]]:
+    """З attributes JSON: масив characteristics + пласкі ключі (без службових)."""
+    pairs: List[Tuple[str, str]] = []
+    if not isinstance(raw, dict):
+        return pairs
+    chars = raw.get("characteristics")
+    if isinstance(chars, list):
+        for item in chars:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            value = item.get("value")
+            if isinstance(value, (list, dict)):
+                continue
+            text_value = "" if value is None else str(value).strip()
+            if name and text_value:
+                pairs.append((name, text_value))
+    for key, value in raw.items():
+        name = str(key).strip()
+        if name.lower() in _ATTR_META_KEYS:
+            continue
+        if isinstance(value, (list, dict)):
+            continue
+        text_value = "" if value is None else str(value).strip()
+        if name and text_value:
+            pairs.append((name, text_value))
+    return pairs
+
+
 def _apply_pim_filters(
     stmt,
     *,
@@ -73,21 +256,45 @@ def _apply_pim_filters(
     )
     if ai_only:
         stmt = stmt.where(Product.is_ai_processed.is_(True))
-    if main_categories:
-        stmt = stmt.where(Product.category.in_(main_categories))
-    if niches:
-        stmt = stmt.where(Product.target_niche.in_(niches))
-    if seasons:
-        stmt = stmt.where(Product.season.in_(seasons))
-    if genders:
-        stmt = stmt.where(Product.gender.in_(genders))
-    if sub_categories:
-        stmt = stmt.where(Product.sub_category.in_(sub_categories))
+    category_cond = _ilike_any(Product.category, main_categories)
+    if category_cond is not None:
+        stmt = stmt.where(category_cond)
+    niche_cond = _ilike_any(Product.target_niche, niches)
+    if niche_cond is not None:
+        stmt = stmt.where(niche_cond)
+    season_cond = _ilike_any(Product.season, seasons)
+    if season_cond is not None:
+        stmt = stmt.where(season_cond)
+    gender_cond = _ilike_any(Product.gender, genders)
+    if gender_cond is not None:
+        stmt = stmt.where(gender_cond)
+    sub_cond = _ilike_any(Product.sub_category, sub_categories)
+    if sub_cond is not None:
+        stmt = stmt.where(sub_cond)
     return stmt
+
+
+def _catalog_visibility_filter(stmt):
+    """
+    Каталог MiniApp: активні, ще не розпарсені (pending) або вже з AI-полями.
+    Без цього AI-товари зі status=inactive зникали зі стрічки, але лишались у лічильниках.
+    """
+    return stmt.where(
+        or_(
+            Product.status == ProductStatus.active,
+            Product.ai_status == ProductAIStatus.pending,
+            Product.is_ai_processed.is_(True),
+        )
+    )
 
 
 class ProductWithShareURL(ProductAPI):
     share_url: str
+
+
+class ProductListResponse(BaseModel):
+    items: List[ProductWithShareURL] = []
+    total: int = 0
 
 
 def _build_product_with_share(product: Product) -> ProductWithShareURL:
@@ -102,6 +309,10 @@ def _build_product_with_share(product: Product) -> ProductWithShareURL:
     handlers/client_handlers.py).
     """
     product_api = ProductAPI.model_validate(product)
+    attrs = product.attributes if isinstance(product.attributes, dict) else {}
+    tags = attrs.get("search_tags")
+    if isinstance(tags, list):
+        product_api.search_tags = [str(tag).strip() for tag in tags if str(tag).strip()]
     # Сирі цифрові ID MyDrop не віддаємо в MiniApp — лише AI-тексти.
     if not getattr(product, "is_ai_processed", False):
         product_api.category = None
@@ -110,6 +321,7 @@ def _build_product_with_share(product: Product) -> ProductWithShareURL:
         product_api.target_niche = None
         product_api.gender = None
         product_api.attributes = None
+        product_api.search_tags = None
 
     variants_api: List[ProductVariantAPI] = []
     for variant in product.variants:
@@ -237,8 +449,9 @@ async def get_product_filters(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Унікальні PIM-значення для панелі фільтрів MiniApp
-    і динамічні лічильники підкатегорій під вибрані фільтри.
+    Унікальні PIM-значення для панелі фільтрів MiniApp,
+    динамічні лічильники підкатегорій і JSON-характеристики
+    (dynamic_filters) у межах вибраної категорії/ніші.
     """
     try:
         niches_filter = _merge_query_lists(niche, target_niche)
@@ -296,25 +509,31 @@ async def get_product_filters(
             if name and str(name).strip()
         ]
 
+        categories = await _distinct(Product.category)
+
         attrs_stmt = select(Product.attributes).where(
-            Product.is_ai_processed.is_(True),
-            Product.status.notin_((ProductStatus.deleted, ProductStatus.archived)),
             Product.attributes.isnot(None),
+        )
+        attrs_stmt = _apply_pim_filters(
+            attrs_stmt,
+            main_categories=categories_filter,
+            niches=niches_filter,
+            seasons=seasons_filter,
+            genders=genders_filter,
+            ai_only=True,
         )
         attr_rows = (await db.execute(attrs_stmt)).scalars().all()
         attr_map: dict[str, set[str]] = {}
         for raw in attr_rows:
-            if not isinstance(raw, dict):
-                continue
-            for key, value in raw.items():
-                name = str(key).strip()
-                text = "" if value is None else str(value).strip()
-                if not name or not text:
-                    continue
-                attr_map.setdefault(name, set()).add(text)
+            for name, text_value in _iter_characteristic_pairs(raw):
+                attr_map.setdefault(name, set()).add(text_value)
 
         attributes = [
             FilterAttributeAPI(name=name, values=sorted(values))
+            for name, values in sorted(attr_map.items())
+        ]
+        dynamic_filters = [
+            DynamicFilterAPI(name=name, options=sorted(values))
             for name, values in sorted(attr_map.items())
         ]
         return ProductFiltersAPI(
@@ -324,14 +543,17 @@ async def get_product_filters(
             attributes=attributes,
             sub_categories=sub_categories,
             total=total,
+            categories=categories,
+            dynamic_filters=dynamic_filters,
         )
     except Exception as e:
         logger.error(f"Error in get_product_filters: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.get("/", response_model=List[ProductWithShareURL])
+@router.get("/", response_model=ProductListResponse)
 async def get_all_products(
+    request: Request,
     category: Optional[List[str]] = Query(None, description="AI головна категорія, напр. Одяг"),
     main_category: Optional[List[str]] = Query(None, description="Аліас category"),
     sub_category: Optional[List[str]] = Query(None, description="AI підкатегорія"),
@@ -347,32 +569,39 @@ async def get_all_products(
     Returns a list of all products with share URLs for the Mini App.
     Each product includes a share_url field that points to the product in the Telegram bot.
     Фільтри category / sub_category / season / niche працюють по текстових AI-полях.
+    Динамічні характеристики: ?char_Виробник=Китай (JSON attributes / characteristics).
     Кожен параметр можна передати як один рядок, CSV або кілька повторів.
 
     Пагінація обов'язкова: без limit сервер зависав на 1000+ товарів.
-    Каталог одразу після XML: ai_status=pending АБО status=active.
+    Відповідь: {"items": [...], "total": X}.
     """
     try:
-        # Execute query to get products with variants (+ option values) and options eagerly loaded
-        stmt = select(Product).options(
-            selectinload(Product.supplier),
-            selectinload(Product.variants).selectinload(ProductVariant.option_values),
-            selectinload(Product.options).selectinload(ProductOption.values),
-        )
-        stmt = _apply_pim_filters(
-            stmt,
+        filter_kwargs = dict(
             main_categories=_merge_query_lists(main_category, category),
             niches=_merge_query_lists(niche, target_niche),
             seasons=_normalize_query_list(season),
             genders=_normalize_query_list(gender),
             sub_categories=_normalize_query_list(sub_category),
         )
-        stmt = stmt.where(
-            or_(
-                Product.ai_status == ProductAIStatus.pending,
-                Product.status == ProductStatus.active,
-            )
+        char_filters = _parse_char_filters(request.query_params)
+        is_postgres = _session_is_postgres(db)
+
+        count_stmt = select(func.count(Product.id))
+        count_stmt = _apply_pim_filters(count_stmt, **filter_kwargs)
+        count_stmt = _apply_characteristic_filters(
+            count_stmt, char_filters, is_postgres=is_postgres
         )
+        count_stmt = _catalog_visibility_filter(count_stmt)
+        total = int((await db.execute(count_stmt)).scalar_one() or 0)
+
+        stmt = select(Product).options(
+            selectinload(Product.supplier),
+            selectinload(Product.variants).selectinload(ProductVariant.option_values),
+            selectinload(Product.options).selectinload(ProductOption.values),
+        )
+        stmt = _apply_pim_filters(stmt, **filter_kwargs)
+        stmt = _apply_characteristic_filters(stmt, char_filters, is_postgres=is_postgres)
+        stmt = _catalog_visibility_filter(stmt)
         stmt = stmt.order_by(Product.id.desc()).offset(offset).limit(limit)
         result = await db.execute(stmt)
         products = result.scalars().unique().all()
@@ -385,10 +614,117 @@ async def get_all_products(
                 logger.error(f"Помилка валідації Pydantic для Product ID {product.id}: {e}")
                 continue  # Пропускаємо битий товар, решту каталогу не ламаємо
 
-        return products_with_share
+        return ProductListResponse(items=products_with_share, total=total)
 
     except Exception as e:
         logger.error(f"Error in get_all_products: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+def _attr_text(raw: Optional[Dict[str, Any]], key: str) -> str:
+    if not isinstance(raw, dict):
+        return ""
+    return str(raw.get(key) or "").strip()
+
+
+def _first_product_image(product: Product) -> Optional[str]:
+    pictures = product.pictures
+    if isinstance(pictures, list):
+        for url in pictures:
+            text = str(url or "").strip()
+            if text:
+                return text
+    attrs = product.attributes if isinstance(product.attributes, dict) else {}
+    media = attrs.get("media_urls")
+    if isinstance(media, list):
+        for url in media:
+            text = str(url or "").strip()
+            if text:
+                return text
+    return None
+
+
+def _product_color_label(product: Product) -> str:
+    attrs = product.attributes if isinstance(product.attributes, dict) else {}
+    shade = str(attrs.get("color") or "").strip()
+    if shade:
+        return shade
+    pairs = attrs.get("characteristics")
+    if isinstance(pairs, list):
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                continue
+            name = str(pair.get("name") or "").strip().casefold()
+            if name in {"колір", "цвет", "color", "забарвлення"}:
+                value = str(pair.get("value") or "").strip()
+                if value:
+                    return value
+    for key, value in attrs.items():
+        if str(key).strip().casefold() not in {"колір", "цвет", "color", "забарвлення"}:
+            continue
+        if value is None or isinstance(value, (list, dict)):
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+@router.get("/{product_id}/colors", response_model=List[ProductColorVariantAPI])
+async def get_product_color_variants(product_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Інші кольори тієї ж моделі: той самий supplier_id і attributes.base_model_name.
+    Кожен колір — окремий товар (окремий пост постачальника).
+    """
+    try:
+        product = (
+            await db.execute(select(Product).where(Product.id == product_id))
+        ).scalars().one_or_none()
+        if product is None:
+            raise HTTPException(status_code=404, detail="Товар не знайдено")
+        status_value = product.status.value if hasattr(product.status, "value") else str(product.status)
+        if status_value in (ProductStatus.deleted.value, ProductStatus.archived.value):
+            raise HTTPException(status_code=404, detail="Товар не знайдено")
+
+        attrs = product.attributes if isinstance(product.attributes, dict) else {}
+        model_name = _attr_text(attrs, "base_model_name")
+        if not model_name or not product.supplier_id:
+            return []
+
+        model_json = Product.attributes["base_model_name"].as_string()
+        stmt = (
+            select(Product)
+            .where(
+                Product.supplier_id == product.supplier_id,
+                Product.status.notin_((ProductStatus.deleted, ProductStatus.archived)),
+                func.lower(func.trim(model_json)) == model_name.casefold(),
+            )
+            .order_by(Product.id.asc())
+            .limit(30)
+        )
+        siblings = (await db.execute(stmt)).scalars().unique().all()
+
+        ordered: List[Product] = []
+        seen_ids = set()
+        current = next((item for item in siblings if item.id == product.id), product)
+        for item in [current, *siblings]:
+            if item.id in seen_ids:
+                continue
+            seen_ids.add(item.id)
+            ordered.append(item)
+
+        return [
+            ProductColorVariantAPI(
+                product_id=item.id,
+                color=_product_color_label(item),
+                image_url=_first_product_image(item),
+            )
+            for item in ordered
+        ]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in get_product_color_variants ({product_id}): {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

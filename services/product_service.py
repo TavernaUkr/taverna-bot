@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import ROUND_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, List, Optional, Sequence, Union
 
-from sqlalchemy import or_, select
+from sqlalchemy import cast, or_, select, String
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -261,6 +261,7 @@ async def search_products(
                     Product.season.ilike(f"%{q}%"),
                     Product.target_niche.ilike(f"%{q}%"),
                     Product.gender.ilike(f"%{q}%"),
+                    cast(Product.attributes, String).ilike(f"%{q}%"),
                 )
             )
             .limit(limit)
@@ -271,15 +272,15 @@ async def search_products(
         niches = _normalize_filter_values(target_niche)
         genders = _normalize_filter_values(gender)
         if categories:
-            stmt = stmt.where(Product.category.in_(categories))
+            stmt = stmt.where(or_(*(Product.category.ilike(f"%{c}%") for c in categories)))
         if sub_categories:
-            stmt = stmt.where(Product.sub_category.in_(sub_categories))
+            stmt = stmt.where(or_(*(Product.sub_category.ilike(f"%{c}%") for c in sub_categories)))
         if seasons:
-            stmt = stmt.where(Product.season.in_(seasons))
+            stmt = stmt.where(or_(*(Product.season.ilike(f"%{c}%") for c in seasons)))
         if niches:
-            stmt = stmt.where(Product.target_niche.in_(niches))
+            stmt = stmt.where(or_(*(Product.target_niche.ilike(f"%{c}%") for c in niches)))
         if genders:
-            stmt = stmt.where(Product.gender.in_(genders))
+            stmt = stmt.where(or_(*(Product.gender.ilike(f"%{c}%") for c in genders)))
 
         res = await db.execute(stmt)
         products = res.scalars().unique().all()
@@ -292,6 +293,10 @@ async def search_products(
                 v.option_value_ids = [ov.id for ov in (v.option_values or [])]
             item = ProductAPI.model_validate(p)
             item.supplier_name = p.supplier.name if getattr(p, "supplier", None) else None
+            attrs = p.attributes if isinstance(p.attributes, dict) else {}
+            tags = attrs.get("search_tags")
+            if isinstance(tags, list):
+                item.search_tags = [str(tag).strip() for tag in tags if str(tag).strip()]
             if not getattr(p, "is_ai_processed", False):
                 item.category = None
                 item.sub_category = None
@@ -299,6 +304,7 @@ async def search_products(
                 item.target_niche = None
                 item.gender = None
                 item.attributes = None
+                item.search_tags = None
             result_api.append(item)
 
         return result_api

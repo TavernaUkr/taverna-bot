@@ -12,17 +12,26 @@ from telethon import TelegramClient, events
 from database.db import AsyncSessionLocal
 from database.models import Supplier, SupplierStatus
 from services.telegram_parser import (
+    AlbumStitchContext,
     extract_and_upload_message_media,
     extract_photo_urls_from_text,
+    is_album_extra_message,
     parse_telegram_posts_to_products,
 )
-from services.telegram_sync import _source_url_for_message, upsert_parsed_telegram_items
+from services.telegram_sync import (
+    _find_live_product,
+    _source_url_for_message,
+    attach_telegram_album_media,
+    live_message_sku,
+    upsert_parsed_telegram_items,
+)
 
 logger = logging.getLogger(__name__)
 
 _CACHE_TTL_SEC = 60.0
 _channels_cache: Dict[str, object] = {"at": 0.0, "map": {}}
 _listeners_registered = False
+_supplier_stitch: Dict[int, AlbumStitchContext] = {}
 
 
 def _normalize_channel_key(raw: Optional[str]) -> Optional[str]:
@@ -115,6 +124,14 @@ def _event_channel_keys(event) -> list[str]:
     return keys
 
 
+def _stitch_ctx(supplier_id: int) -> AlbumStitchContext:
+    ctx = _supplier_stitch.get(supplier_id)
+    if ctx is None:
+        ctx = AlbumStitchContext()
+        _supplier_stitch[supplier_id] = ctx
+    return ctx
+
+
 def _resolve_supplier_id(event, approved: Dict[str, int]) -> Optional[int]:
     for key in _event_channel_keys(event):
         if key in approved:
@@ -125,7 +142,7 @@ def _resolve_supplier_id(event, approved: Dict[str, int]) -> Optional[int]:
     return None
 
 
-async def _event_post_text(event) -> str:
+async def _event_post_text(event, *, supplier_name: str, supplier_id: int, upload_media: bool = True) -> str:
     message = getattr(event, "message", None)
     text = ""
     if message is not None:
@@ -143,7 +160,13 @@ async def _event_post_text(event) -> str:
             flags.append("є медіа")
         try:
             client = getattr(event, "client", None)
-            public_urls = await extract_and_upload_message_media(client, message)
+            if upload_media:
+                public_urls = await extract_and_upload_message_media(
+                    client,
+                    message,
+                    supplier_name=supplier_name,
+                    supplier_id=supplier_id,
+                )
         except Exception as e:
             logger.warning(
                 "telegram_listener: медіа не завантажено (пост #%s): %s — парсимо текст.",
@@ -162,6 +185,61 @@ async def _event_post_text(event) -> str:
     return ""
 
 
+async def _attach_album_extra(
+    event,
+    *,
+    supplier_id: int,
+    supplier_name: str,
+    ctx: AlbumStitchContext,
+) -> bool:
+    message = getattr(event, "message", None)
+    if message is None or not is_album_extra_message(message) or not ctx.belongs_to_previous(message):
+        return False
+    parent_id = ctx.last_product_message_id
+    if AsyncSessionLocal is not None:
+        async with AsyncSessionLocal() as db:
+            sku = live_message_sku(supplier_id, int(parent_id), 1)
+            source_url = _source_url_for_message(None, None, int(parent_id))
+            product = await _find_live_product(
+                db, supplier_id, sku, int(parent_id), source_url
+            )
+            if product is None:
+                ctx.remember_extra(message)
+                logger.info(
+                    "telegram_listener: альбомне фото поста #%s без товару #%s — не вантажимо.",
+                    getattr(message, "id", "?"), parent_id,
+                )
+                return True
+    urls: list[str] = []
+    try:
+        client = getattr(event, "client", None)
+        urls = await extract_and_upload_message_media(
+            client,
+            message,
+            supplier_name=supplier_name,
+            supplier_id=supplier_id,
+            folder_message_id=parent_id,
+        )
+    except Exception as e:
+        logger.warning(
+            "telegram_listener: альбомне фото поста #%s не завантажено: %s",
+            getattr(message, "id", "?"), e,
+        )
+    ctx.remember_extra(message)
+    if urls and AsyncSessionLocal is not None:
+        async with AsyncSessionLocal() as db:
+            await attach_telegram_album_media(
+                db,
+                supplier_id=supplier_id,
+                attachments=[(parent_id, urls)],
+            )
+    logger.info(
+        "telegram_listener: фото поста #%s додано до товару #%s (supplier #%s).",
+        getattr(message, "id", "?"), parent_id, supplier_id,
+    )
+    return True
+
+
 async def _handle_channel_post(event, *, is_edit: bool) -> None:
     try:
         if not getattr(event, "is_channel", False) and not getattr(event, "is_group", False):
@@ -173,8 +251,37 @@ async def _handle_channel_post(event, *, is_edit: bool) -> None:
         if not supplier_id:
             return
 
-        posts_text = await _event_post_text(event)
+        supplier_name = f"supplier_{supplier_id}"
+        if AsyncSessionLocal is not None:
+            async with AsyncSessionLocal() as db:
+                supplier = await db.get(Supplier, supplier_id)
+                if supplier and getattr(supplier, "name", None):
+                    supplier_name = supplier.name
+
+        ctx = _stitch_ctx(supplier_id)
+        if not is_edit and await _attach_album_extra(
+            event,
+            supplier_id=supplier_id,
+            supplier_name=supplier_name,
+            ctx=ctx,
+        ):
+            return
+
+        posts_text = await _event_post_text(
+            event,
+            supplier_name=supplier_name,
+            supplier_id=supplier_id,
+            upload_media=False,
+        )
         if not posts_text.strip():
+            return
+
+        message = getattr(event, "message", None)
+        if message is not None and is_album_extra_message(message):
+            logger.info(
+                "telegram_listener: короткий медіа-пост #%s без прив'язки до товару — ігнор.",
+                getattr(message, "id", "?"),
+            )
             return
 
         try:
@@ -193,13 +300,27 @@ async def _handle_channel_post(event, *, is_edit: bool) -> None:
             )
             return
 
-        photo_urls = extract_photo_urls_from_text(posts_text)
+        public_urls: list[str] = []
+        try:
+            client = getattr(event, "client", None)
+            public_urls = await extract_and_upload_message_media(
+                client,
+                message,
+                supplier_name=supplier_name,
+                supplier_id=supplier_id,
+            )
+        except Exception as e:
+            logger.warning(
+                "telegram_listener: медіа не завантажено після is_product (пост #%s): %s",
+                getattr(message, "id", "?"), e,
+            )
+        photo_urls = list(public_urls) or extract_photo_urls_from_text(posts_text)
         if photo_urls:
             for item in parsed:
-                if not item.get("image_urls"):
-                    item["image_urls"] = list(photo_urls)
+                item["image_urls"] = list(dict.fromkeys(
+                    list(item.get("image_urls") or []) + list(photo_urls)
+                ))
 
-        message = getattr(event, "message", None)
         message_id = int(getattr(message, "id", 0) or getattr(event, "id", 0) or 0)
         if not message_id:
             return
@@ -219,6 +340,8 @@ async def _handle_channel_post(event, *, is_edit: bool) -> None:
                 source_url=source_url,
                 is_edit=is_edit,
             )
+        if saved and message is not None:
+            ctx.remember_product(message)
         logger.info(
             "telegram_listener: supplier #%s msg %s edit=%s saved=%s",
             supplier_id, message_id, is_edit, saved,

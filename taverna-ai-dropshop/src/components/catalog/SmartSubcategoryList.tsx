@@ -2,7 +2,7 @@ import type { ReactNode, MouseEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { ChevronRight, LayoutGrid, Shirt, Layers, HardHat, Backpack, Footprints, Tag } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { SmartGroupIcon, SmartSubcategoryGroup } from "@/utils/categoryParser";
+import { encodeSubCategoryParam, type SmartGroupIcon, type SmartSubcategoryGroup } from "@/utils/categoryParser";
 
 const ICONS: Record<SmartGroupIcon, ReactNode> = {
   all: <LayoutGrid className="h-5 w-5" />,
@@ -51,10 +51,25 @@ export function SmartSubcategoryList({
     event.preventDefault();
     event.stopPropagation();
     if (parentCategory) {
-      navigate(`/search?category=${encodeURIComponent(parentCategory)}`);
+      navigate(`/catalog?category=${encodeURIComponent(parentCategory)}`);
     } else {
+      navigate("/catalog");
       onSelectAll();
     }
+    onCloseModal?.();
+  };
+
+  const handleSelectGroup = (event: MouseEvent<HTMLButtonElement>, group: SmartSubcategoryGroup) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const params = new URLSearchParams();
+    if (parentCategory) params.set("category", parentCategory);
+    if (group.originals?.length) {
+      params.set("sub_category", encodeSubCategoryParam(group.originals));
+    }
+    const qs = params.toString();
+    navigate(qs ? `/catalog?${qs}` : "/catalog");
+    onSelectGroup(group);
     onCloseModal?.();
   };
 
@@ -86,7 +101,7 @@ export function SmartSubcategoryList({
         <button
           key={group.id}
           type="button"
-          onClick={() => onSelectGroup(group)}
+          onClick={(event) => handleSelectGroup(event, group)}
           className={cn(
             "w-full p-3.5 rounded-2xl flex items-center justify-between gap-3 transition-all",
             "bg-muted/50 border border-border/70 hover:border-primary/40 hover:bg-muted"

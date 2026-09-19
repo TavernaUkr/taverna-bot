@@ -25,7 +25,9 @@ export const FindSimilarButton = ({
   const navigate = useNavigate();
   const [isSearching, setIsSearching] = useState(false);
 
-  const handleFindSimilar = async () => {
+  const handleFindSimilar = async (e?: React.MouseEvent) => {
+    e?.preventDefault();
+    e?.stopPropagation();
     hapticImpact("light");
     setIsSearching(true);
 
@@ -58,13 +60,14 @@ export const FindSimilarButton = ({
     // Simulate brief loading for UX
     setTimeout(() => {
       setIsSearching(false);
-      navigate(`/search?q=${encodeURIComponent(query)}&similar=true`);
+      navigate(`/catalog?q=${encodeURIComponent(query)}&similar=true`);
     }, 300);
   };
 
   if (variant === "icon") {
     return (
       <button
+        type="button"
         onClick={handleFindSimilar}
         disabled={isSearching}
         className={cn(
@@ -106,6 +109,7 @@ export const FindSimilarButton = ({
   // Chip variant (default)
   return (
     <button
+      type="button"
       onClick={handleFindSimilar}
       disabled={isSearching}
       className={cn(

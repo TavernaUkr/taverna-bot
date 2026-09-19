@@ -1,14 +1,18 @@
 import { Package, Ruler, Palette, Cpu, Weight, Battery, Monitor, Shirt, Footprints, Dumbbell } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-interface ProductSpecsProps {
-  attributes?: Record<string, unknown>;
-  categoryName?: string;
-  sizes?: string[];
-  colors?: string[];
-  brand?: string;
-  model?: string;
-}
+const META_ATTRIBUTE_KEYS = new Set([
+  "source",
+  "source_url",
+  "telegram_message_id",
+  "vendor_code",
+  "sizes",
+  "media_urls",
+  "characteristics",
+  "search_tags",
+  "base_model_name",
+  "color",
+]);
 
 // Map of attribute keys to display labels (Ukrainian)
 const attributeLabels: Record<string, { label: string; icon?: React.ReactNode }> = {
@@ -90,6 +94,15 @@ const formatValue = (value: unknown): string => {
   return String(value);
 };
 
+interface ProductSpecsProps {
+  attributes?: Record<string, unknown>;
+  categoryName?: string;
+  sizes?: string[];
+  colors?: string[];
+  brand?: string;
+  model?: string;
+}
+
 export const ProductSpecs = ({
   attributes,
   categoryName,
@@ -115,19 +128,37 @@ export const ProductSpecs = ({
     : [];
   
   // Process attributes with priority sorting
-  if (attributes && typeof attributes === "object") {
-    const attrEntries = Object.entries(attributes)
-      .filter(([_, value]) => value !== null && value !== undefined && value !== "")
+  const characteristicPairs: { name: string; value: unknown }[] = [];
+  if (Array.isArray(attributes?.characteristics)) {
+    for (const entry of attributes.characteristics) {
+      if (!entry || typeof entry !== "object") continue;
+      const row = entry as { name?: unknown; value?: unknown };
+      const name = String(row.name || "").trim();
+      if (name && row.value != null && String(row.value).trim()) {
+        characteristicPairs.push({ name, value: row.value });
+      }
+    }
+  }
+  if (characteristicPairs.length === 0 && attributes && typeof attributes === "object" && !Array.isArray(attributes)) {
+    for (const [key, value] of Object.entries(attributes)) {
+      if (META_ATTRIBUTE_KEYS.has(key.toLowerCase())) continue;
+      if (value !== null && value !== undefined && value !== "" && typeof value !== "object") {
+        characteristicPairs.push({ name: key, value });
+      }
+    }
+  }
+  if (characteristicPairs.length > 0) {
+    const attrEntries = characteristicPairs
       .sort((a, b) => {
-        const aIndex = priorityKeys.indexOf(a[0].toLowerCase());
-        const bIndex = priorityKeys.indexOf(b[0].toLowerCase());
+        const aIndex = priorityKeys.indexOf(a.name.toLowerCase());
+        const bIndex = priorityKeys.indexOf(b.name.toLowerCase());
         if (aIndex === -1 && bIndex === -1) return 0;
         if (aIndex === -1) return 1;
         if (bIndex === -1) return -1;
         return aIndex - bIndex;
       });
     
-    for (const [key, value] of attrEntries) {
+    for (const { name: key, value } of attrEntries) {
       const { label, icon } = getAttributeLabel(key);
       specs.push({ key, label, value: formatValue(value), icon });
     }
