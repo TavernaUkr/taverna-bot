@@ -68,7 +68,12 @@ export interface BackendProduct {
 export interface BackendProductColorVariant {
   product_id: number;
   color: string;
+  // Перше медіа товару (фото АБО відео) — лишили заради сумісності.
   image_url?: string | null;
+  // Усі медіа товару. Кружечок кольору має показувати ФОТО, а не відео
+  // (CSS/img не вміє відрендерити .mp4 як прев'ю) — обираємо перший
+  // не-відео елемент саме з цього масиву.
+  images?: string[] | null;
 }
 
 export interface BackendCategorySub {

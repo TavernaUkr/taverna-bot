@@ -1,6 +1,7 @@
 # services/supabase_storage.py
 """Завантаження фото/відео з Telegram у публічний бакет Supabase Storage."""
 import logging
+import re
 
 from config_reader import config
 
@@ -8,6 +9,54 @@ logger = logging.getLogger(__name__)
 
 _BUCKET = "products"
 _client = None
+
+# Фото + гіфки + відео (кружечки товару) — фронтенд вміє автопрогравати
+# .mp4/.webm через <video autoPlay loop muted playsInline>, .gif рендериться
+# як звичайне зображення через <img>.
+_ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".webm"}
+_ALLOWED_IMAGE_MIME_TYPES = {
+    "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif",
+    "video/mp4", "video/webm",
+}
+
+
+def _sniff_image_extension(file_bytes: bytes) -> str:
+    """Визначає розширення медіафайлу за magic bytes (сигнатурою файлу)."""
+    header = bytes(file_bytes[:16])
+    if header.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return ".webp"
+    if header.startswith(b"GIF87a") or header.startswith(b"GIF89a"):
+        return ".gif"
+    # MP4/MOV-контейнери: перші 4 байти — розмір box'у, далі "ftyp".
+    if header[4:8] == b"ftyp":
+        return ".mp4"
+    # WebM/Matroska: EBML-сигнатура.
+    if header.startswith(b"\x1a\x45\xdf\xa3"):
+        return ".webm"
+    return ""
+
+
+def _resolve_allowed_image_ext(file_name: str, file_bytes: bytes) -> str:
+    """
+    Жорсткий фільтр: у Storage йдуть ТІЛЬКИ .jpg/.jpeg/.png/.webp/.gif/.mp4/.webm.
+    Стікери (.tgs), документи (.pdf) та порожні файли — відсіюються.
+    Якщо розширення в імені немає — пробуємо визначити тип за сигнатурою байтів.
+    Повертає розширення, яке треба зберегти, або "" якщо файл не дозволено.
+    """
+    if not file_bytes:
+        return ""
+    name = (file_name or "").strip().lower()
+    ext = "." + name.rsplit(".", 1)[-1] if "." in name else ""
+    if ext in _ALLOWED_IMAGE_EXTENSIONS:
+        return ext
+
+    # Немає розширення (або невідоме) — пробуємо визначити тип за сигнатурою байтів.
+    # Якщо й це не вдалось (mime необхідних доказів не дає) — ігноруємо файл.
+    return _sniff_image_extension(file_bytes)
 
 
 def _secret(value) -> str:
@@ -54,10 +103,25 @@ def _get_supabase_client():
     return _client
 
 
+_UNSAFE_STORAGE_KEY_RE = re.compile(r"[^A-Za-z0-9_\-.]+")
+
+
+def _ascii_safe_segment(part: str) -> str:
+    """
+    Supabase Storage повертає 400 InvalidKey, якщо ключ містить не-ASCII
+    символи (напр. кирилицю в назві магазину). Захист "про всяк випадок"
+    прямо на межі завантаження — навіть якщо якийсь виклик колись знову
+    підставить сюди сире ім'я замість ID.
+    """
+    ascii_only = (part or "").encode("ascii", "ignore").decode("ascii")
+    return _UNSAFE_STORAGE_KEY_RE.sub("_", ascii_only).strip("_") or "x"
+
+
 def _normalize_folder_path(folder_path: str) -> str:
     raw = (folder_path or "").replace("\\", "/").strip().strip("/")
     parts = [p for p in raw.split("/") if p and p not in (".", "..")]
-    return "/".join(parts)
+    safe_parts = [_ascii_safe_segment(p) for p in parts]
+    return "/".join(safe_parts)
 
 
 def _as_public_url(result, storage_path: str) -> str:
@@ -93,6 +157,22 @@ def upload_media_to_supabase(
     if not name:
         logger.warning("upload_media_to_supabase: порожнє ім'я файлу.")
         return ""
+
+    # Жорсткий фільтр форматів: фото/гіфки/відео (.jpg/.jpeg/.png/.webp/.gif/.mp4/.webm).
+    # Стікери/документи/биті файли сюди потрапити не повинні, навіть якщо
+    # якийсь виклик все ж їх передасть.
+    resolved_ext = _resolve_allowed_image_ext(name, file_bytes)
+    if not resolved_ext:
+        logger.warning(
+            "upload_media_to_supabase: файл %s (%s) не є .jpg/.jpeg/.png/.webp/.gif/.mp4/.webm — завантаження скасовано.",
+            name, content_type or "?",
+        )
+        return ""
+    if not name.lower().endswith(resolved_ext):
+        # Розширення визначили за сигнатурою байтів (в імені його не було) — підставляємо.
+        base = name.rsplit(".", 1)[0] if "." in name else name
+        name = f"{base}{resolved_ext}"
+
     folder = _normalize_folder_path(folder_path)
     if not folder:
         logger.warning("upload_media_to_supabase: порожній folder_path.")

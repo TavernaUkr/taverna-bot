@@ -65,6 +65,9 @@ interface Product {
   model?: string;
   sizes?: string[];
   colors?: string[];
+  // Фіксований колір ЦЬОГО товару (окремий товар-побратим за base_model_name,
+  // а не опція вибору всередині товару). Потрібен для чіпа в модалці кошика.
+  color?: string;
   in_stock: boolean;
   stock_quantity?: number;
   vendor_code?: string;
@@ -1153,6 +1156,7 @@ export default function SearchResults() {
                 stockQuantity={product.stock_quantity}
                 sizes={product.sizes}
                 colors={product.colors}
+                color={product.color}
                 variants={product.variants}
                 options={product.options}
                 supplierName={product.supplier_name}

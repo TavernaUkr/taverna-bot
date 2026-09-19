@@ -192,24 +192,20 @@ async def _attach_album_extra(
     supplier_name: str,
     ctx: AlbumStitchContext,
 ) -> bool:
+    """
+    Медіа-повідомлення без тексту, що йде одразу після товарного поста (альбом
+    або просто "досипане" фото). Товар-власник (parent_id) може ще НЕ існувати
+    в БД: основний пост усе ще обробляється Gemini (двоетапний пайплайн +
+    троттлінг-паузи). У цьому разі фото НЕ викидаємо, а кладемо в
+    ctx.pending_attachments — воно приклеїться, щойно товар #parent_id
+    з'явиться в БД (див. _handle_channel_post → pop_attachments_for).
+    """
     message = getattr(event, "message", None)
     if message is None or not is_album_extra_message(message) or not ctx.belongs_to_previous(message):
         return False
-    parent_id = ctx.last_product_message_id
-    if AsyncSessionLocal is not None:
-        async with AsyncSessionLocal() as db:
-            sku = live_message_sku(supplier_id, int(parent_id), 1)
-            source_url = _source_url_for_message(None, None, int(parent_id))
-            product = await _find_live_product(
-                db, supplier_id, sku, int(parent_id), source_url
-            )
-            if product is None:
-                ctx.remember_extra(message)
-                logger.info(
-                    "telegram_listener: альбомне фото поста #%s без товару #%s — не вантажимо.",
-                    getattr(message, "id", "?"), parent_id,
-                )
-                return True
+    parent_id = int(ctx.last_product_message_id)
+    ctx.remember_extra(message)
+
     urls: list[str] = []
     try:
         client = getattr(event, "client", None)
@@ -225,18 +221,39 @@ async def _attach_album_extra(
             "telegram_listener: альбомне фото поста #%s не завантажено: %s",
             getattr(message, "id", "?"), e,
         )
-    ctx.remember_extra(message)
-    if urls and AsyncSessionLocal is not None:
+    if not urls:
+        logger.info(
+            "telegram_listener: медіа поста #%s не завантажено (непідтримуваний формат чи порожній файл) — пропущено.",
+            getattr(message, "id", "?"),
+        )
+        return True
+
+    product = None
+    if AsyncSessionLocal is not None:
         async with AsyncSessionLocal() as db:
-            await attach_telegram_album_media(
-                db,
-                supplier_id=supplier_id,
-                attachments=[(parent_id, urls)],
-            )
-    logger.info(
-        "telegram_listener: фото поста #%s додано до товару #%s (supplier #%s).",
-        getattr(message, "id", "?"), parent_id, supplier_id,
-    )
+            sku = live_message_sku(supplier_id, parent_id, 1)
+            source_url = _source_url_for_message(None, None, parent_id)
+            product = await _find_live_product(db, supplier_id, sku, parent_id, source_url)
+            if product is not None:
+                await attach_telegram_album_media(
+                    db,
+                    supplier_id=supplier_id,
+                    attachments=[(parent_id, urls)],
+                )
+
+    if product is None:
+        # Товар #parent_id ще не збережено (Gemini досі обробляє основний пост) —
+        # відкладаємо фото в чергу замість того, щоб його втратити.
+        ctx.pending_attachments.append((parent_id, urls))
+        logger.info(
+            "telegram_listener: товар #%s ще не готовий — фото поста #%s відкладено в чергу.",
+            parent_id, getattr(message, "id", "?"),
+        )
+    else:
+        logger.info(
+            "telegram_listener: фото поста #%s додано до товару #%s (supplier #%s).",
+            getattr(message, "id", "?"), parent_id, supplier_id,
+        )
     return True
 
 
@@ -342,6 +359,20 @@ async def _handle_channel_post(event, *, is_edit: bool) -> None:
             )
         if saved and message is not None:
             ctx.remember_product(message)
+            # Товар щойно з'явився в БД — приклеюємо фото, які "досипались"
+            # окремими повідомленнями ПОКИ Gemini обробляв основний пост.
+            leftover_urls = ctx.pop_attachments_for(message_id)
+            if leftover_urls:
+                async with AsyncSessionLocal() as db2:
+                    attached = await attach_telegram_album_media(
+                        db2,
+                        supplier_id=supplier_id,
+                        attachments=[(message_id, leftover_urls)],
+                    )
+                logger.info(
+                    "telegram_listener: %s відкладене фото приклеєно до товару поста #%s (attached=%s).",
+                    len(leftover_urls), message_id, attached,
+                )
         logger.info(
             "telegram_listener: supplier #%s msg %s edit=%s saved=%s",
             supplier_id, message_id, is_edit, saved,

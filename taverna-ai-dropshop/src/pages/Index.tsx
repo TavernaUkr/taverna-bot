@@ -207,6 +207,7 @@ const CatalogTab = ({
                 stockQuantity={product.stock_quantity}
                 sizes={product.sizes}
                 colors={product.colors}
+                color={product.color}
                 variants={product.variants}
                 options={product.options}
                 supplierName={product.supplier_name}

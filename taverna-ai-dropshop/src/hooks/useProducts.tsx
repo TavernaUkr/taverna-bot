@@ -43,6 +43,12 @@ export interface Product {
   gender?: string;
   supplier_name?: string;
   attributes?: Record<string, string>;
+  // Фіксований колір ЦЬОГО товару (напр. "Олива") — коли колір це не
+  // "опція вибору" всередині товару, а окремий постачальницький пост
+  // (окремий Product на кожен колір, склеєний через base_model_name).
+  // Використовується там, де вибору кольору немає, але його треба ПОКАЗАТИ
+  // (напр. модалка швидкого додавання в кошик з картки товару).
+  color?: string;
   category?: {
     id: string;
     name: string;
@@ -139,6 +145,30 @@ export function mapBackendProductToUi(bp: BackendProduct): Product {
     return Object.keys(result).length ? result : undefined;
   })();
 
+  // Фіксований колір товару (дзеркалить `_product_color_label` в
+  // api/products.py): спершу пласке поле attributes.color, потім пошук по
+  // characteristics [{name, value}] за назвою "колір"/"цвет"/"color".
+  const fixedColor: string | undefined = (() => {
+    const raw = bp.attributes;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    const obj = raw as Record<string, unknown>;
+    const direct = String(obj.color ?? "").trim();
+    if (direct) return direct;
+    const chars = obj.characteristics;
+    if (Array.isArray(chars)) {
+      for (const entry of chars) {
+        if (entry && typeof entry === "object" && "name" in entry) {
+          const name = String((entry as { name?: unknown }).name || "").trim().toLowerCase();
+          if (["колір", "цвет", "color", "забарвлення"].includes(name)) {
+            const value = String((entry as { value?: unknown }).value ?? "").trim();
+            if (value) return value;
+          }
+        }
+      }
+    }
+    return undefined;
+  })();
+
   return {
     id: String(bp.id),
     external_id: bp.sku,
@@ -158,6 +188,7 @@ export function mapBackendProductToUi(bp: BackendProduct): Product {
     gender,
     supplier_name: bp.supplier_name?.trim() || undefined,
     attributes,
+    color: fixedColor,
     ai_tags: Array.isArray(bp.search_tags)
       ? bp.search_tags.map((tag) => String(tag).trim()).filter(Boolean)
       : undefined,

@@ -41,6 +41,10 @@ interface Product {
   stock_quantity?: number;
   sizes?: string[];
   colors?: string[];
+  // Ця сторінка бере товари напряму з Supabase (без attributes/колонки
+  // "color"), тож поле лишається порожнім — ProductCard/модалка кошика
+  // просто не покажуть чіп кольору тут (legacy-джерело даних).
+  color?: string;
   category?: { id: string; name: string };
 }
 
@@ -434,6 +438,7 @@ const SupplierProfile = () => {
                   stockQuantity={product.stock_quantity}
                   sizes={product.sizes}
                   colors={product.colors}
+                  color={product.color}
                   isFavorite={isFavorite(product.id)}
                   onClick={() => navigate(`/product/${product.id}`)}
                   onAddToCart={() => handleAddToCart(product)}

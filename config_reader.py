@@ -4,11 +4,21 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import SecretStr, AnyUrl, FilePath, field_validator, ConfigDict
 from typing import Optional
 from pathlib import Path
+from dotenv import load_dotenv
 
 env_path = Path(__file__).parent / ".env" 
 if not env_path.exists():
     env_path = Path(".env")
 logging.info(f"Завантаження .env з: {env_path.resolve()}")
+
+# ВАЖЛИВО: override=True. pydantic-settings за замовчуванням віддає
+# пріоритет вже встановленим змінним ОС/терміналу над .env-файлом — тож
+# старий закешований ключ (напр. GEMINI_API_KEY з попередньої сесії
+# терміналу чи системних Environment Variables Windows) "перемагав" би
+# новий, щойно вписаний у .env. load_dotenv(override=True) примусово
+# перезаписує os.environ значеннями з .env, тож Settings() нижче завжди
+# читає саме те, що зараз реально лежить у файлі.
+load_dotenv(dotenv_path=env_path, override=True)
 
 
 def sanitize_gemini_api_key(raw: object) -> str:

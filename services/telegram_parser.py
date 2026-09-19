@@ -121,6 +121,48 @@ def extract_photo_urls_from_text(text: str) -> list[str]:
     return urls
 
 
+# Фото + гіфки + відео (Supabase Storage їх теж роздає, а фронтенд тепер
+# вміє відрендерити <video autoPlay loop muted> для .mp4/.webm/.gif).
+_ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4", ".webm"}
+_ALLOWED_IMAGE_MIME_TYPES = {
+    "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif",
+    "video/mp4", "video/webm",
+}
+
+
+def _document_file_ext(document) -> str:
+    """Розширення файлу документа з file_name-атрибута, якщо є."""
+    for attr in getattr(document, "attributes", None) or []:
+        raw_name = str(getattr(attr, "file_name", None) or "").strip()
+        if raw_name and "." in raw_name:
+            return "." + raw_name.rsplit(".", 1)[-1].lower()
+    return ""
+
+
+def _is_supported_image_message(message) -> bool:
+    """
+    Жорсткий фільтр форматів ДО завантаження байтів з Telegram.
+    Дозволено: звичайні фото (message.photo), документи-картинки
+    .jpg/.jpeg/.png/.webp/.gif та відео .mp4/.webm (кружечки/анімації
+    товару — фронтенд вміє автопрогравати їх у картках). Стікери (.tgs),
+    інші документи (.pdf тощо) та все, що не впізнали, — ігноруємо.
+    """
+    if getattr(message, "photo", None):
+        return True
+
+    document = getattr(message, "document", None)
+    if document is None:
+        return False
+
+    ext = _document_file_ext(document)
+    if ext:
+        return ext in _ALLOWED_IMAGE_EXTENSIONS
+
+    # Без імені файлу — визначаємо тип за mime_type документа.
+    mime = str(getattr(document, "mime_type", None) or "").strip().lower()
+    return mime in _ALLOWED_IMAGE_MIME_TYPES
+
+
 def _media_filename_and_type(message) -> tuple[str, str]:
     photo = getattr(message, "photo", None)
     if photo:
@@ -130,19 +172,11 @@ def _media_filename_and_type(message) -> tuple[str, str]:
     mime = ""
     if document is not None:
         mime = str(getattr(document, "mime_type", None) or "").strip()
-        for attr in getattr(document, "attributes", None) or []:
-            raw_name = str(getattr(attr, "file_name", None) or "").strip()
-            if raw_name and "." in raw_name:
-                ext = "." + raw_name.rsplit(".", 1)[-1].lower()
-                return f"{uuid4()}{ext}", mime or "application/octet-stream"
+        ext = _document_file_ext(document)
+        if ext:
+            return f"{uuid4()}{ext}", mime or "application/octet-stream"
 
-    video = getattr(message, "video", None)
-    if video or (mime.startswith("video/")):
-        mime = mime or str(getattr(video, "mime_type", None) or "video/mp4")
-        ext = ".webm" if "webm" in mime else ".mp4"
-        return f"{uuid4()}{ext}", mime
-
-    if mime.startswith("image/"):
+    if mime in _ALLOWED_IMAGE_MIME_TYPES:
         subtype = mime.split("/", 1)[-1].split(";")[0].strip() or "jpeg"
         ext = ".jpg" if subtype in ("jpeg", "jpg") else f".{subtype}"
         return f"{uuid4()}{ext}", mime
@@ -150,13 +184,35 @@ def _media_filename_and_type(message) -> tuple[str, str]:
     return f"{uuid4()}.bin", mime or "application/octet-stream"
 
 
+_UNSAFE_PATH_CHARS_RE = re.compile(r"[^A-Za-z0-9_]+")
+
+
+def _sanitize_path_segment(raw: str, fallback: str = "shop") -> str:
+    """
+    Supabase Storage вимагає, щоб ключ (шлях у бакеті) містив ЛИШЕ ASCII.
+    Кирилиця (напр. назва магазину «Таверна») ламає завантаження з 400 InvalidKey.
+    Це запасний варіант на випадок, якщо supplier_id недоступний: транслітерації
+    не робимо (немає надійної бібліотеки в проєкті) — просто жорстко відкидаємо
+    все, крім латиниці/цифр/підкреслення.
+    """
+    ascii_only = (raw or "").encode("ascii", "ignore").decode("ascii")
+    safe = _UNSAFE_PATH_CHARS_RE.sub("_", ascii_only).strip("_")
+    return safe or fallback
+
+
 def _telegram_media_folder_path(supplier_name: str, supplier_id: int, message_id) -> str:
-    safe_name = "".join(
-        c for c in (supplier_name or "") if c.isalnum() or c in (" ", "_")
-    ).replace(" ", "_")
-    if not safe_name:
-        safe_name = "shop"
-    return f"telegram_media/{safe_name}_{int(supplier_id or 0)}/post_{int(message_id or 0)}"
+    """
+    Шлях у бакеті Supabase Storage. ГОЛОВНЕ ПРАВИЛО: лише англійські літери,
+    цифри та підкреслення — тому шлях будується ТІЛЬКИ з числового supplier_id,
+    а не з назви магазину (яка часто кирилична і ламала upload з 400 InvalidKey).
+    `supplier_name` лишили в сигнатурі заради сумісності викликів; якщо
+    supplier_id раптом недоступний — фолбек на жорстко очищену ASCII-назву.
+    """
+    sid = int(supplier_id or 0)
+    if sid > 0:
+        return f"telegram_media/supplier_{sid}/post_{int(message_id or 0)}"
+    safe_name = _sanitize_path_segment(supplier_name)
+    return f"telegram_media/{safe_name}/post_{int(message_id or 0)}"
 
 
 MIN_PRODUCT_TEXT_LEN = 12
@@ -211,9 +267,14 @@ class AlbumStitchContext:
         msg_id = int(getattr(message, "id", 0) or 0)
         if not msg_id:
             return False
-        if msg_id == self.last_product_message_id + 1:
-            return True
-        return bool(self.last_extra_message_id and msg_id == self.last_extra_message_id + 1)
+        # РАНІШЕ вимагали строго ID+1 (жорсткий ланцюжок без жодного розриву).
+        # Це ламалося, якщо між товарним постом і "досипаним" фото траплявся
+        # службовий/видалений message_id (розрив у нумерації Telegram).
+        # ТЕПЕР: будь-яке медіа-повідомлення БЕЗ тексту, що йде хронологічно
+        # ПІСЛЯ останнього товарного поста — належить йому, доки не з'явиться
+        # наступний повноцінний текстовий пост (він скидає last_product_message_id).
+        last_known = max(self.last_product_message_id, self.last_extra_message_id or 0)
+        return msg_id > last_known
 
     def remember_product(self, message) -> None:
         msg_id = int(getattr(message, "id", 0) or 0)
@@ -233,6 +294,25 @@ class AlbumStitchContext:
         items = list(self.pending_attachments)
         self.pending_attachments = []
         return items
+
+    def pop_attachments_for(self, parent_id: int) -> list[str]:
+        """
+        Дістає й прибирає з черги ТІЛЬКИ ті відкладені фото, що належать
+        конкретному товару (parent_id). Решта (для ще не збережених товарів)
+        лишається в pending_attachments — чекає на свій продукт.
+        """
+        target = int(parent_id or 0)
+        if not target:
+            return []
+        keep: list = []
+        matched_urls: list[str] = []
+        for pid, urls in self.pending_attachments:
+            if int(pid) == target:
+                matched_urls.extend(urls or [])
+            else:
+                keep.append((pid, urls))
+        self.pending_attachments = keep
+        return matched_urls
 
     def take_album_ids(self) -> list:
         items = list(self.pending_album_ids)
@@ -271,6 +351,10 @@ async def _stitch_channel_messages(
     ctx = stitch_ctx or AlbumStitchContext()
     ordered = sorted(messages, key=lambda item: int(getattr(item, "id", 0) or 0))
     posts_by_id: dict[int, dict] = {}
+    # last_product_post: пряме посилання на останній товарний пост (з текстом),
+    # щоб "досипані" фото без тексту (окремі повідомлення або хвіст альбому)
+    # приклеювались саме до нього, поки не з'явиться наступний текстовий пост.
+    last_product_post: Optional[dict] = None
 
     for message in ordered:
         msg_id = int(getattr(message, "id", 0) or 0)
@@ -291,12 +375,14 @@ async def _stitch_channel_messages(
                     supplier_id=supplier_id,
                     folder_message_id=parent_id,
                 )
-            if parent_id in posts_by_id:
+            if last_product_post is not None and last_product_post.get("message_id") == parent_id:
+                # Пост-власник ще в пам'яті цього ж виклику — клеїмо медіа напряму.
                 if urls:
-                    _append_media_to_post(posts_by_id[parent_id], urls)
+                    _append_media_to_post(last_product_post, urls)
                 else:
-                    posts_by_id[parent_id].setdefault("album_message_ids", []).append(msg_id)
+                    last_product_post.setdefault("album_message_ids", []).append(msg_id)
             elif urls:
+                # Пост-власник з попередньої сторінки/батча — відкладаємо до flush'у.
                 ctx.pending_attachments.append((parent_id, urls))
             else:
                 ctx.pending_album_ids.append((parent_id, msg_id))
@@ -325,7 +411,7 @@ async def _stitch_channel_messages(
         formatted = _format_post(message, public_urls)
         if not formatted:
             continue
-        posts_by_id[msg_id] = {
+        new_post = {
             "message_id": msg_id,
             "formatted": formatted,
             "text": text,
@@ -335,6 +421,8 @@ async def _stitch_channel_messages(
             "grouped_id": getattr(message, "grouped_id", None),
             "album_message_ids": [],
         }
+        posts_by_id[msg_id] = new_post
+        last_product_post = new_post
         ctx.remember_product(message)
 
     return list(posts_by_id.values())
@@ -388,6 +476,12 @@ async def extract_and_upload_message_media(
     Помилка завантаження не валить парсинг тексту: повертає [].
     """
     if client is None or message is None or not getattr(message, "media", None):
+        return []
+    if not _is_supported_image_message(message):
+        logger.info(
+            "telegram_parser: медіа поста #%s не є .jpg/.jpeg/.png/.webp — пропущено (відео/документ/стікер).",
+            getattr(message, "id", "?"),
+        )
         return []
     try:
         media_bytes = await client.download_media(message, file=bytes)

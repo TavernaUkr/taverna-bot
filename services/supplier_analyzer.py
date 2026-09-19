@@ -1,25 +1,49 @@
 # services/supplier_analyzer.py
-"""AI-модерація заявок постачальників (google.genai SDK). Не чіпає логіку товарів."""
+"""AI-модерація заявок постачальників — прямі REST-запити до Gemini API (aiohttp).
+Не чіпає логіку товарів.
+
+SDK google-genai НЕ використовується: він хибно трактує ключі формату AQ...
+як OAuth-токени і шле Bearer-заголовок, через що Google повертає 401 UNAUTHENTICATED.
+REST API з ключем у query-параметрі ?key=... працює коректно.
+"""
 import asyncio
+import json
 import logging
 from typing import Any, Dict, Optional
 
-try:
-    from google import genai
-    from google.genai import types
-    from google.genai import errors as genai_errors
-except ImportError:
-    genai = None  # type: ignore
-    types = None  # type: ignore
-    genai_errors = None  # type: ignore
+import aiohttp
 
-from config_reader import config
-from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager, build_genai_client
+from config_reader import config, sanitize_gemini_api_key
+from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager
 
 logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini-3.6-flash"
 GEMINI_FALLBACK_MODEL = "gemini-3.6-flash"
+
+GEMINI_REST_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_REST_TIMEOUT = aiohttp.ClientTimeout(total=120)
+
+
+def _extract_gemini_rest_text(data: Dict[str, Any]) -> str:
+    """Витягує згенерований текст з JSON-відповіді REST API generateContent."""
+    if not isinstance(data, dict):
+        return ""
+    candidates = data.get("candidates") or []
+    if not candidates:
+        feedback = data.get("promptFeedback") or {}
+        block_reason = feedback.get("blockReason")
+        if block_reason:
+            raise Exception(f"Gemini заблокував запит: {block_reason}")
+        return ""
+    first = candidates[0] if isinstance(candidates[0], dict) else {}
+    finish_reason = str(first.get("finishReason") or "")
+    parts = ((first.get("content") or {}).get("parts")) or []
+    texts = [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text")]
+    text = "".join(texts).strip()
+    if not text and finish_reason and finish_reason not in ("STOP", ""):
+        raise Exception(f"Gemini завершив відповідь без тексту: finishReason={finish_reason}")
+    return text
 
 
 def _normalize_source_link(link: Optional[str]) -> str:
@@ -91,24 +115,6 @@ async def history_warning_for_links(*links: Optional[str]) -> str:
     return _history_warning_text(history.deleted_at)
 
 
-async def _aclose_analyzer_client(client) -> None:
-    if client is None:
-        return
-    try:
-        aio = getattr(client, "aio", None)
-        aclose = getattr(aio, "aclose", None) if aio is not None else None
-        if callable(aclose):
-            result = aclose()
-            if asyncio.iscoroutine(result):
-                await result
-            return
-        close = getattr(client, "close", None)
-        if callable(close):
-            close()
-    except Exception:
-        pass
-
-
 class SupplierAnalyzer:
     """Короткий security-звіт по заявці магазину для CEO."""
 
@@ -121,12 +127,12 @@ class SupplierAnalyzer:
             self._key_manager = GeminiKeyManager(
                 [str(api_key).strip(), *list(config.GEMINI_API_KEYS)]
             )
-        if genai is None or not self._key_manager.has_keys():
-            logger.warning("GEMINI_API_KEYS не знайдено або google-genai не встановлено. AI-скоринг заявок буде пропущено.")
+        if not self._key_manager.has_keys():
+            logger.warning("GEMINI_API_KEYS не знайдено. AI-скоринг заявок буде пропущено.")
 
     @property
     def is_ready(self) -> bool:
-        return bool(genai is not None and self._key_manager.has_keys())
+        return bool(self._key_manager.has_keys())
 
     def _build_prompt(self, supplier_data: dict, has_duplicates: bool, history_note: str = "") -> str:
         extra = f" {history_note}" if history_note else ""
@@ -143,46 +149,81 @@ class SupplierAnalyzer:
         *,
         response_mime_type: Optional[str] = None,
     ) -> str:
-        if genai is None or types is None or not self._key_manager.has_keys():
+        """
+        Прямий асинхронний REST-запит до Gemini API через aiohttp.
+        SDK google-genai НЕ використовується (401 UNAUTHENTICATED на ключах AQ...).
+        Ключ передається через query-параметр ?key=..., як рекомендує REST API.
+        """
+        if not self._key_manager.has_keys():
             raise Exception("Gemini client is not configured")
+
+        generation_config: Dict[str, Any] = {
+            "temperature": 0.2,
+            "maxOutputTokens": 800,
+        }
+        if response_mime_type:
+            generation_config["responseMimeType"] = response_mime_type
+
+        payload: Dict[str, Any] = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": generation_config,
+        }
+
         last_error: Optional[Exception] = None
         for _ in range(max(1, self._key_manager.key_count)):
             try:
                 active_key = self._key_manager.get_next_active_key()
             except AllKeysExhaustedError as e:
                 raise Exception("429 Rate Limit") from e
-            client = build_genai_client(active_key)
-            cfg_kwargs: Dict[str, Any] = {
-                "temperature": 0.2,
-                "max_output_tokens": 800,
-            }
-            if response_mime_type:
-                cfg_kwargs["response_mime_type"] = response_mime_type
+
+            key = sanitize_gemini_api_key(active_key)
+            url = f"{GEMINI_REST_BASE}/{model_name}:generateContent?key={key}"
+
             try:
-                try:
-                    response = await client.aio.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(**cfg_kwargs),
-                    )
-                except Exception as e:
-                    api_error = getattr(genai_errors, "APIError", None) if genai_errors else None
-                    code = getattr(e, "code", None)
-                    if (api_error and isinstance(e, api_error) and code == 429) or "429" in str(e):
-                        self._key_manager.mark_key_exhausted(active_key)
-                        last_error = e
-                        continue
-                    if api_error and isinstance(e, api_error):
-                        if e.code == 503:
-                            raise Exception("503 High Demand") from e
-                        raise Exception(f"Gemini API Error {e.code}: {e.message or e}") from e
-                    raise
-                text = (response.text or "").strip()
-                if not text:
-                    raise Exception("Gemini повернув порожню відповідь")
-                return text
-            finally:
-                await _aclose_analyzer_client(client)
+                async with aiohttp.ClientSession(timeout=GEMINI_REST_TIMEOUT) as session:
+                    async with session.post(
+                        url,
+                        json=payload,
+                        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                    ) as resp:
+                        status = resp.status
+                        raw_text = await resp.text()
+
+                        if status == 200:
+                            try:
+                                data = json.loads(raw_text)
+                            except Exception as e:
+                                raise Exception(
+                                    f"Gemini REST повернув невалідний JSON (HTTP 200): {raw_text[:300]}"
+                                ) from e
+                            text = _extract_gemini_rest_text(data)
+                            if not text:
+                                raise Exception("Gemini повернув порожню відповідь")
+                            return text
+
+                        if status == 429:
+                            self._key_manager.mark_key_exhausted(active_key)
+                            last_error = Exception(f"429 Rate Limit: {raw_text[:300]}")
+                            continue
+
+                        if status in (401, 403):
+                            self._key_manager.mark_key_exhausted(active_key)
+                            last_error = Exception(f"{status} UNAUTHENTICATED: {raw_text[:300]}")
+                            continue
+
+                        if status == 503:
+                            raise Exception(f"503 High Demand: {raw_text[:300]}")
+
+                        raise Exception(f"Gemini API Error {status}: {raw_text[:500]}")
+            except aiohttp.ClientError as e:
+                last_error = e
+                logger.warning(
+                    "Gemini REST мережева помилка на ключі ...%s: %s",
+                    key[-4:],
+                    e,
+                )
+                continue
+
         raise Exception("429 Rate Limit") from last_error
 
     async def analyze_supplier(self, supplier_data: dict, has_duplicates: bool) -> str:

@@ -2,8 +2,9 @@ import os
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
-# Завантажуємо ключі з .env
-load_dotenv()
+# Завантажуємо ключі з .env (override=True — не даємо старим закешованим
+# змінним середовища "перемагати" актуальні значення з файлу)
+load_dotenv(override=True)
 url: str = os.environ.get("SUPABASE_URL")
 key: str = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
 

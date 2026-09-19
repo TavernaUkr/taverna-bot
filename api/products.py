@@ -628,20 +628,28 @@ def _attr_text(raw: Optional[Dict[str, Any]], key: str) -> str:
 
 
 def _first_product_image(product: Product) -> Optional[str]:
-    pictures = product.pictures
-    if isinstance(pictures, list):
-        for url in pictures:
+    images = _product_images_list(product)
+    return images[0] if images else None
+
+
+def _product_images_list(product: Product) -> List[str]:
+    """Усі медіа товару (фото/гіфки/відео), без порожніх/дублікатних значень."""
+    result: List[str] = []
+    seen: set = set()
+
+    def _add_all(raw) -> None:
+        if not isinstance(raw, list):
+            return
+        for url in raw:
             text = str(url or "").strip()
-            if text:
-                return text
+            if text and text not in seen:
+                seen.add(text)
+                result.append(text)
+
+    _add_all(product.pictures)
     attrs = product.attributes if isinstance(product.attributes, dict) else {}
-    media = attrs.get("media_urls")
-    if isinstance(media, list):
-        for url in media:
-            text = str(url or "").strip()
-            if text:
-                return text
-    return None
+    _add_all(attrs.get("media_urls"))
+    return result
 
 
 def _product_color_label(product: Product) -> str:
@@ -691,18 +699,31 @@ async def get_product_color_variants(product_id: int, db: AsyncSession = Depends
         if not model_name or not product.supplier_id:
             return []
 
-        model_json = Product.attributes["base_model_name"].as_string()
+        # Смарт-склейка (fuzzy match) ПОВНІСТЮ на Python-стороні, а не в SQL.
+        # SQLite (використовується локально/у деяких деплоях) не вміє
+        # нормально робити ilike/lower по значеннях всередині JSON-колонки
+        # (attributes) — SQL-варіант мовчки не знаходив збігів. Тому просто
+        # тягнемо останні активні товари цього постачальника і фільтруємо
+        # їх у Python — це працює однаково і на SQLite, і на Postgres.
+        model_prefix = model_name.strip()[:15].lower()
+
         stmt = (
             select(Product)
             .where(
                 Product.supplier_id == product.supplier_id,
                 Product.status.notin_((ProductStatus.deleted, ProductStatus.archived)),
-                func.lower(func.trim(model_json)) == model_name.casefold(),
             )
-            .order_by(Product.id.asc())
-            .limit(30)
+            .order_by(Product.id.desc())
+            .limit(200)
         )
-        siblings = (await db.execute(stmt)).scalars().unique().all()
+        all_supplier_products = (await db.execute(stmt)).scalars().unique().all()
+
+        def _base_model_prefix(item: Product) -> str:
+            item_attrs = item.attributes if isinstance(item.attributes, dict) else {}
+            return _attr_text(item_attrs, "base_model_name")[:15].lower().strip()
+
+        siblings = [p for p in all_supplier_products if _base_model_prefix(p) == model_prefix]
+        siblings.sort(key=lambda item: item.id)
 
         ordered: List[Product] = []
         seen_ids = set()
@@ -718,6 +739,7 @@ async def get_product_color_variants(product_id: int, db: AsyncSession = Depends
                 product_id=item.id,
                 color=_product_color_label(item),
                 image_url=_first_product_image(item),
+                images=_product_images_list(item),
             )
             for item in ordered
         ]

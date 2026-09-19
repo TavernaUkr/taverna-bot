@@ -18,6 +18,7 @@ import {
   type BackendProductColorVariant,
 } from "@/lib/backendApi";
 import { formatProductDescription } from "@/lib/formatDescription";
+import { isVideoUrl, firstPhotoUrl } from "@/lib/media";
 import { useCartContext } from "@/contexts/CartContext";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 import { Button } from "@/components/ui/button";
@@ -245,7 +246,9 @@ const ProductDetail = () => {
     ? selectedVariant.is_available && selectedVariant.quantity > 0
     : product?.in_stock ?? false;
 
-  const showRelatedColors = relatedColors.length > 1;
+  // Показуємо блок кольорів навіть якщо колір лише один — клієнт має бачити,
+  // який саме колір у цього товару (а не гадати з назви/фото).
+  const showRelatedColors = relatedColors.length >= 1;
   const showInlineColors = !showRelatedColors && !!product?.colors?.length;
 
   // Якщо переключили варіант і в ньому залишків менше за обрану кількість — коригуємо кількість.
@@ -596,11 +599,22 @@ const ProductDetail = () => {
         <DialogTrigger asChild>
           <div className="relative cursor-pointer">
             <div className="aspect-square bg-muted overflow-hidden">
-              <img
-                src={product.images?.[selectedImage] || "/placeholder.svg"}
-                alt={product.name}
-                className="w-full h-full object-cover"
-              />
+              {isVideoUrl(product.images?.[selectedImage]) ? (
+                <video
+                  src={product.images?.[selectedImage]}
+                  className="w-full h-full object-cover"
+                  autoPlay
+                  loop
+                  muted
+                  playsInline
+                />
+              ) : (
+                <img
+                  src={product.images?.[selectedImage] || "/placeholder.svg"}
+                  alt={product.name}
+                  className="w-full h-full object-cover"
+                />
+              )}
               {discount > 0 && (
                 <div className="absolute top-4 left-4 bg-live text-live-foreground text-sm font-bold px-3 py-1 rounded-lg">
                   -{discount}%
@@ -654,11 +668,22 @@ const ProductDetail = () => {
             <DialogTitle className="text-white">Галерея</DialogTitle>
           </DialogHeader>
           <div className="relative">
-            <img
-              src={product.images?.[selectedImage] || "/placeholder.svg"}
-              alt={product.name}
-              className="w-full max-h-[70vh] object-contain"
-            />
+            {isVideoUrl(product.images?.[selectedImage]) ? (
+              <video
+                src={product.images?.[selectedImage]}
+                className="w-full max-h-[70vh] object-contain"
+                autoPlay
+                loop
+                muted
+                playsInline
+              />
+            ) : (
+              <img
+                src={product.images?.[selectedImage] || "/placeholder.svg"}
+                alt={product.name}
+                className="w-full max-h-[70vh] object-contain"
+              />
+            )}
             {product.images && product.images.length > 1 && (
               <>
                 <button
@@ -688,7 +713,11 @@ const ProductDetail = () => {
                     idx === selectedImage ? "border-primary" : "border-transparent opacity-60"
                   )}
                 >
-                  <img src={img} alt="" className="w-full h-full object-cover" />
+                  {isVideoUrl(img) ? (
+                    <video src={img} className="w-full h-full object-cover" autoPlay loop muted playsInline />
+                  ) : (
+                    <img src={img} alt="" className="w-full h-full object-cover" />
+                  )}
                 </button>
               ))}
             </div>
@@ -710,7 +739,11 @@ const ProductDetail = () => {
                     idx === selectedImage ? "border-primary" : "border-border"
                   )}
                 >
-                  <img src={img} alt="" className="w-full h-full object-cover" />
+                  {isVideoUrl(img) ? (
+                    <video src={img} className="w-full h-full object-cover" autoPlay loop muted playsInline />
+                  ) : (
+                    <img src={img} alt="" className="w-full h-full object-cover" />
+                  )}
                 </button>
               ))}
             </div>
@@ -820,11 +853,21 @@ const ProductDetail = () => {
 
         {showRelatedColors && (
           <div className="space-y-2">
-            <div className="text-sm font-medium">Колір</div>
-            <div className="flex flex-wrap gap-3">
+            <div className="text-sm font-medium">
+              Колір{relatedColors.length > 1 ? ` (${relatedColors.length})` : ""}
+            </div>
+            <div className="flex flex-wrap gap-4">
               {relatedColors.map((variant) => {
                 const isActive = String(variant.product_id) === String(product.id);
                 const label = variant.color || "колір";
+                // Кружечок кольору має показувати ФОТО, а не відео — CSS/img
+                // не вміє відрендерити .mp4/.webm як прев'ю. Спершу шукаємо
+                // перше НЕ-відео медіа серед усіх фото товару, і лише якщо
+                // його нема (напр. у товару взагалі тільки відео) — падаємо
+                // на letter-аватар із сірим фоном.
+                const thumbUrl =
+                  firstPhotoUrl(variant.images) ||
+                  (variant.image_url && !isVideoUrl(variant.image_url) ? variant.image_url : "");
                 return (
                   <button
                     key={variant.product_id}
@@ -834,38 +877,47 @@ const ProductDetail = () => {
                       hapticImpact("light");
                       navigate(`/product/${variant.product_id}`);
                     }}
-                    className="flex flex-col items-center gap-1 min-w-[56px] active:scale-95"
+                    className="flex flex-col items-center gap-1.5 min-w-[64px] active:scale-95"
                     aria-label={label}
                     aria-current={isActive ? "true" : undefined}
                   >
-                    {variant.image_url ? (
+                    {thumbUrl ? (
                       <span
                         className={cn(
-                          "h-12 w-12 rounded-full overflow-hidden border-2 bg-muted",
-                          isActive ? "border-primary" : "border-transparent"
+                          "h-16 w-16 rounded-full overflow-hidden border-[3px] bg-muted shadow-sm transition-all",
+                          isActive
+                            ? "border-primary ring-2 ring-primary/30 ring-offset-2 ring-offset-background"
+                            : "border-border"
                         )}
                       >
                         <img
-                          src={variant.image_url}
+                          src={thumbUrl}
                           alt={label}
                           className="h-full w-full object-cover"
                         />
                       </span>
                     ) : (
+                      // Нема жодного фото (лише відео або взагалі нічого) —
+                      // нейтральний сірий кружечок з першою літерою кольору.
                       <span
                         className={cn(
-                          "h-12 min-w-[48px] px-2 rounded-full border text-xs flex items-center justify-center",
-                          isActive ? "border-primary bg-primary/10" : "border-border bg-muted/50"
+                          "h-16 w-16 rounded-full border-[3px] text-lg font-semibold flex items-center justify-center shadow-sm transition-all uppercase",
+                          isActive
+                            ? "border-primary bg-primary/10 ring-2 ring-primary/30 ring-offset-2 ring-offset-background"
+                            : "border-border bg-muted text-muted-foreground"
                         )}
                       >
-                        {label}
+                        {label.trim().charAt(0) || "?"}
                       </span>
                     )}
-                    {variant.color && variant.image_url ? (
-                      <span className="text-[11px] text-muted-foreground max-w-[72px] truncate">
-                        {variant.color}
-                      </span>
-                    ) : null}
+                    <span
+                      className={cn(
+                        "text-xs max-w-[80px] truncate",
+                        isActive ? "font-semibold text-primary" : "text-muted-foreground"
+                      )}
+                    >
+                      {variant.color || (isActive ? "поточний" : "колір")}
+                    </span>
                   </button>
                 );
               })}

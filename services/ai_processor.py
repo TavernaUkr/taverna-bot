@@ -1,31 +1,30 @@
 # services/ai_processor.py
 """
-PIM (Product Information Management) через google.genai SDK:
+PIM (Product Information Management) через прямі REST-запити до Gemini API (aiohttp):
 жорстка таксономія main_category / target_niche + динамічні атрибути + SEO-опис.
+
+SDK google-genai НЕ використовується для генерації — він хибно трактує ключі
+формату AQ... як OAuth-токени і шле Bearer-заголовок, через що Google повертає
+401 UNAUTHENTICATED. REST API з ключем у query-параметрі ?key=... працює коректно.
 """
-import asyncio
 import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
 
-try:
-    from google import genai
-    from google.genai import types
-    from google.genai import errors as genai_errors
-except ImportError:
-    genai = None  # type: ignore
-    types = None  # type: ignore
-    genai_errors = None  # type: ignore
+import aiohttp
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config_reader import config
+from config_reader import config, sanitize_gemini_api_key
 from database.models import AICategorizationRule, Product, ProductAIStatus, ProductStatus, ProductVariant
-from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager, build_genai_client
+from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager
 
 logger = logging.getLogger(__name__)
+
+GEMINI_REST_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_REST_TIMEOUT = aiohttp.ClientTimeout(total=120)
 
 def _gemini_http_status(exc: Exception) -> Optional[int]:
     """Дістає HTTP-код з google.genai.errors.ClientError / APIError."""
@@ -78,6 +77,35 @@ class GeminiCapacityError(Exception):
     def __init__(self, status: int, message: str = ""):
         super().__init__(message or f"Gemini capacity error {status}")
         self.status = status
+
+
+class GeminiHTTPError(Exception):
+    """Будь-яка інша (не 429/503) HTTP-помилка REST API Gemini, з кодом статусу."""
+
+    def __init__(self, status: int, message: str = ""):
+        super().__init__(message or f"Gemini API Error {status}")
+        self.status = status
+
+
+def _extract_gemini_rest_text(data: Dict[str, Any]) -> str:
+    """Витягує згенерований текст з JSON-відповіді REST API generateContent."""
+    if not isinstance(data, dict):
+        return ""
+    candidates = data.get("candidates") or []
+    if not candidates:
+        feedback = data.get("promptFeedback") or {}
+        block_reason = feedback.get("blockReason")
+        if block_reason:
+            raise Exception(f"Gemini заблокував запит: {block_reason}")
+        return ""
+    first = candidates[0] if isinstance(candidates[0], dict) else {}
+    finish_reason = str(first.get("finishReason") or "")
+    parts = ((first.get("content") or {}).get("parts")) or []
+    texts = [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text")]
+    text = "".join(texts).strip()
+    if not text and finish_reason and finish_reason not in ("STOP", ""):
+        raise Exception(f"Gemini завершив відповідь без тексту: finishReason={finish_reason}")
+    return text
 
 GEMINI_MODEL = "gemini-2.0-flash"
 GEMINI_FALLBACK_MODEL = "gemini-1.5-flash-latest"
@@ -239,6 +267,10 @@ _EXTRACT_SYSTEM_PROMPT = """
 - name: чиста комерційна назва до 80 символів. Без артикулів, цін, HTML.
 - base_model_name: базова модель БЕЗ кольору (напр. «Напівчеревики ESDY з швидкою шнурівкою»).
   Однакова для всіх кольорів цієї моделі. Якщо кольору в назві немає — скопіюй name.
+  base_model_name ПОВИННА БУТИ АБСОЛЮТНО ІДЕНТИЧНОЮ для товарів однієї моделі.
+  Видаляй з назви кольори, розміри та артикули. Залишай ЛИШЕ суху назву моделі
+  (напр. «Демісезонні напівчеревики ESDY з швидкою шнурівкою»). Без зайвих слів,
+  без розділових знаків у кінці, без варіацій формулювання між однаковими товарами.
 - color: колір з тексту (напр. «мультикам», «олива», «чорний»). Якщо кольору немає — "".
 - characteristics: ТІЛЬКИ факти з тексту (Бренд, Матеріал, Пам'ять, Вага, Країна, Колір, Сезон тощо).
   Формат: [{"name":"Ключ","value":"значення з тексту"}]. Якщо факту немає — не додавай. [] дозволений.
@@ -616,22 +648,19 @@ class ProductAIProcessor:
         self.model_name = "gemini-3.6-flash"
         self.fallback_model = "gemini-3.6-flash"
 
-        if genai is None:
-            logger.warning("google-genai не встановлено. AI-обробку товарів буде пропущено.")
-            return
         if not self._key_manager.has_keys():
             logger.warning("GEMINI_API_KEYS не знайдено. AI-обробку товарів буде пропущено.")
             return
 
         logger.info(
-            "ProductAIProcessor: Gemini готовий (%s), ключів: %s.",
+            "ProductAIProcessor: Gemini REST готовий (%s), ключів: %s.",
             self.model_name,
             self._key_manager.key_count,
         )
 
     @property
     def is_ready(self) -> bool:
-        return bool(genai is not None and self._key_manager and self._key_manager.has_keys())
+        return bool(self._key_manager and self._key_manager.has_keys())
 
     def _source_blob(self, product: Product) -> str:
         raw_description = _strip_html(product.description)[:4000]
@@ -652,7 +681,9 @@ class ProductAIProcessor:
             "ЧАСТИНА 1. Спочатку постав is_product true/false. "
             "Якщо false — name/characteristics/sizes порожні. "
             "Якщо true — витягни name, base_model_name, color, characteristics і sizes.\n"
-            "base_model_name — модель без кольору. color — колір з тексту.\n"
+            "base_model_name — модель без кольору, розміру й артикулу. Ця назва МАЄ БУТИ "
+            "АБСОЛЮТНО ІДЕНТИЧНОЮ для всіх товарів однієї моделі (щоб кольори склеїлись у варіації). "
+            "color — колір з тексту.\n"
             "Не став категорію і не пиши опис.\n\n"
             f"{self._source_blob(product)}"
         )
@@ -679,36 +710,18 @@ class ProductAIProcessor:
 
     def _raise_capacity_if_needed(self, exc: Exception) -> None:
         """429/503 → GeminiCapacityError, щоб черга повернула товар у pending."""
-        status = _gemini_http_status(exc)
-        client_error = getattr(genai_errors, "ClientError", None) if genai_errors else None
-        server_error = getattr(genai_errors, "ServerError", None) if genai_errors else None
-        api_error = getattr(genai_errors, "APIError", None) if genai_errors else None
-        is_sdk_error = bool(
-            (client_error and isinstance(exc, client_error))
-            or (server_error and isinstance(exc, server_error))
-            or (api_error and isinstance(exc, api_error))
-        )
-        if status in (429, 503) or (is_sdk_error and status in (429, 503)):
-            raise GeminiCapacityError(
-                int(status or 429),
-                "API Quota/Rate Limit Exceeded",
-            ) from exc
-        if is_sdk_error and status is None:
-            msg = str(exc)
-            if "429" in msg or "RESOURCE_EXHAUSTED" in msg.upper() or "QUOTA" in msg.upper():
-                raise GeminiCapacityError(429, "API Quota/Rate Limit Exceeded") from exc
-            if "503" in msg or "UNAVAILABLE" in msg.upper():
-                raise GeminiCapacityError(503, "API Quota/Rate Limit Exceeded") from exc
+        status = getattr(exc, "status", None) or _gemini_http_status(exc)
+        if status in (429, 503):
+            raise GeminiCapacityError(int(status), "API Quota/Rate Limit Exceeded") from exc
+        msg = str(exc)
+        if "429" in msg or "RESOURCE_EXHAUSTED" in msg.upper() or "QUOTA" in msg.upper():
+            raise GeminiCapacityError(429, "API Quota/Rate Limit Exceeded") from exc
+        if "503" in msg or "UNAVAILABLE" in msg.upper():
+            raise GeminiCapacityError(503, "API Quota/Rate Limit Exceeded") from exc
 
     def _is_client_error(self, exc: Exception) -> bool:
-        if not genai_errors:
-            return False
-        client_error = getattr(genai_errors, "ClientError", None)
-        server_error = getattr(genai_errors, "ServerError", None)
-        return bool(
-            (client_error and isinstance(exc, client_error))
-            or (server_error and isinstance(exc, server_error))
-        )
+        status = getattr(exc, "status", None)
+        return isinstance(status, int) and 400 <= status < 500
 
     async def _complete(
         self,
@@ -717,12 +730,27 @@ class ProductAIProcessor:
         rules_text: str = "",
         system_instruction: Optional[str] = None,
     ) -> str:
-        if genai is None or types is None or not self._key_manager:
+        """
+        Прямий асинхронний REST-запит до Gemini API через aiohttp.
+        SDK google-genai НЕ використовується: він хибно шле Bearer-заголовок
+        для ключів формату AQ..., через що Google повертає 401 UNAUTHENTICATED.
+        Ключ передається через query-параметр ?key=..., як і рекомендує REST API.
+        """
+        if not self._key_manager:
             raise Exception("Gemini client is not configured")
 
         instruction = (system_instruction or _ANALYZE_SYSTEM_PROMPT).strip()
         if rules_text:
             instruction = f"{rules_text.strip()}\n\n{instruction}"
+
+        payload: Dict[str, Any] = {
+            "contents": [{"parts": [{"text": user_prompt}]}],
+            "systemInstruction": {"parts": [{"text": instruction}]},
+            "generationConfig": {
+                "temperature": 0.1,
+                "responseMimeType": "application/json",
+            },
+        }
 
         last_error: Optional[Exception] = None
         attempts = max(1, self._key_manager.key_count)
@@ -732,54 +760,74 @@ class ProductAIProcessor:
             except AllKeysExhaustedError as e:
                 raise GeminiCapacityError(429, str(e)) from e
 
-            client = build_genai_client(active_key)
-            try:
-                response = await client.aio.models.generate_content(
-                    model=model_name,
-                    contents=user_prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=instruction,
-                        response_mime_type="application/json",
-                        temperature=0.1,
-                    ),
-                )
-            except Exception as e:
-                error_str = str(e)
-                if (
-                    "ClientConnectorDNSError" in error_str
-                    or "429" in error_str
-                    or "503" in error_str
-                    or _is_sdk_quota_crash(e)
-                ):
-                    self._key_manager.mark_key_exhausted(active_key)
-                    logger.warning(
-                        "Gemini SDK/quota на ключі ...%s — ключ заблоковано. %s",
-                        active_key[-4:],
-                        error_str[:240],
-                    )
-                    raise GeminiCapacityError(
-                        429,
-                        "API Quota Exceeded (Google SDK Bug)",
-                    ) from e
-                status = _gemini_http_status(e)
-                if status == 429:
-                    self._key_manager.mark_key_exhausted(active_key)
-                    last_error = e
-                    logger.warning(
-                        "Gemini 429 на ключі ...%s — переходжу на наступний.",
-                        active_key[-4:],
-                    )
-                    continue
-                self._raise_capacity_if_needed(e)
-                api_error = getattr(genai_errors, "APIError", None) if genai_errors else None
-                if api_error and isinstance(e, api_error):
-                    raise Exception(f"Gemini API Error {e.code}: {e.message or e}") from e
-                raise
+            key = sanitize_gemini_api_key(active_key)
+            url = f"{GEMINI_REST_BASE}/{model_name}:generateContent?key={key}"
 
-            text = (response.text or "").strip()
-            if not text:
-                raise Exception(f"Gemini повернув порожню відповідь (модель {model_name})")
-            return text
+            try:
+                async with aiohttp.ClientSession(timeout=GEMINI_REST_TIMEOUT) as session:
+                    async with session.post(
+                        url,
+                        json=payload,
+                        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                    ) as resp:
+                        status = resp.status
+                        raw_text = await resp.text()
+
+                        if status == 200:
+                            try:
+                                data = json.loads(raw_text)
+                            except Exception as e:
+                                raise Exception(
+                                    f"Gemini REST повернув невалідний JSON (HTTP 200): {raw_text[:300]}"
+                                ) from e
+                            text = _extract_gemini_rest_text(data)
+                            if not text:
+                                raise Exception(
+                                    f"Gemini повернув порожню відповідь (модель {model_name})"
+                                )
+                            return text
+
+                        if status == 429:
+                            self._key_manager.mark_key_exhausted(active_key)
+                            last_error = GeminiCapacityError(429, raw_text[:300])
+                            logger.warning(
+                                "Gemini 429 (REST) на ключі ...%s — переходжу на наступний.",
+                                key[-4:],
+                            )
+                            continue
+
+                        if status in (401, 403):
+                            self._key_manager.mark_key_exhausted(active_key)
+                            last_error = GeminiCapacityError(status, raw_text[:300])
+                            logger.error(
+                                "Gemini %s (auth) на ключі ...%s — блокую ключ, пробую наступний. %s",
+                                status,
+                                key[-4:],
+                                raw_text[:300],
+                            )
+                            continue
+
+                        if status in (500, 503):
+                            logger.error(
+                                "Gemini %s (перевантаження серверів Google) — повертаю товар у чергу. %s",
+                                status,
+                                raw_text[:300],
+                            )
+                            raise GeminiCapacityError(status, f"Gemini {status}: {raw_text[:300]}")
+
+                        raise GeminiHTTPError(status, f"Gemini API Error {status}: {raw_text[:500]}")
+            except GeminiCapacityError:
+                raise
+            except GeminiHTTPError:
+                raise
+            except aiohttp.ClientError as e:
+                last_error = e
+                logger.warning(
+                    "Gemini REST мережева помилка на ключі ...%s: %s",
+                    key[-4:],
+                    e,
+                )
+                continue
 
         raise GeminiCapacityError(
             429,

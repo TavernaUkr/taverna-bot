@@ -6,6 +6,7 @@ import { VerifiedBadge } from "./ui/verified-badge";
 import { FindSimilarButton } from "./product/FindSimilarButton";
 import { VariantSelectionModal } from "./product/VariantSelectionModal";
 import { useState } from "react";
+import { isVideoUrl } from "@/lib/media";
 import { vibrate } from "@/hooks/useTelegramUI";
 import type { BackendProductVariant, BackendProductOption } from "@/lib/backendApi";
 
@@ -21,6 +22,10 @@ interface ProductCardProps {
   stockQuantity?: number;
   sizes?: string[];
   colors?: string[];
+  // Фіксований колір ЦЬОГО товару (коли колір — не опція вибору, а окремий
+  // товар-побратим за base_model_name). Показується як неактивна інфо-міток
+  // у модалці швидкого додавання в кошик, якщо вибору кольору немає.
+  color?: string;
   // Оригінальні варіанти/опції товару з бекенду (з `id` = variant_id).
   // Потрібні, щоб зрозуміти, скільки насправді варіантів у товару (>1 =>
   // треба обрати розмір/колір через модалку) і, якщо варіант один — узяти
@@ -85,6 +90,7 @@ export const ProductCard = ({
   stockQuantity,
   sizes,
   colors,
+  color,
   variants,
   options,
   rating,
@@ -101,6 +107,9 @@ export const ProductCard = ({
   onToggleFavorite,
 }: ProductCardProps) => {
   const [isVariantModalOpen, setIsVariantModalOpen] = useState(false);
+  // Якщо перше фото товару "бите" (не завантажилось) — показуємо іконку-
+  // заглушку замість чорного екрану/розірваної іконки браузера.
+  const [imageError, setImageError] = useState(false);
   // Товар "має опції" (розмір/колір), якщо є розміри/кольори АБО просто
   // більше одного варіанту в БД (навіть без розмірів/кольорів — напр. інші
   // типи опцій). У такому разі кошик НЕ повинен вгадувати variant_id.
@@ -181,11 +190,28 @@ export const ProductCard = ({
             onMouseLeave={(e) => { e.currentTarget.pause(); e.currentTarget.currentTime = 0; }}
           />
         )}
-        <img
-          src={image}
-          alt={name}
-          className="w-full h-full object-cover"
-        />
+        {!imageError && image && isVideoUrl(image) ? (
+          <video
+            src={image}
+            className="w-full h-full object-cover"
+            autoPlay
+            loop
+            muted
+            playsInline
+            onError={() => setImageError(true)}
+          />
+        ) : !imageError && image ? (
+          <img
+            src={image}
+            alt={name}
+            className="w-full h-full object-cover"
+            onError={() => setImageError(true)}
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-muted text-muted-foreground/50">
+            <Package className="h-10 w-10" />
+          </div>
+        )}
 
         {/* Low stock */}
         {inStock && stockQuantity !== undefined && stockQuantity > 0 && stockQuantity <= 5 && (
@@ -376,6 +402,7 @@ export const ProductCard = ({
         options={options}
         variants={variants}
         stockQuantity={stockQuantity}
+        fixedColor={color}
         onAddToCart={handleVariantAddToCart}
       />
     </Link>

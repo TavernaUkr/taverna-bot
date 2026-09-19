@@ -1,9 +1,12 @@
 # services/ai_queue_worker.py
 """
-Контрольована черга Gemini: 1 товар / 15 секунд (~4 на хвилину).
+Контрольована черга Gemini: 1 товар / 10 секунд (~6 на хвилину).
 Строго по даті реєстрації постачальника: спочатку один магазин, потім наступний.
 Якщо найстаріший ще парсить XML — чекаємо, наступних не чіпаємо.
 Без asyncio.gather. 429/503 → знову pending.
+
+Платний тариф Gemini API — жорсткий троттлінг (35с) знято, повернуто швидкий
+інтервал. Якщо квоти знову стануть проблемою, підніми AI_QUEUE_INTERVAL_SECONDS.
 """
 import asyncio
 import logging
@@ -20,7 +23,7 @@ from services.ai_processor import GeminiCapacityError, ProductAIProcessor
 
 logger = logging.getLogger(__name__)
 
-AI_QUEUE_INTERVAL_SECONDS = 15
+AI_QUEUE_INTERVAL_SECONDS = 10
 STALE_PROCESSING_MINUTES = 10
 JOB_ID = "ai_product_queue_job"
 
@@ -40,7 +43,7 @@ _processor: ProductAIProcessor | None = None
 
 
 def minutes_for_items(count: int) -> int:
-    """((кількість товарів) * 15) / 60, хвилини вгору."""
+    """((кількість товарів) * AI_QUEUE_INTERVAL_SECONDS) / 60, хвилини вгору."""
     n = max(0, int(count or 0))
     if n <= 0:
         return 0
@@ -53,7 +56,7 @@ def estimate_queue_minutes(
     pending_items: int = 0,
     fetching_xml: bool = False,
 ) -> int:
-    """((items_ahead + pending цього магазину) * 15) / 60. XML: pending=0."""
+    """((items_ahead + pending цього магазину) * AI_QUEUE_INTERVAL_SECONDS) / 60. XML: pending=0."""
     return minutes_for_items(items_ahead + pending_items)
 
 
@@ -429,7 +432,7 @@ async def process_next_pending_product() -> None:
 
 
 async def start_ai_product_queue() -> None:
-    """Запускає інтервал 15с. Повторний виклик у тому ж процесі — no-op."""
+    """Запускає інтервал AI_QUEUE_INTERVAL_SECONDS (троттлінг проти 429/503). Повторний виклик у тому ж процесі — no-op."""
     await ensure_product_ai_status_column()
     if _scheduler.get_job(JOB_ID):
         return
@@ -445,6 +448,7 @@ async def start_ai_product_queue() -> None:
     if not _scheduler.running:
         _scheduler.start()
     logger.info(
-        "AI-черга запущена: 1 товар / %sс (~4 на хвилину), без паралельних Gemini-запитів.",
+        "AI-черга запущена: 1 товар / %sс (~%.1f на хвилину), без паралельних Gemini-запитів.",
         AI_QUEUE_INTERVAL_SECONDS,
+        60 / AI_QUEUE_INTERVAL_SECONDS,
     )

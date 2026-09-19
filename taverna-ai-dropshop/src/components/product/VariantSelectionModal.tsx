@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { ProductVariantSelector } from "./ProductVariantSelector";
+import { isVideoUrl } from "@/lib/media";
 import { hapticImpact } from "@/lib/haptics";
 import { vibrate } from "@/hooks/useTelegramUI";
 import { useModalHistory } from "@/hooks/useModalHistory";
@@ -31,6 +32,10 @@ interface VariantSelectionModalProps {
   // Загальний залишок товару — запасний варіант для лічильника кількості,
   // якщо конкретний variant_id ще не визначено (напр. поки не обрано колір).
   stockQuantity?: number;
+  // Фіксований колір ЦЬОГО товару (коли колір — окремий товар-побратим за
+  // base_model_name, а не "опція вибору" всередині товару). Вибору кольору
+  // тут НЕ показуємо — лише пасивний чіп, щоб клієнт бачив, який колір додає.
+  fixedColor?: string;
   onAddToCart: (size?: string, color?: string, variantId?: string, quantity?: number) => void;
 }
 
@@ -44,6 +49,7 @@ export function VariantSelectionModal({
   options,
   variants,
   stockQuantity,
+  fixedColor,
   onAddToCart,
 }: VariantSelectionModalProps) {
   const navigate = useNavigate();
@@ -158,7 +164,10 @@ export function VariantSelectionModal({
     // робить після успішного addItem) — тут його НЕ дублюємо.
     onAddToCart(
       selectedSize || undefined,
-      selectedColor || undefined,
+      // Якщо в товару немає опції "Колір" для вибору — все одно передаємо
+      // його фіксований колір (fixedColor), щоб кошик/замовлення показували
+      // правильний колір, а не залишали поле порожнім.
+      selectedColor || fixedColor || undefined,
       selectedVariant ? String(selectedVariant.id) : undefined,
       quantity
     );
@@ -209,11 +218,22 @@ export function VariantSelectionModal({
         <div className="space-y-4" onClick={(e) => e.stopPropagation()}>
           {/* Product preview */}
           <div className="flex items-start gap-3 p-3 bg-muted/50 rounded-xl">
-            <img
-              src={productImage}
-              alt={productName}
-              className="w-16 h-16 object-cover rounded-lg"
-            />
+            {isVideoUrl(productImage) ? (
+              <video
+                src={productImage}
+                className="w-16 h-16 object-cover rounded-lg"
+                autoPlay
+                loop
+                muted
+                playsInline
+              />
+            ) : (
+              <img
+                src={productImage}
+                alt={productName}
+                className="w-16 h-16 object-cover rounded-lg"
+              />
+            )}
             <div className="flex-1 min-w-0">
               <h4 className="font-medium text-sm text-foreground line-clamp-2">
                 {productName}
@@ -221,6 +241,14 @@ export function VariantSelectionModal({
               <p className="text-lg font-bold text-primary mt-1">
                 {(selectedVariant?.final_price ?? productPrice).toLocaleString()} ₴
               </p>
+              {/* Пасивний чіп з кольором — показуємо ТІЛЬКИ якщо в товару
+                  немає опції "Колір" для вибору (hasRequiredColors), інакше
+                  колір і так обирається нижче через ProductVariantSelector. */}
+              {!hasRequiredColors && fixedColor && (
+                <span className="inline-flex items-center gap-1 mt-1.5 px-2 py-0.5 rounded-full bg-muted text-xs font-medium text-muted-foreground">
+                  Колір: <span className="text-foreground">{fixedColor}</span>
+                </span>
+              )}
             </div>
           </div>
 
