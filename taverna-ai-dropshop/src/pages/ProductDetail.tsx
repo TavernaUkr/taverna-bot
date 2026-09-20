@@ -19,6 +19,7 @@ import {
 } from "@/lib/backendApi";
 import { formatProductDescription } from "@/lib/formatDescription";
 import { isVideoUrl, firstPhotoUrl } from "@/lib/media";
+import { getColorHex } from "@/lib/colorMap";
 import { useCartContext } from "@/contexts/CartContext";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 import { Button } from "@/components/ui/button";
@@ -191,6 +192,10 @@ const ProductDetail = () => {
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
   const [selectedColor, setSelectedColor] = useState<string | null>(null);
   const [relatedColors, setRelatedColors] = useState<BackendProductColorVariant[]>([]);
+  // Биті посилання на фото кружечка кольору (404 / формат, який браузер не
+  // відкрив) — тримаємо окремо по product_id, щоб одне зіпсоване фото не
+  // ламало решту кружечків.
+  const [colorThumbErrors, setColorThumbErrors] = useState<Record<number, boolean>>({});
   const [quantity, setQuantity] = useState(1);
   const [activeTab, setActiveTab] = useState("description");
   const [isGalleryOpen, setIsGalleryOpen] = useState(false);
@@ -865,9 +870,12 @@ const ProductDetail = () => {
                 // перше НЕ-відео медіа серед усіх фото товару, і лише якщо
                 // його нема (напр. у товару взагалі тільки відео) — падаємо
                 // на letter-аватар із сірим фоном.
-                const thumbUrl =
+                const rawThumbUrl =
                   firstPhotoUrl(variant.images) ||
                   (variant.image_url && !isVideoUrl(variant.image_url) ? variant.image_url : "");
+                // Якщо це саме посилання вже раз впало з onError — більше не
+                // пробуємо його рендерити, одразу йдемо на HEX-фолбек.
+                const thumbUrl = colorThumbErrors[variant.product_id] ? "" : rawThumbUrl;
                 return (
                   <button
                     key={variant.product_id}
@@ -894,21 +902,25 @@ const ProductDetail = () => {
                           src={thumbUrl}
                           alt={label}
                           className="h-full w-full object-cover"
+                          onError={() =>
+                            setColorThumbErrors((prev) => ({ ...prev, [variant.product_id]: true }))
+                          }
                         />
                       </span>
                     ) : (
                       // Нема жодного фото (лише відео або взагалі нічого) —
-                      // нейтральний сірий кружечок з першою літерою кольору.
+                      // просто суцільний HEX-колір самого товару замість
+                      // нейтрального сірого фону, без жодного тексту/літери
+                      // всередині.
                       <span
                         className={cn(
-                          "h-16 w-16 rounded-full border-[3px] text-lg font-semibold flex items-center justify-center shadow-sm transition-all uppercase",
+                          "h-16 w-16 rounded-full border-[3px] shadow-sm transition-all",
                           isActive
-                            ? "border-primary bg-primary/10 ring-2 ring-primary/30 ring-offset-2 ring-offset-background"
-                            : "border-border bg-muted text-muted-foreground"
+                            ? "border-primary ring-2 ring-primary/30 ring-offset-2 ring-offset-background"
+                            : "border-border"
                         )}
-                      >
-                        {label.trim().charAt(0) || "?"}
-                      </span>
+                        style={{ backgroundColor: getColorHex(variant.color) }}
+                      />
                     )}
                     <span
                       className={cn(

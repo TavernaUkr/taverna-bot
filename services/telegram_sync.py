@@ -33,6 +33,10 @@ from services.telegram_parser import (
 logger = logging.getLogger(__name__)
 
 _PRICE_RE = re.compile(r"[^\d.,]")
+_REPLY_PRICE_RE = re.compile(
+    r"(?:ціна|price)\s*[:\-–]?\s*(\d+(?:[.,]\d+)?)|(\d+(?:[.,]\d+)?)\s*(?:грн|uah)\b",
+    re.IGNORECASE,
+)
 IMPORT_POST_LIMIT = 300
 IMPORT_BATCH_SIZE = 10
 IMPORT_BATCH_SLEEP_SEC = 4
@@ -320,6 +324,105 @@ async def attach_telegram_album_media(
     return updated
 
 
+def _reply_price_from_text(text: str) -> float:
+    """Ціна з відповіді лише якщо явно вказана (ціна / грн) — не з розмірів."""
+    match = _REPLY_PRICE_RE.search(text or "")
+    if not match:
+        return 0.0
+    raw = match.group(1) or match.group(2) or ""
+    return _parse_price(raw)
+
+
+async def _apply_reply_to_existing_product(
+    db: AsyncSession,
+    *,
+    product: Product,
+    post: dict,
+    supplier_id: int,
+) -> None:
+    """Дописує медіа відповіді в існуючий товар; за наявності — опис і ціну."""
+    urls = post.get("image_urls") if isinstance(post.get("image_urls"), list) else []
+    if urls:
+        product.pictures = _merge_picture_urls(product.pictures, urls)
+        attrs = product.attributes if isinstance(product.attributes, dict) else {}
+        attrs["media_urls"] = _merge_picture_urls(attrs.get("media_urls"), product.pictures)
+        product.attributes = attrs
+
+    text = str(post.get("text") or "").strip()
+    if len(text) >= 10:
+        product.description = text[:4000]
+
+    base_price = _reply_price_from_text(text)
+    if base_price > 0:
+        try:
+            final_price = await calculate_final_price(
+                str(base_price),
+                supplier_id=supplier_id,
+                db=db,
+            )
+        except Exception as e:
+            logger.warning(
+                "apply_telegram_reply_updates: націнка для товару #%s: %s",
+                product.id, e,
+            )
+            final_price = max(1, int(round(base_price)))
+        if final_price <= 0:
+            final_price = max(1, int(round(base_price)))
+        variant = (
+            await db.execute(
+                select(ProductVariant).where(ProductVariant.product_id == product.id)
+            )
+        ).scalars().first()
+        if variant:
+            variant.base_price = base_price
+            variant.final_price = final_price
+
+
+async def apply_telegram_reply_updates(
+    db: AsyncSession,
+    *,
+    supplier_id: int,
+    posts: list[dict],
+) -> list[dict]:
+    """
+    Відповідь (Reply) на старий пост = оновлення існуючого товару,
+    а не новий лот. Шукає supplier_sku == tg-{reply_to_msg_id}.
+
+    Повертає пости, які треба обробляти як нові (без reply або батька немає).
+    Знайдені відповіді в Gemini не йдуть.
+    """
+    remaining: list[dict] = []
+    updated = 0
+    for post in posts or []:
+        reply_to = int(post.get("reply_to_msg_id") or 0)
+        if not reply_to:
+            remaining.append(post)
+            continue
+        sku = live_message_sku(supplier_id, reply_to, 1)
+        source_url = _source_url_for_message(
+            post.get("username"),
+            post.get("chat_id"),
+            reply_to,
+        )
+        parent = await _find_live_product(db, supplier_id, sku, reply_to, source_url)
+        status = getattr(parent, "status", None) if parent is not None else None
+        if parent is None or status in (ProductStatus.deleted, ProductStatus.archived):
+            remaining.append(post)
+            continue
+        await _apply_reply_to_existing_product(
+            db, product=parent, post=post, supplier_id=supplier_id,
+        )
+        updated += 1
+        logger.info(
+            "telegram_sync: reply поста #%s додано до товару sku=tg-%s (id=%s), фото=%s.",
+            post.get("message_id"), reply_to, parent.id,
+            len(post.get("image_urls") or []),
+        )
+    if updated:
+        await db.commit()
+    return remaining
+
+
 async def upsert_parsed_telegram_items(
     db: AsyncSession,
     *,
@@ -567,6 +670,52 @@ async def _save_batch_products(
     batch: list[dict],
     parsed_items: list[dict],
 ) -> int:
+    batch = list(batch or [])
+    replies = [post for post in batch if int(post.get("reply_to_msg_id") or 0)]
+    regular = [post for post in batch if not int(post.get("reply_to_msg_id") or 0)]
+    reply_ids = {int(post["message_id"]) for post in replies if post.get("message_id")}
+
+    def _items_for(posts: list[dict]) -> list[dict]:
+        known = {int(post["message_id"]) for post in posts if post.get("message_id")}
+        picked: list[dict] = []
+        for item in parsed_items or []:
+            mid = _coerce_message_id(item.get("telegram_message_id") or item.get("message_id"))
+            if mid and mid in reply_ids and mid not in known:
+                continue
+            if mid and known and mid not in known:
+                continue
+            picked.append(item)
+        return picked if posts else []
+
+    saved = 0
+    if regular:
+        saved += await _upsert_assigned_batch(
+            db,
+            supplier_id=supplier_id,
+            batch=regular,
+            parsed_items=_items_for(regular),
+        )
+
+    leftover_replies = await apply_telegram_reply_updates(
+        db, supplier_id=supplier_id, posts=replies,
+    )
+    if leftover_replies:
+        saved += await _upsert_assigned_batch(
+            db,
+            supplier_id=supplier_id,
+            batch=leftover_replies,
+            parsed_items=_items_for(leftover_replies),
+        )
+    return saved
+
+
+async def _upsert_assigned_batch(
+    db: AsyncSession,
+    *,
+    supplier_id: int,
+    batch: list[dict],
+    parsed_items: list[dict],
+) -> int:
     grouped: dict[int, list[dict]] = {}
     for message_id, item in _assign_batch_message_ids(parsed_items, batch):
         grouped.setdefault(message_id, []).append(item)
@@ -676,6 +825,10 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
                 await asyncio.sleep(IMPORT_BATCH_SLEEP_SEC)
                 continue
 
+            if posts:
+                posts = await apply_telegram_reply_updates(
+                    db, supplier_id=supplier_id, posts=posts,
+                )
             if posts:
                 batch_index += 1
                 blob = "\n\n".join(

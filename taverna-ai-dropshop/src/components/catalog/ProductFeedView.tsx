@@ -79,7 +79,7 @@ export function ProductFeedView({
     <AnimatePresence>
       {isOpen && (
         <motion.div
-          className="fixed inset-0 z-[45] bg-black h-[100dvh] w-full"
+          className="fixed inset-0 z-[9999] bg-black h-[100dvh] w-full"
           initial={{ opacity: 0, y: 24 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: 24 }}

@@ -1,8 +1,29 @@
 # services/telegram_listener.py
 """
-Реальний час: нові пости та правки в схвалених Telegram-каналах постачальників.
-Підписується на існуючий Telethon-клієнт. Помилки Gemini не валять бота.
+Реальний час: нові пости в схвалених Telegram-каналах постачальників.
+Підписується на існуючий Telethon-клієнт.
+
+ДЕБАУНС-АРХІТЕКТУРА (замість обробки "на льоту"): постачальники надсилають
+фото і текст у хаотичному порядку (то текст, то фото, часто окремими
+повідомленнями, у будь-якій послідовності). Спроба розпарсити і одразу
+зберегти в БД КОЖНЕ повідомлення (у events.NewMessage) призводила до
+Race Condition — кілька майже одночасних подій паралельно писали/
+перезаписували масив pictures ОДНОГО й того ж товару, і в Supabase лишалось
+1-2 фото замість усіх.
+
+Тепер events.NewMessage/MessageEdited НІЧОГО не парсить, не звертається до
+Gemini і не пише в БД — обробник лише "перезапускає" таймер тиші (debounce)
+для постачальника: скасовує попередню відкладену задачу і ставить нову.
+Коли повідомлень від постачальника не було _DEBOUNCE_SECONDS секунд, ОДИН
+раз, ПОСЛІДОВНО запускається повний пакетний прохід:
+  1. sync_recent_channel_history() (services/telegram_parser.py) — читає
+     останні пости каналу ОДНИМ запитом і групує їх у товарні блоки
+     (текст + усе "голе" медіа навколо нього).
+  2. parse_telegram_posts_to_products() — один виклик Gemini на весь пакет.
+  3. _save_batch_products() (services/telegram_sync.py) — той самий код,
+     що й ручний імпорт каналу, зберігає/оновлює товари в БД.
 """
+import asyncio
 import logging
 import time
 from typing import Dict, Optional
@@ -12,18 +33,13 @@ from telethon import TelegramClient, events
 from database.db import AsyncSessionLocal
 from database.models import Supplier, SupplierStatus
 from services.telegram_parser import (
-    AlbumStitchContext,
-    extract_and_upload_message_media,
-    extract_photo_urls_from_text,
-    is_album_extra_message,
     parse_telegram_posts_to_products,
+    sync_recent_channel_history,
 )
 from services.telegram_sync import (
-    _find_live_product,
-    _source_url_for_message,
-    attach_telegram_album_media,
-    live_message_sku,
-    upsert_parsed_telegram_items,
+    _channel_link,
+    _save_batch_products,
+    apply_telegram_reply_updates,
 )
 
 logger = logging.getLogger(__name__)
@@ -31,7 +47,14 @@ logger = logging.getLogger(__name__)
 _CACHE_TTL_SEC = 60.0
 _channels_cache: Dict[str, object] = {"at": 0.0, "map": {}}
 _listeners_registered = False
-_supplier_stitch: Dict[int, AlbumStitchContext] = {}
+
+# КРОК 1 (дебаунс): для кожного supplier_id — ОДНА активна відкладена задача.
+# Нове повідомлення від того самого постачальника скасовує попередню задачу
+# (task.cancel()) і ставить нову — тому реальна синхронізація відбувається
+# рівно один раз, через _DEBOUNCE_SECONDS ПІСЛЯ ОСТАННЬОГО повідомлення
+# (тиша), а не на кожне повідомлення окремо.
+_debounce_tasks: Dict[int, "asyncio.Task"] = {}
+_DEBOUNCE_SECONDS = 45
 
 
 def _normalize_channel_key(raw: Optional[str]) -> Optional[str]:
@@ -124,14 +147,6 @@ def _event_channel_keys(event) -> list[str]:
     return keys
 
 
-def _stitch_ctx(supplier_id: int) -> AlbumStitchContext:
-    ctx = _supplier_stitch.get(supplier_id)
-    if ctx is None:
-        ctx = AlbumStitchContext()
-        _supplier_stitch[supplier_id] = ctx
-    return ctx
-
-
 def _resolve_supplier_id(event, approved: Dict[str, int]) -> Optional[int]:
     for key in _event_channel_keys(event):
         if key in approved:
@@ -142,122 +157,129 @@ def _resolve_supplier_id(event, approved: Dict[str, int]) -> Optional[int]:
     return None
 
 
-async def _event_post_text(event, *, supplier_name: str, supplier_id: int, upload_media: bool = True) -> str:
-    message = getattr(event, "message", None)
-    text = ""
-    if message is not None:
-        text = (getattr(message, "message", None) or getattr(message, "text", None) or "").strip()
-    if not text:
-        text = (getattr(event, "text", None) or "").strip()
-    flags = []
-    public_urls: list[str] = []
-    if message is not None:
-        if getattr(message, "photo", None):
-            flags.append("є фото")
-        elif getattr(message, "video", None):
-            flags.append("є відео")
-        elif getattr(message, "media", None):
-            flags.append("є медіа")
-        try:
-            client = getattr(event, "client", None)
-            if upload_media:
-                public_urls = await extract_and_upload_message_media(
-                    client,
-                    message,
-                    supplier_name=supplier_name,
-                    supplier_id=supplier_id,
-                )
-        except Exception as e:
-            logger.warning(
-                "telegram_listener: медіа не завантажено (пост #%s): %s — парсимо текст.",
-                getattr(message, "id", "?"), e,
-            )
-    header = f"Пост #{getattr(message, 'id', '?')}"
-    if flags:
-        header += f" [{', '.join(flags)}]"
-    parts = [header]
-    if text:
-        parts.append(text)
-    for url in public_urls:
-        parts.append(f"Фото товару: {url}")
-    if text or flags or public_urls:
-        return "\n".join(parts)
-    return ""
-
-
-async def _attach_album_extra(
-    event,
-    *,
-    supplier_id: int,
-    supplier_name: str,
-    ctx: AlbumStitchContext,
-) -> bool:
+async def _delayed_sync(supplier_id: int) -> None:
     """
-    Медіа-повідомлення без тексту, що йде одразу після товарного поста (альбом
-    або просто "досипане" фото). Товар-власник (parent_id) може ще НЕ існувати
-    в БД: основний пост усе ще обробляється Gemini (двоетапний пайплайн +
-    троттлінг-паузи). У цьому разі фото НЕ викидаємо, а кладемо в
-    ctx.pending_attachments — воно приклеїться, щойно товар #parent_id
-    з'явиться в БД (див. _handle_channel_post → pop_attachments_for).
+    КРОК 1: спрацьовує через _DEBOUNCE_SECONDS ПІСЛЯ останнього повідомлення
+    цього постачальника. Якщо за цей час прийшло нове повідомлення —
+    _schedule_debounced_sync скасовує ЦЮ задачу (asyncio.CancelledError) і
+    ставить нову з таким самим таймером — тому реальна робота нижче
+    виконується рівно один раз на "серію" повідомлень.
     """
-    message = getattr(event, "message", None)
-    if message is None or not is_album_extra_message(message) or not ctx.belongs_to_previous(message):
-        return False
-    parent_id = int(ctx.last_product_message_id)
-    ctx.remember_extra(message)
-
-    urls: list[str] = []
     try:
-        client = getattr(event, "client", None)
-        urls = await extract_and_upload_message_media(
-            client,
-            message,
-            supplier_name=supplier_name,
-            supplier_id=supplier_id,
-            folder_message_id=parent_id,
-        )
-    except Exception as e:
-        logger.warning(
-            "telegram_listener: альбомне фото поста #%s не завантажено: %s",
-            getattr(message, "id", "?"), e,
-        )
-    if not urls:
-        logger.info(
-            "telegram_listener: медіа поста #%s не завантажено (непідтримуваний формат чи порожній файл) — пропущено.",
-            getattr(message, "id", "?"),
-        )
-        return True
+        await asyncio.sleep(_DEBOUNCE_SECONDS)
+    except asyncio.CancelledError:
+        # Штатне скасування дебаунсу (прийшло нове повідомлення) — не помилка.
+        raise
 
-    product = None
-    if AsyncSessionLocal is not None:
+    try:
+        if AsyncSessionLocal is None:
+            return
         async with AsyncSessionLocal() as db:
-            sku = live_message_sku(supplier_id, parent_id, 1)
-            source_url = _source_url_for_message(None, None, parent_id)
-            product = await _find_live_product(db, supplier_id, sku, parent_id, source_url)
-            if product is not None:
-                await attach_telegram_album_media(
-                    db,
-                    supplier_id=supplier_id,
-                    attachments=[(parent_id, urls)],
-                )
+            supplier = await db.get(Supplier, supplier_id)
+        if supplier is None or supplier.status != SupplierStatus.active:
+            return
+        supplier_name = getattr(supplier, "name", "") or f"supplier_{supplier_id}"
+        channel_link = _channel_link(supplier)
+        if not channel_link:
+            logger.warning(
+                "telegram_listener: у supplier #%s немає telegram_channel_link — пропускаю.",
+                supplier_id,
+            )
+            return
 
-    if product is None:
-        # Товар #parent_id ще не збережено (Gemini досі обробляє основний пост) —
-        # відкладаємо фото в чергу замість того, щоб його втратити.
-        ctx.pending_attachments.append((parent_id, urls))
+        # КРОК 2: один запит історії каналу + групування в товарні блоки +
+        # синхронне завантаження медіа (усе це вже в sync_recent_channel_history).
+        try:
+            posts = await sync_recent_channel_history(
+                channel_link,
+                limit=40,
+                supplier_name=supplier_name,
+                supplier_id=supplier_id,
+            )
+        except Exception as e:
+            logger.error(
+                "telegram_listener: debounce-синхронізація #%s (читання каналу) впала: %s",
+                supplier_id, e, exc_info=True,
+            )
+            return
+
+        if not posts:
+            logger.info(
+                "telegram_listener: debounce-синхронізація #%s — товарних блоків не знайдено.",
+                supplier_id,
+            )
+            return
+
+        # Reply на старий пост: дописуємо медіа в існуючий товар і НЕ шлемо в Gemini.
+        async with AsyncSessionLocal() as db:
+            posts = await apply_telegram_reply_updates(
+                db, supplier_id=supplier_id, posts=posts,
+            )
+        if not posts:
+            logger.info(
+                "telegram_listener: debounce-синхронізація #%s — лише reply до існуючих товарів.",
+                supplier_id,
+            )
+            return
+
+        # Один пакетний виклик Gemini на весь блок постів (як у run_telegram_import).
+        blob = "\n\n".join(f"{i}. {post['formatted']}" for i, post in enumerate(posts, 1))
+        try:
+            parsed_products = await parse_telegram_posts_to_products(blob)
+        except Exception as e:
+            logger.error(
+                "telegram_listener: debounce-синхронізація #%s — Gemini 429/503 або збій парсингу: %s",
+                supplier_id, e, exc_info=True,
+            )
+            return
+
+        if not parsed_products:
+            logger.info(
+                "telegram_listener: debounce-синхронізація #%s — Gemini не знайшов товарів у пакеті.",
+                supplier_id,
+            )
+            return
+
+        async with AsyncSessionLocal() as db:
+            saved = await _save_batch_products(
+                db,
+                supplier_id=supplier_id,
+                batch=posts,
+                parsed_items=parsed_products,
+            )
         logger.info(
-            "telegram_listener: товар #%s ще не готовий — фото поста #%s відкладено в чергу.",
-            parent_id, getattr(message, "id", "?"),
+            "telegram_listener: debounce-синхронізація supplier #%s завершена: постів=%s, збережено=%s.",
+            supplier_id, len(posts), saved,
         )
-    else:
-        logger.info(
-            "telegram_listener: фото поста #%s додано до товару #%s (supplier #%s).",
-            getattr(message, "id", "?"), parent_id, supplier_id,
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.error(
+            "telegram_listener: debounce-синхронізація supplier #%s впала: %s",
+            supplier_id, e, exc_info=True,
         )
-    return True
+    finally:
+        # Прибираємо себе з реєстру, ЛИШЕ якщо це досі "наша" задача (не
+        # замінена новішою — інакше можна випадково стерти щойно поставлену).
+        current = _debounce_tasks.get(supplier_id)
+        if current is asyncio.current_task():
+            _debounce_tasks.pop(supplier_id, None)
 
 
-async def _handle_channel_post(event, *, is_edit: bool) -> None:
+def _schedule_debounced_sync(supplier_id: int) -> None:
+    existing = _debounce_tasks.get(supplier_id)
+    if existing is not None and not existing.done():
+        existing.cancel()
+    _debounce_tasks[supplier_id] = asyncio.create_task(_delayed_sync(supplier_id))
+
+
+async def _handle_channel_post(event) -> None:
+    """
+    ЄДИНЕ, що робить обробник NewMessage/MessageEdited (КРОК 1): визначає
+    постачальника і перезапускає його дебаунс-таймер. Жодного парсингу,
+    Gemini чи запису в БД тут немає — уся робота відбувається пізніше, в
+    _delayed_sync, одним пакетним проходом по історії каналу.
+    """
     try:
         if not getattr(event, "is_channel", False) and not getattr(event, "is_group", False):
             return
@@ -267,116 +289,7 @@ async def _handle_channel_post(event, *, is_edit: bool) -> None:
         supplier_id = _resolve_supplier_id(event, approved)
         if not supplier_id:
             return
-
-        supplier_name = f"supplier_{supplier_id}"
-        if AsyncSessionLocal is not None:
-            async with AsyncSessionLocal() as db:
-                supplier = await db.get(Supplier, supplier_id)
-                if supplier and getattr(supplier, "name", None):
-                    supplier_name = supplier.name
-
-        ctx = _stitch_ctx(supplier_id)
-        if not is_edit and await _attach_album_extra(
-            event,
-            supplier_id=supplier_id,
-            supplier_name=supplier_name,
-            ctx=ctx,
-        ):
-            return
-
-        posts_text = await _event_post_text(
-            event,
-            supplier_name=supplier_name,
-            supplier_id=supplier_id,
-            upload_media=False,
-        )
-        if not posts_text.strip():
-            return
-
-        message = getattr(event, "message", None)
-        if message is not None and is_album_extra_message(message):
-            logger.info(
-                "telegram_listener: короткий медіа-пост #%s без прив'язки до товару — ігнор.",
-                getattr(message, "id", "?"),
-            )
-            return
-
-        try:
-            parsed = await parse_telegram_posts_to_products(posts_text)
-        except Exception as e:
-            logger.error(
-                "telegram_listener: Gemini 429/503 або збій парсингу (supplier #%s): %s",
-                supplier_id, e, exc_info=True,
-            )
-            return
-
-        if not parsed:
-            logger.info(
-                "telegram_listener: пост не схожий на товар (supplier #%s, edit=%s) — ігнор.",
-                supplier_id, is_edit,
-            )
-            return
-
-        public_urls: list[str] = []
-        try:
-            client = getattr(event, "client", None)
-            public_urls = await extract_and_upload_message_media(
-                client,
-                message,
-                supplier_name=supplier_name,
-                supplier_id=supplier_id,
-            )
-        except Exception as e:
-            logger.warning(
-                "telegram_listener: медіа не завантажено після is_product (пост #%s): %s",
-                getattr(message, "id", "?"), e,
-            )
-        photo_urls = list(public_urls) or extract_photo_urls_from_text(posts_text)
-        if photo_urls:
-            for item in parsed:
-                item["image_urls"] = list(dict.fromkeys(
-                    list(item.get("image_urls") or []) + list(photo_urls)
-                ))
-
-        message_id = int(getattr(message, "id", 0) or getattr(event, "id", 0) or 0)
-        if not message_id:
-            return
-        chat = getattr(event, "chat", None)
-        username = getattr(chat, "username", None)
-        chat_id = getattr(event, "chat_id", None) or getattr(chat, "id", None)
-        source_url = _source_url_for_message(username, chat_id, message_id)
-
-        if AsyncSessionLocal is None:
-            return
-        async with AsyncSessionLocal() as db:
-            saved = await upsert_parsed_telegram_items(
-                db,
-                supplier_id=supplier_id,
-                parsed_items=parsed,
-                message_id=message_id,
-                source_url=source_url,
-                is_edit=is_edit,
-            )
-        if saved and message is not None:
-            ctx.remember_product(message)
-            # Товар щойно з'явився в БД — приклеюємо фото, які "досипались"
-            # окремими повідомленнями ПОКИ Gemini обробляв основний пост.
-            leftover_urls = ctx.pop_attachments_for(message_id)
-            if leftover_urls:
-                async with AsyncSessionLocal() as db2:
-                    attached = await attach_telegram_album_media(
-                        db2,
-                        supplier_id=supplier_id,
-                        attachments=[(message_id, leftover_urls)],
-                    )
-                logger.info(
-                    "telegram_listener: %s відкладене фото приклеєно до товару поста #%s (attached=%s).",
-                    len(leftover_urls), message_id, attached,
-                )
-        logger.info(
-            "telegram_listener: supplier #%s msg %s edit=%s saved=%s",
-            supplier_id, message_id, is_edit, saved,
-        )
+        _schedule_debounced_sync(supplier_id)
     except Exception as e:
         logger.error("telegram_listener: обробник не повинен класти бота: %s", e, exc_info=True)
 
@@ -390,15 +303,18 @@ def register_telegram_channel_listeners(client: TelegramClient) -> None:
 
     @client.on(events.NewMessage)
     async def on_approved_channel_new_message(event):
-        await _handle_channel_post(event, is_edit=False)
+        await _handle_channel_post(event)
 
     @client.on(events.MessageEdited)
     async def on_approved_channel_message_edited(event):
-        await _handle_channel_post(event, is_edit=True)
+        await _handle_channel_post(event)
 
     client._taverna_tg_listeners = True
     _listeners_registered = True
-    logger.info("telegram_listener: слухач NewMessage + MessageEdited увімкнено.")
+    logger.info(
+        "telegram_listener: слухач NewMessage + MessageEdited увімкнено (debounce=%sс).",
+        _DEBOUNCE_SECONDS,
+    )
 
 
 async def start_telegram_listener(client: TelegramClient) -> None:

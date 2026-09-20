@@ -216,6 +216,8 @@ def _telegram_media_folder_path(supplier_name: str, supplier_id: int, message_id
 
 
 MIN_PRODUCT_TEXT_LEN = 12
+# Підпис коротший за це — не опис товару, а "голе" медіа (альбом / forward).
+_ORPHAN_TEXT_MAX_LEN = 10
 
 
 def _message_text(message) -> str:
@@ -224,6 +226,24 @@ def _message_text(message) -> str:
         or getattr(message, "text", None)
         or ""
     ).strip()
+
+
+def _message_reply_to_id(message) -> int:
+    """ID поста, на який це повідомлення є Reply. 0 — якщо це звичайний пост."""
+    if message is None:
+        return 0
+    raw = getattr(message, "reply_to_msg_id", None)
+    if not raw:
+        header = getattr(message, "reply_to", None)
+        raw = getattr(header, "reply_to_msg_id", None) if header is not None else None
+    try:
+        value = int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+    own_id = int(getattr(message, "id", 0) or 0)
+    if value <= 0 or value == own_id:
+        return 0
+    return value
 
 
 def _message_has_media(message) -> bool:
@@ -249,9 +269,36 @@ def is_album_extra_message(message) -> bool:
     return _message_has_media(message) and _is_short_product_text(_message_text(message))
 
 
+def _is_orphan_media_message(message) -> bool:
+    """Медіа без опису товару: немає тексту або підпис коротший за 10 символів."""
+    return _message_has_media(message) and len(_message_text(message)) < _ORPHAN_TEXT_MAX_LEN
+
+
+def _is_product_text_message(message) -> bool:
+    """Є повноцінний текст-опис товару (не службовий підпис до фото)."""
+    return len(_message_text(message)) >= _ORPHAN_TEXT_MAX_LEN
+
+
+def _is_empty_service_message(message) -> bool:
+    """Службове/видалене повідомлення: ні тексту, ні медіа — не рве блок."""
+    return not _message_text(message) and not _message_has_media(message)
+
+
 @dataclass
 class AlbumStitchContext:
-    """Пам'ять парсера: останній товарний пост, щоб доклеїти альбомні фото."""
+    """
+    Пам'ять ІСТОРИЧНОГО (пакетного) імпорту каналу (run_telegram_import /
+    fetch_channel_posts_page) — останній товарний пост, щоб доклеїти альбомні
+    фото. Той прохід послідовний (один async for по iter_messages), тому тут
+    гонитви даних немає.
+
+    УВАГА: real-time listener (services/telegram_listener.py) ЦЕЙ клас
+    БІЛЬШЕ НЕ використовує — там натомість collect_neighbor_media_urls()
+    нижче: один синхронний запит історії навколо message_id замість
+    TTL-буферів/подієвих "доклеювань", які на конкурентних NewMessage
+    спричиняли гонитву даних (втрата фото при пересиланні, перезапис
+    масивів pictures).
+    """
     last_product_message_id: int = 0
     last_extra_message_id: int = 0
     last_grouped_id: Any = None
@@ -318,6 +365,249 @@ class AlbumStitchContext:
         items = list(self.pending_album_ids)
         self.pending_album_ids = []
         return items
+
+
+def _dedupe_messages(messages: list) -> list:
+    """Повідомлення без дублікатів (за Telegram message_id), порядок збережено."""
+    seen: set = set()
+    unique: list = []
+    for m in messages:
+        mid = int(getattr(m, "id", 0) or 0)
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        unique.append(m)
+    return unique
+
+
+def _expand_block_with_album_siblings(ordered: list, block: dict, assigned_ids: set) -> None:
+    """
+    Telegram-альбом = кілька ОКРЕМИХ повідомлень з одним grouped_id
+    (по одному фото на повідомлення). Якщо в блоці вже є хоч один елемент
+    альбому — добираємо решту з вікна історії, щоб не втратити кадри.
+    """
+    gids = set()
+    for m in [block["anchor"], *block["media"]]:
+        gid = getattr(m, "grouped_id", None)
+        if gid is not None:
+            gids.add(gid)
+    if not gids:
+        return
+    for m in ordered:
+        mid = int(getattr(m, "id", 0) or 0)
+        if not mid or mid in assigned_ids:
+            continue
+        if getattr(m, "grouped_id", None) in gids and _message_has_media(m):
+            block["media"].append(m)
+            assigned_ids.add(mid)
+
+
+def _group_messages_into_blocks(ordered: list) -> list[dict]:
+    """
+    Жадібне групування історії каналу (найстаріше → найновіше).
+
+    `orphan_media` тримає всі фото/відео БЕЗ тексту (або з підписом < 10
+    символів), які ще не прив'язані до товару. Щойно трапляється текстовий
+    пост — йому віддаються:
+      1) усі фото ЗВЕРХУ (буфер orphan_media, потім буфер очищується);
+      2) медіа самого текстового повідомлення (якщо є);
+      3) усі фото ЗНИЗУ — look-ahead, поки далі йдуть медіа без тексту.
+
+    Медіа МІЖ двома текстами більше НЕ ділиться навпіл: look-ahead забирає
+    їх УСІ на попередній текстовий пост. Службові/видалені повідомлення
+    (без тексту і без медіа) пропускаються і блок не рвуть.
+    """
+    blocks: list[dict] = []
+    orphan_media: list = []
+    i = 0
+    n = len(ordered)
+
+    while i < n:
+        msg = ordered[i]
+
+        if _is_empty_service_message(msg):
+            i += 1
+            continue
+
+        if _is_orphan_media_message(msg):
+            orphan_media.append(msg)
+            i += 1
+            continue
+
+        if not _is_product_text_message(msg):
+            i += 1
+            continue
+
+        media = list(orphan_media)
+        orphan_media = []
+        if _message_has_media(msg):
+            media.append(msg)
+
+        i += 1
+        while i < n:
+            nxt = ordered[i]
+            if _is_empty_service_message(nxt):
+                i += 1
+                continue
+            if _is_orphan_media_message(nxt):
+                media.append(nxt)
+                i += 1
+                continue
+            break
+
+        blocks.append({"anchor": msg, "media": _dedupe_messages(media)})
+
+    assigned_ids: set = set()
+    for block in blocks:
+        for m in [block["anchor"], *block["media"]]:
+            mid = int(getattr(m, "id", 0) or 0)
+            if mid:
+                assigned_ids.add(mid)
+    for block in blocks:
+        _expand_block_with_album_siblings(ordered, block, assigned_ids)
+        block["media"] = _dedupe_messages(block["media"])
+
+    return blocks
+
+
+async def sync_recent_channel_history(
+    channel_link: str,
+    *,
+    limit: int,
+    supplier_name: str,
+    supplier_id: int,
+) -> list[dict]:
+    """
+    Читає останні `limit` повідомлень каналу ОДНИМ запитом, групує їх
+    жадібним алгоритмом (_group_messages_into_blocks) і для КОЖНОГО блоку
+    послідовно, у циклі `for` (БЕЗ asyncio.gather), завантажує УСІ
+    прикріплені медіа — кожне повідомлення альбому окремим файлом.
+
+    Повертає список постів у форматі fetch_channel_posts_page
+    (message_id, formatted, text, username, chat_id, image_urls) —
+    сумісний з _save_batch_products() із services/telegram_sync.py.
+    """
+    channel_ref = _normalize_channel_ref(channel_link)
+    take = max(1, min(int(limit or 40), 100))
+
+    async with _client_lock:
+        client = await _ensure_client()
+        entity = await client.get_entity(channel_ref)
+        username = getattr(entity, "username", None)
+        chat_id = getattr(entity, "id", None)
+
+        raw_messages = []
+        async for message in client.iter_messages(entity, limit=take):
+            raw_messages.append(message)
+
+        # iter_messages віддає від новішого до старішого — розвертаємо
+        # хронологічно (найстаріше → найновіше), як вимагає групування.
+        ordered = list(reversed(raw_messages))
+        ordered.sort(key=lambda m: int(getattr(m, "id", 0) or 0))
+
+        # Reply виймаємо ДО групування, щоб відео-відповідь не приклеїлась
+        # до сусіднього нового тексту. Сам _group_messages_into_blocks
+        # не змінюємо — змінюється лише вхідний список.
+        regular: list = []
+        reply_messages: list = []
+        for m in ordered:
+            if _message_reply_to_id(m):
+                reply_messages.append(m)
+            else:
+                regular.append(m)
+        blocks = _group_messages_into_blocks(regular)
+        logger.info(
+            "sync_recent_channel_history: %s прочитано=%s блоків=%s reply=%s",
+            channel_link, len(ordered), len(blocks), len(reply_messages),
+        )
+
+        posts: list[dict] = []
+        for block in blocks:
+            anchor = block["anchor"]
+            msg_id = int(getattr(anchor, "id", 0) or 0)
+            if not msg_id:
+                continue
+
+            # Групування вже кладе в media: orphan зверху + власне медіа
+            # анкера + look-ahead знизу + siblings альбому. Нічого не
+            # відкидаємо і не ділимо.
+            unique_media = _dedupe_messages(list(block["media"]))
+            unique_media.sort(key=lambda m: int(getattr(m, "id", 0) or 0))
+
+            # Послідовне завантаження КОЖНОГО повідомлення альбому.
+            # Telegram-альбом = N окремих Message (по 1 фото). asyncio.gather
+            # тут заборонений: паралельні PUT у Supabase бити файли.
+            urls: list[str] = []
+            for m in unique_media:
+                try:
+                    found = await extract_and_upload_message_media(
+                        client, m,
+                        supplier_name=supplier_name, supplier_id=supplier_id,
+                        folder_message_id=msg_id,
+                    )
+                    for url in found or []:
+                        if url and url not in urls:
+                            urls.append(url)
+                except Exception as e:
+                    logger.warning(
+                        "sync_recent_channel_history: медіа поста #%s не завантажено: %s",
+                        getattr(m, "id", "?"), e,
+                    )
+
+            logger.info(
+                "sync_recent_channel_history: блок пост #%s media_msgs=%s urls=%s",
+                msg_id, len(unique_media), len(urls),
+            )
+
+            formatted = _format_post(anchor, urls)
+            if not formatted:
+                continue
+            posts.append({
+                "message_id": msg_id,
+                "formatted": formatted,
+                "text": _message_text(anchor),
+                "username": username,
+                "chat_id": chat_id,
+                "image_urls": urls,
+                "reply_to_msg_id": _message_reply_to_id(anchor),
+            })
+
+        for message in reply_messages:
+            msg_id = int(getattr(message, "id", 0) or 0)
+            reply_to = _message_reply_to_id(message)
+            if not msg_id or not reply_to:
+                continue
+            urls: list[str] = []
+            if _message_has_media(message):
+                try:
+                    found = await extract_and_upload_message_media(
+                        client, message,
+                        supplier_name=supplier_name, supplier_id=supplier_id,
+                        folder_message_id=reply_to,
+                    )
+                    for url in found or []:
+                        if url and url not in urls:
+                            urls.append(url)
+                except Exception as e:
+                    logger.warning(
+                        "sync_recent_channel_history: reply-медіа поста #%s не завантажено: %s",
+                        msg_id, e,
+                    )
+            formatted = _format_post(message, urls) or ""
+            posts.append({
+                "message_id": msg_id,
+                "formatted": formatted,
+                "text": _message_text(message),
+                "username": username,
+                "chat_id": chat_id,
+                "image_urls": urls,
+                "reply_to_msg_id": reply_to,
+            })
+            logger.info(
+                "sync_recent_channel_history: reply #%s → пост #%s media=%s",
+                msg_id, reply_to, len(urls),
+            )
+        return posts
 
 
 def _append_media_to_post(post: dict, urls: list[str]) -> None:
@@ -420,6 +710,7 @@ async def _stitch_channel_messages(
             "image_urls": list(public_urls),
             "grouped_id": getattr(message, "grouped_id", None),
             "album_message_ids": [],
+            "reply_to_msg_id": _message_reply_to_id(message),
         }
         posts_by_id[msg_id] = new_post
         last_product_post = new_post
@@ -472,14 +763,21 @@ async def extract_and_upload_message_media(
     folder_message_id: Optional[int] = None,
 ) -> list[str]:
     """
-    Якщо в пості є медіа — качає в пам'ять і кладе в Supabase Storage.
+    Качає медіа ОДНОГО Telegram-повідомлення в Supabase Storage.
+
+    У Telegram альбом — це НЕ кілька файлів в одному Message, а N окремих
+    повідомлень з одним grouped_id (по одному фото/відео на повідомлення).
+    Тому ця функція свідомо вантажить ОДИН файл. Усі кадри альбому має
+    зібрати групування і передати сюди послідовним циклом `for` (див.
+    sync_recent_channel_history). asyncio.gather тут немає і не буде.
+
     Помилка завантаження не валить парсинг тексту: повертає [].
     """
     if client is None or message is None or not getattr(message, "media", None):
         return []
     if not _is_supported_image_message(message):
         logger.info(
-            "telegram_parser: медіа поста #%s не є .jpg/.jpeg/.png/.webp — пропущено (відео/документ/стікер).",
+            "telegram_parser: медіа поста #%s не є .jpg/.jpeg/.png/.webp/.gif/.mp4/.webm — пропущено.",
             getattr(message, "id", "?"),
         )
         return []
@@ -503,6 +801,7 @@ async def extract_and_upload_message_media(
             supplier_id,
             folder_message_id if folder_message_id is not None else getattr(message, "id", 0),
         )
+        # Один файл — один PUT. Без gather, без паралелі.
         loop = asyncio.get_running_loop()
         public_url = await loop.run_in_executor(
             None,

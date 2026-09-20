@@ -884,8 +884,10 @@ export default function SearchResults() {
 
   return (
     <div className="min-h-screen bg-background w-full max-w-[100vw] overflow-x-hidden pb-40">
-      {/* Header */}
-      <div className="sticky top-0 z-50 bg-card border-b border-border w-full max-w-[100vw] overflow-x-hidden">
+      {/* Header — z-30 (НЕ z-50!), щоб повноекранна Стрічка товарів
+          (ProductFeedView, fixed z-[45]) завжди рендерилась ПОВЕРХ цього
+          липкого хедера, а не під ним. */}
+      <div className="sticky top-0 z-30 bg-card border-b border-border w-full max-w-[100vw] overflow-x-hidden">
         <form onSubmit={handleSearch} className="flex items-center gap-2 p-3 min-w-0">
           <button
             type="button"
