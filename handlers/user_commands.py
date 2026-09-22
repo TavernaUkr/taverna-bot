@@ -1,12 +1,27 @@
 # handlers/user_commands.py
 from aiogram import Router, F, types
-from aiogram.types import Message
-from aiogram.filters import CommandStart
+from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from aiogram.filters import CommandStart, CommandObject
 from aiogram.fsm.context import FSMContext
 # Ми ВИДАЛИЛИ імпорт get_main_kb, бо його немає.
 # Ми ВИДАЛИЛИ імпорт CartCallback, бо він тут не потрібен.
 from keyboards.inline_keyboards import build_cart_kb, CartCallback # <-- ТЕПЕР ЦЕ ТУТ
 from services import cart_service
+
+# --- Deep-link менеджера: /start manager_{token} ---
+import html
+import logging
+from datetime import datetime, timezone
+from typing import Optional
+
+from sqlalchemy import select
+from sqlalchemy.orm import joinedload
+
+from config_reader import config
+from database.db import AsyncSessionLocal
+from database.models import ManagerInvite, Supplier, User, UserRole, supplier_managers
+
+logger = logging.getLogger(__name__)
 
 # Створюємо роутер
 router = Router()
@@ -24,6 +39,121 @@ async def cmd_start_simple(msg: Message, state: FSMContext):
     )
     # Просто текст, без зайвих клавіатур (кнопка Меню вже налаштована в bot.py)
     await msg.answer(greeting_text)
+
+
+# --- Deep-link: запрошення менеджера до магазину ---
+
+def _manager_miniapp_kb(supplier_id: int) -> Optional[InlineKeyboardMarkup]:
+    """Кнопка «Відкрити Mini App» на сторінку керування магазином."""
+    base = config.MINI_APP_URL
+    if not base:
+        return None
+    web_url = f"{base}/store-management/{supplier_id}?startapp=manager_{supplier_id}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🛖 Відкрити Mini App",
+                    web_app=WebAppInfo(url=web_url),
+                )
+            ]
+        ]
+    )
+
+
+def _invite_expired(expires_at: Optional[datetime]) -> bool:
+    """True, якщо час дії токена минув (naive-час вважаємо UTC)."""
+    if expires_at is None:
+        return True
+    expires = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+    return expires < datetime.now(timezone.utc)
+
+
+@router.message(CommandStart(deep_link=True, magic=F.args.startswith("manager_")))
+async def cmd_start_manager_invite(msg: Message, command: CommandObject, state: FSMContext):
+    """
+    Обробляє інвайт-посилання: /start manager_{token}
+    Токен з таблиці manager_invites (24 год, одноразовий).
+    """
+    await state.clear()
+    try:
+        token = (command.args or "").replace("manager_", "").strip()
+        if not token:
+            await msg.answer("❌ Посилання недійсне.")
+            return
+
+        telegram_id = msg.from_user.id
+
+        async with AsyncSessionLocal() as db:
+            # 1. Знаходимо інвайт разом із магазином
+            stmt = (
+                select(ManagerInvite)
+                .where(ManagerInvite.token == token)
+                .options(joinedload(ManagerInvite.supplier))
+            )
+            invite = (await db.execute(stmt)).scalar_one_or_none()
+
+            # 2. Валідація токена
+            if not invite:
+                await msg.answer("❌ Посилання недійсне.")
+                return
+            if invite.is_used:
+                await msg.answer("❌ Це посилання вже було використано.")
+                return
+            if _invite_expired(invite.expires_at):
+                await msg.answer("❌ Термін дії посилання минув.")
+                return
+
+            supplier = invite.supplier
+            if not supplier:
+                await msg.answer("❌ Магазин, до якого вас запрошували, більше не існує.")
+                return
+
+            # 3. Знаходимо або створюємо користувача
+            user = (
+                await db.execute(select(User).where(User.telegram_id == telegram_id))
+            ).scalar_one_or_none()
+            if not user:
+                user = User(
+                    telegram_id=telegram_id,
+                    first_name=msg.from_user.first_name,
+                    last_name=msg.from_user.last_name,
+                    username=msg.from_user.username,
+                    full_name=msg.from_user.full_name,
+                    role=UserRole.client,
+                )
+                db.add(user)
+                await db.flush()  # отримуємо user.id без commit
+                logger.info("Deep-link manager: створено User telegram_id=%s", telegram_id)
+
+            # 4. Чи вже є менеджером цього магазину?
+            already_manager = (
+                await db.execute(
+                    select(supplier_managers.c.user_id).where(
+                        supplier_managers.c.supplier_id == supplier.id,
+                        supplier_managers.c.user_id == user.id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if already_manager:
+                await msg.answer("ℹ️ Ви вже є менеджером цього магазину.")
+                return
+
+            # 5. Успіх: додаємо менеджера, позначаємо інвайт використаним
+            supplier.managers.append(user)
+            invite.is_used = True
+            await db.commit()
+
+        store_name = html.escape(supplier.store_name or supplier.name or "магазину")
+        text = (
+            "✅ Вітаємо! Ви стали менеджером магазину "
+            f"<b>{store_name}</b>. Тепер ви можете керувати ним через Mini App."
+        )
+        await msg.answer(text, reply_markup=_manager_miniapp_kb(supplier.id))
+
+    except Exception as e:
+        logger.error("Помилка deep-link 'manager_': %s", e, exc_info=True)
+        await msg.answer("⚠️ Сталася помилка. Спробуйте відкрити посилання ще раз.")
 
 # --- Додаємо обробник /basket ---
 @router.message(F.text == "/basket")

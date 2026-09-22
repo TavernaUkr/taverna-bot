@@ -11,15 +11,25 @@ import { isDuplicateSourceError, registerPartner, verifyTelegramChannel } from "
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { vibrate } from "@/hooks/useTelegramUI";
+import {
+  UA_IBAN_PREFIX,
+  UA_PHONE_PREFIX,
+  applyUaIbanMask,
+  applyUaPhoneMask,
+  bankHolderNameSchema,
+  blocksPrefixDeletion,
+  insertUaPrefixOnFocus,
+  normalizeUaPhone,
+  uaFullNameSchema,
+  uaIbanSchema,
+  uaPhoneSchema,
+} from "@/lib/uaValidation";
 
 type SupplierType = "individual" | "company";
 
 // Zod schema for robust validation
 const supplierSchema = z.object({
-  fullName: z.string()
-    .min(5, "ПІБ має містити мінімум 5 символів")
-    .max(100, "ПІБ не може перевищувати 100 символів")
-    .regex(/^[а-яА-ЯіІїЇєЄґҐa-zA-Z\s'-]+$/, "ПІБ може містити лише літери"),
+  fullName: uaFullNameSchema(),
   companyName: z.string().optional(),
   taxId: z.string()
     .min(8, "ЄДРПОУ має містити 8 цифр")
@@ -29,9 +39,7 @@ const supplierSchema = z.object({
     .min(1, "Обов'язкове поле")
     .email("Невірний формат email")
     .max(255, "Email занадто довгий"),
-  phone: z.string()
-    .min(1, "Обов'язкове поле")
-    .regex(/^\+?[\d\s()-]{10,20}$/, "Невірний формат телефону"),
+  phone: uaPhoneSchema(),
   shopName: z.string()
     .min(2, "Назва магазину має містити мінімум 2 символи")
     .max(100, "Назва магазину не може перевищувати 100 символів"),
@@ -39,15 +47,9 @@ const supplierSchema = z.object({
   sourceType: z.enum(["xml", "telegram"]).default("xml"),
   telegramChannelLink: z.string().optional(),
   telegram: z.string().optional(),
-  managerTelegram: z.string().optional(),
   description: z.string().max(1000, "Опис не може перевищувати 1000 символів").optional(),
-  paymentIban: z.string()
-    .min(1, "IBAN обов'язковий для отримання виплат")
-    .regex(/^UA\d{27}$/, "IBAN має бути у форматі UA + 27 цифр")
-    .max(29, "IBAN має містити 29 символів"),
-  paymentCardHolder: z.string()
-    .min(3, "Вкажіть ПІБ власника рахунку")
-    .max(100, "ПІБ занадто довге"),
+  paymentIban: uaIbanSchema("IBAN обов'язковий для отримання виплат: UA + 27 цифр"),
+  paymentCardHolder: bankHolderNameSchema(),
   paymentBankName: z.string().optional(),
   agreeToTerms: z.literal(true, { errorMap: () => ({ message: "Необхідно прийняти умови" }) }),
 }).superRefine((data, ctx) => {
@@ -82,10 +84,10 @@ const SupplierRegistration = () => {
     defaultValues: {
       fullName: profile ? `${profile.first_name || ''} ${profile.last_name || ''}`.trim() : '',
       email: profile?.email || '',
-      phone: profile?.phone || '',
-      telegram: profile?.telegram_username || '',
+      phone: normalizeUaPhone(profile?.phone) || '',
       sourceType: "xml",
       telegramChannelLink: "",
+      telegram: profile?.telegram_username || '',
     }
   });
   const sourceType = watch("sourceType") || "xml";
@@ -123,7 +125,7 @@ const SupplierRegistration = () => {
     if (profile) {
       setValue('fullName', `${profile.first_name || ''} ${profile.last_name || ''}`.trim());
       if (profile.email) setValue('email', profile.email);
-      if (profile.phone) setValue('phone', profile.phone);
+      if (profile.phone) setValue('phone', normalizeUaPhone(profile.phone));
       if (profile.telegram_username) setValue('telegram', profile.telegram_username);
     }
   }, [profile, setValue]);
@@ -159,7 +161,6 @@ const SupplierRegistration = () => {
         email: data.email,
         phone: data.phone,
         telegram_username: data.telegram || null,
-        manager_telegram: data.managerTelegram || null,
         name: data.shopName,
         store_name: data.shopName,
         shop_name: data.shopName,
@@ -437,6 +438,9 @@ const SupplierRegistration = () => {
                     className="w-full pl-10 pr-4 py-3 bg-muted border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
                   />
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Рівно 2 або 3 слова: Ім'я Прізвище чи Прізвище Ім'я По батькові
+                </p>
                 {errors.fullName && (
                   <p className="text-xs text-destructive">{errors.fullName.message}</p>
                 )}
@@ -512,36 +516,34 @@ const SupplierRegistration = () => {
                   <input
                     {...register("phone")}
                     type="tel"
-                    placeholder="+380 XX XXX XX XX"
+                    inputMode="tel"
+                    maxLength={13}
+                    placeholder="+380671234567"
+                    onFocus={(e) => insertUaPrefixOnFocus(e, (value) => setValue("phone", value), UA_PHONE_PREFIX)}
+                    onKeyDown={(e) => {
+                      if (blocksPrefixDeletion(e, UA_PHONE_PREFIX)) e.preventDefault();
+                    }}
+                    onChange={(e) => {
+                      const masked = applyUaPhoneMask(e.target.value);
+                      e.target.value = masked;
+                      setValue("phone", masked);
+                    }}
                     className="w-full pl-10 pr-4 py-3 bg-muted border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
                   />
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  Формат: +380 + код оператора + 7 цифр (напр. +380671234567)
+                </p>
                 {errors.phone && (
                   <p className="text-xs text-destructive">{errors.phone.message}</p>
                 )}
               </div>
 
               <div className="space-y-2">
-                <label className="text-sm font-medium text-foreground">Telegram для зв'язку</label>
-                <input
-                  {...register("telegram")}
-                  type="text"
-                  placeholder="@your_telegram"
-                  className="w-full px-4 py-3 bg-muted border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-foreground">Telegram менеджера магазину</label>
-                <input
-                    {...register("managerTelegram")}
-                  type="text"
-                  placeholder="@manager_username"
-                  className="w-full px-4 py-3 bg-muted border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
-                />
                 <p className="text-xs text-muted-foreground">
-                  Менеджер отримуватиме сповіщення від бота при зверненнях клієнтів
+                  Менеджери магазину додаються після реєстрації: «Керування магазином» → «Менеджери»
                 </p>
+                <input type="hidden" {...register("telegram")} />
               </div>
             </div>
 
@@ -715,11 +717,17 @@ const SupplierRegistration = () => {
                     <input
                       {...register("paymentIban")}
                       type="text"
+                      inputMode="text"
                       maxLength={29}
                       placeholder="UA123456789012345678901234567"
+                      onFocus={(e) => insertUaPrefixOnFocus(e, (value) => setValue("paymentIban", value, { shouldValidate: false }), UA_IBAN_PREFIX)}
+                      onKeyDown={(e) => {
+                        if (blocksPrefixDeletion(e, UA_IBAN_PREFIX)) e.preventDefault();
+                      }}
                       className="w-full pl-10 pr-4 py-3 bg-muted border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary uppercase"
                       onChange={(e) => {
-                        const val = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+                        const val = applyUaIbanMask(e.target.value);
+                        e.target.value = val;
                         setValue('paymentIban', val);
                       }}
                     />
@@ -737,6 +745,9 @@ const SupplierRegistration = () => {
                     placeholder="Іваненко Іван Іванович"
                     className="w-full px-4 py-3 bg-muted border border-border rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary"
                   />
+                  <p className="text-xs text-muted-foreground">
+                    2 або 3 слова, як у банку (українською або латиницею)
+                  </p>
                   {errors.paymentCardHolder && (
                     <p className="text-xs text-destructive">{errors.paymentCardHolder.message}</p>
                   )}

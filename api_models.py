@@ -23,6 +23,7 @@ class UtcJsonDates(BaseModel):
         "restored_at",
         "deleted_at",
         "trial_ends_at",
+        "expires_at",
         when_used="json",
         check_fields=False,
     )
@@ -390,6 +391,40 @@ class SupplierDeletionRequest(BaseModel):
 class SupplierDeletionResponse(BaseModel):
     ok: bool = True
     detail: str = "Заявка на видалення надіслана адміністратору"
+
+
+class SupplierManagerResponse(BaseModel):
+    """Менеджер магазину для GET /suppliers/me/managers."""
+    user_id: int
+    telegram_id: Optional[int] = None
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+
+
+class SupplierInviteLinkResponse(BaseModel):
+    """Відповідь POST /suppliers/me/invite-link."""
+    ok: bool = True
+    link: str
+    token: str
+    expires_at: Optional[datetime] = None
+
+
+class SupplierShopCardResponse(UtcJsonDates):
+    """Магазин для «Мої магазини»: власник або менеджер (GET /suppliers/me/shops)."""
+    id: int
+    store_name: str
+    supplier_type: Optional[str] = None
+    status: str
+    is_active: bool = False
+    role: str  # 'owner' | 'manager'
+    shop_url: Optional[str] = None
+    logo_url: Optional[str] = None
+    product_count: int = 0
+    completed_products: int = 0
+    deletion_requested: bool = False
+    created_at: Optional[datetime] = None
 
 
 class PendingSupplierApplicationResponse(UtcJsonDates):

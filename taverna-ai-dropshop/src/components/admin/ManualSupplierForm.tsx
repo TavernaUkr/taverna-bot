@@ -11,6 +11,16 @@ import { toast } from "sonner";
 import { useToast } from "@/hooks/use-toast";
 import { hapticNotification } from "@/lib/haptics";
 import { directCreateSupplier, isDuplicateSourceError, verifyTelegramChannel } from "@/lib/backendApi";
+import {
+  UA_IBAN_PREFIX,
+  applyUaIbanMask,
+  blocksPrefixDeletion,
+  insertUaPrefixOnFocus,
+  isValidBankHolderName,
+  isValidUaIban,
+  UA_IBAN_ERROR,
+  BANK_HOLDER_NAME_ERROR,
+} from "@/lib/uaValidation";
 
 interface ManualSupplierFormProps {
   onSuccess?: () => void;
@@ -23,6 +33,7 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
   const [tgVerified, setTgVerified] = useState(false);
   const [isMyDrop, setIsMyDrop] = useState(false);
   const [sourceType, setSourceType] = useState<"xml" | "telegram">("xml");
+  const [fieldErrors, setFieldErrors] = useState<{ payment_iban?: string; payment_card_holder?: string }>({});
   const [formData, setFormData] = useState({
     shop_name: "",
     telegram_channel_url: "",
@@ -85,6 +96,20 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
       return;
     }
 
+    // Жорстка валідація банківських реквізитів (заповнені поля мусять бути валідними)
+    const newErrors: typeof fieldErrors = {};
+    if (formData.payment_iban && !isValidUaIban(formData.payment_iban)) {
+      newErrors.payment_iban = UA_IBAN_ERROR;
+    }
+    if (formData.payment_card_holder && !isValidBankHolderName(formData.payment_card_holder)) {
+      newErrors.payment_card_holder = BANK_HOLDER_NAME_ERROR;
+    }
+    setFieldErrors(newErrors);
+    if (Object.keys(newErrors).length > 0) {
+      toast.error("Виправте помилки у реквізитах для виплат");
+      return;
+    }
+
     setIsSubmitting(true);
     try {
       const tgUserId = (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id;
@@ -122,6 +147,7 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
       setFormData({ shop_name: "", telegram_channel_url: "", telegram_channel_link: "", manager_telegram: "", xml_url: "", payment_iban: "", payment_card_holder: "", payment_bank_name: "" });
       setSourceType("xml");
       setTgVerified(false);
+      setFieldErrors({});
       onSuccess?.();
     } catch (err: any) {
       console.error("Error creating supplier:", err);
@@ -273,16 +299,26 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
             </Label>
             <Input
               value={formData.payment_iban}
+              onFocus={(e) => insertUaPrefixOnFocus(e, (v) => setFormData(prev => ({ ...prev, payment_iban: v })), UA_IBAN_PREFIX)}
+              onKeyDown={(e) => {
+                if (blocksPrefixDeletion(e, UA_IBAN_PREFIX)) e.preventDefault();
+              }}
               onChange={(e) => {
-                const val = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+                const val = applyUaIbanMask(e.target.value);
                 setFormData(prev => ({ ...prev, payment_iban: val }));
+                setFieldErrors(prev => ({ ...prev, payment_iban: undefined }));
               }}
               placeholder="UA123456789012345678901234567"
               maxLength={29}
+              className="uppercase"
             />
-            <p className="text-xs text-muted-foreground">
-              Для автоматичних виплат дроп-ціни постачальнику через Monobank API
-            </p>
+            {fieldErrors.payment_iban ? (
+              <p className="text-xs text-destructive">{fieldErrors.payment_iban}</p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Для автоматичних виплат дроп-ціни постачальнику через Monobank API
+              </p>
+            )}
           </div>
 
           {/* Card Holder */}
@@ -290,9 +326,19 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
             <Label>ПІБ власника рахунку</Label>
             <Input
               value={formData.payment_card_holder}
-              onChange={(e) => setFormData(prev => ({ ...prev, payment_card_holder: e.target.value }))}
+              onChange={(e) => {
+                setFormData(prev => ({ ...prev, payment_card_holder: e.target.value }));
+                setFieldErrors(prev => ({ ...prev, payment_card_holder: undefined }));
+              }}
               placeholder="Іваненко Іван Іванович"
             />
+            {fieldErrors.payment_card_holder ? (
+              <p className="text-xs text-destructive">{fieldErrors.payment_card_holder}</p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                Рівно 2 або 3 слова, як у банку (українською або латиницею)
+              </p>
+            )}
           </div>
 
           {/* Bank Name */}

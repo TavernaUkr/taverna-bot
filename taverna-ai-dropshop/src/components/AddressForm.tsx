@@ -12,6 +12,7 @@ import {
   DeliveryType,
 } from '@/components/checkout/DeliveryServiceSelect';
 import { PhoneInput } from '@/components/checkout/PhoneInput';
+import { isValidUaPhone } from '@/lib/uaValidation';
 
 interface AddressFormProps {
   onSubmit: (address: AddressData) => Promise<void>;
@@ -71,7 +72,7 @@ export function AddressForm({ onSubmit, onCancel, initialData, isLoading }: Addr
 
     const newErrors: Record<string, string> = {};
     if (!formData.recipient_name.trim()) newErrors.recipient_name = "Введіть ім'я";
-    if (!formData.phone || formData.phone.length < 10) newErrors.phone = 'Введіть телефон';
+    if (!isValidUaPhone(formData.phone)) newErrors.phone = 'Телефон: +380, код оператора та 7 цифр';
 
     if (formData.delivery_service === 'nova_poshta') {
       if (!formData.city_ref) newErrors.city = 'Оберіть місто';

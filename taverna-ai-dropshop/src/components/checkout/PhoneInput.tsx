@@ -1,6 +1,13 @@
-import { useState, useEffect, ChangeEvent } from "react";
+import { useState, useEffect, ChangeEvent, FocusEvent, KeyboardEvent } from "react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  UA_PHONE_PREFIX,
+  applyUaPhoneMask,
+  blocksPrefixDeletion,
+  insertUaPrefixOnFocus,
+  isValidUaPhone,
+} from "@/lib/uaValidation";
 
 interface PhoneInputProps {
   value: string;
@@ -19,62 +26,46 @@ export const PhoneInput = ({
 }: PhoneInputProps) => {
   const [displayValue, setDisplayValue] = useState("");
 
-  // Format phone for display
+  // Форматує +380XXXXXXXXX у вигляді +380 (XX) XXX-XX-XX
   const formatPhone = (phone: string): string => {
-    const digits = phone.replace(/\D/g, "").slice(0, 12);
-    
-    if (digits.length === 0) return "";
-    if (digits.length <= 2) return `+${digits}`;
-    if (digits.length <= 5) return `+${digits.slice(0, 2)} (${digits.slice(2)}`;
-    if (digits.length <= 8) return `+${digits.slice(0, 2)} (${digits.slice(2, 5)}) ${digits.slice(5)}`;
-    if (digits.length <= 10) return `+${digits.slice(0, 2)} (${digits.slice(2, 5)}) ${digits.slice(5, 8)}-${digits.slice(8)}`;
-    return `+${digits.slice(0, 2)} (${digits.slice(2, 5)}) ${digits.slice(5, 8)}-${digits.slice(8, 10)}-${digits.slice(10, 12)}`;
-  };
-
-  // Parse phone to raw digits
-  const parsePhone = (phone: string): string => {
-    return phone.replace(/\D/g, "");
+    if (!phone) return "";
+    const masked = applyUaPhoneMask(phone);
+    if (!masked) return "";
+    const digits = masked.replace(/\D/g, "").slice(0, 12); // 380 + 9 цифр
+    return `+${digits.slice(0, 3)} (${digits.slice(3, 5)}) ${digits.slice(5, 8)}-${digits.slice(8, 10)}-${digits.slice(10, 12)}`;
   };
 
   useEffect(() => {
-    if (value) {
-      setDisplayValue(formatPhone(value));
-    } else {
-      setDisplayValue("+380 ");
+    // Нормалізуємо legacy-телефони (380XXXXXXXXX без "+") до +380XXXXXXXXX
+    if (value && !value.startsWith("+")) {
+      const normalized = applyUaPhoneMask(value);
+      setDisplayValue(formatPhone(normalized));
+      onChange(normalized);
+      return;
     }
-  }, []);
+    setDisplayValue(value ? formatPhone(value) : "");
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const input = e.target.value;
-    const digits = parsePhone(input);
-    
-    // Ensure it starts with 380
-    let normalizedDigits = digits;
-    if (!digits.startsWith("380")) {
-      if (digits.startsWith("80")) {
-        normalizedDigits = "3" + digits;
-      } else if (digits.startsWith("0")) {
-        normalizedDigits = "38" + digits;
-      } else if (!digits.startsWith("3")) {
-        normalizedDigits = "380" + digits;
-      }
-    }
-    
-    // Limit to 12 digits (380 + 9 digits)
-    normalizedDigits = normalizedDigits.slice(0, 12);
-    
-    const formatted = formatPhone(normalizedDigits);
-    setDisplayValue(formatted);
-    onChange(normalizedDigits);
+    const masked = applyUaPhoneMask(e.target.value);
+    setDisplayValue(formatPhone(masked));
+    onChange(masked);
   };
 
-  const handleFocus = () => {
-    if (!displayValue || displayValue === "") {
-      setDisplayValue("+380 ");
+  const handleFocus = (e: FocusEvent<HTMLInputElement>) => {
+    if (!e.currentTarget.value.trim()) {
+      insertUaPrefixOnFocus(e, (v) => {
+        setDisplayValue(v);
+        onChange(v);
+      }, UA_PHONE_PREFIX);
     }
   };
 
-  const isValid = value.length === 12;
+  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (blocksPrefixDeletion(e, UA_PHONE_PREFIX)) e.preventDefault();
+  };
+
+  const isValid = isValidUaPhone(value);
 
   return (
     <div className="space-y-2">
@@ -84,16 +75,19 @@ export const PhoneInput = ({
       </Label>
       <Input
         type="tel"
+        inputMode="tel"
+        maxLength={19}
         value={displayValue}
         onChange={handleChange}
         onFocus={handleFocus}
+        onKeyDown={handleKeyDown}
         placeholder="+380 (XX) XXX-XX-XX"
-        className={`${error || (!isValid && value.length > 3) ? "border-destructive" : ""}`}
+        className={`${error || (!isValid && value.length > 4) ? "border-destructive" : ""}`}
       />
       {error && <p className="text-xs text-destructive">{error}</p>}
-      {!isValid && value.length > 3 && value.length < 12 && (
+      {!error && !isValid && value.length > 4 && (
         <p className="text-xs text-muted-foreground">
-          Введіть повний номер телефону
+          Введіть повний номер: +380, код оператора та 7 цифр
         </p>
       )}
     </div>

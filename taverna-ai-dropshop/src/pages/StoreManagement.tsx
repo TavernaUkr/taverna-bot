@@ -4,7 +4,8 @@ import {
   ArrowLeft, Store, Star, MessageSquare, Image, FileText, 
   Truck, RotateCcw, Settings, Loader2, Camera, Plus, X, Trash2,
   Clock, AlertTriangle, ChevronRight, Package, Upload,
-  Bot, UserCog, Reply, MapPin, Shield, Info, Edit3, Wallet
+  Bot, UserCog, Reply, MapPin, Shield, Info, Edit3, Wallet,
+  Link2, Share2, Copy
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -21,6 +22,11 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { triggerHapticFeedback, hapticSelection } from "@/lib/haptics";
 import { cn } from "@/lib/utils";
+import {
+  getManagers,
+  generateManagerInviteLink,
+  type BackendSupplierManager,
+} from "@/lib/backendApi";
 
 const WEEK_DAYS = [
   { id: "mon", label: "Пн" },
@@ -74,8 +80,10 @@ export default function StoreManagement() {
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
   const [isUploadingCover, setIsUploadingCover] = useState(false);
-  const [managerTelegramId, setManagerTelegramId] = useState("");
-  const [isAssigningManager, setIsAssigningManager] = useState(false);
+  const [shopManagers, setShopManagers] = useState<BackendSupplierManager[]>([]);
+  const [isManagersLoading, setIsManagersLoading] = useState(false);
+  const [inviteLink, setInviteLink] = useState<string | null>(null);
+  const [isGeneratingInvite, setIsGeneratingInvite] = useState(false);
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [newPhotoUrl, setNewPhotoUrl] = useState("");
@@ -153,12 +161,26 @@ export default function StoreManagement() {
         });
 
         await loadReviews(s.id);
+        await loadManagers();
       }
     } catch (err) {
       console.error("Error loading supplier:", err);
       toast.error("Помилка завантаження");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const loadManagers = async () => {
+    setIsManagersLoading(true);
+    try {
+      const managers = await getManagers();
+      setShopManagers(managers);
+    } catch (err: any) {
+      console.error("Error loading managers:", err);
+      toast.error(err?.message || "Не вдалося завантажити менеджерів");
+    } finally {
+      setIsManagersLoading(false);
     }
   };
 
@@ -616,6 +638,153 @@ export default function StoreManagement() {
           </Card>
 
 
+          {/* === Managers Section === */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <UserCog className="h-4 w-4 text-primary" />
+                Менеджери
+              </CardTitle>
+              <CardDescription>
+                Менеджери бачать замовлення магазину та відповідатимуть клієнтам у додатку
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Список менеджерів */}
+              <div className="space-y-2">
+                <Label className="text-sm font-medium">Поточні менеджери</Label>
+                {isManagersLoading ? (
+                  <p className="text-xs text-muted-foreground p-3 bg-muted/40 rounded-lg flex items-center gap-2">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Завантаження менеджерів…
+                  </p>
+                ) : shopManagers.length === 0 ? (
+                  <p className="text-xs text-muted-foreground p-3 bg-muted/40 rounded-lg">
+                    Менеджерів ще немає. Надішліть запрошення нижче — після переходу за посиланням менеджер отримає доступ до магазину.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    {shopManagers.map((m) => (
+                      <div key={m.user_id} className="flex items-center gap-3 p-3 bg-muted/40 rounded-lg">
+                        <Avatar className="h-8 w-8">
+                          <AvatarFallback className="bg-primary/10 text-primary text-xs">
+                            {(m.full_name || m.first_name || "М").charAt(0).toUpperCase()}
+                          </AvatarFallback>
+                        </Avatar>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-foreground truncate">
+                            {m.full_name || [m.first_name, m.last_name].filter(Boolean).join(" ") || "Менеджер"}
+                          </p>
+                          {m.telegram_id && (
+                            <p className="text-xs text-muted-foreground">ID: {m.telegram_id}</p>
+                          )}
+                        </div>
+                        <Badge variant="secondary" className="text-[10px] shrink-0">Менеджер</Badge>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Посилання-запрошення */}
+              <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <Link2 className="h-4 w-4 text-primary" />
+                  <p className="text-sm font-medium text-foreground">Запросити менеджера</p>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Згенеруйте посилання і надішліть менеджеру — він отримає доступ до магазину після переходу.
+                </p>
+                {inviteLink ? (
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <Input value={inviteLink} readOnly className="flex-1 h-9 text-xs font-mono" />
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(inviteLink).then(() => toast.success("Скопійовано!"));
+                        }}
+                      >
+                        <Copy className="h-4 w-4" />
+                      </Button>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        size="sm"
+                        className="flex-1 gap-2"
+                        onClick={() => {
+                          const tg = (window as any).Telegram?.WebApp;
+                          const shareUrl =
+                            `https://t.me/share/url?url=${encodeURIComponent(inviteLink)}` +
+                            `&text=${encodeURIComponent("Запрошення стати менеджером магазину")}`;
+                          if (tg?.openTelegramLink) {
+                            tg.openTelegramLink(shareUrl);
+                          } else {
+                            window.open(shareUrl, "_blank");
+                          }
+                        }}
+                      >
+                        <Share2 className="h-4 w-4" />
+                        Поділитись
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setInviteLink(null)}
+                      >
+                        <X className="h-4 w-4" />
+                        Скасувати
+                      </Button>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Посилання діє 24 години і працює один раз.
+                    </p>
+                  </div>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-full gap-2"
+                    disabled={isGeneratingInvite || !supplierId}
+                    onClick={async () => {
+                      if (isGeneratingInvite || !supplierId) return;
+                      setIsGeneratingInvite(true);
+                      try {
+                        const response = await generateManagerInviteLink();
+                        const url = response?.link || (response as any)?.invite_url;
+                        if (!url) {
+                          throw new Error("Бекенд не повернув посилання");
+                        }
+                        setInviteLink(url);
+                        triggerHapticFeedback("notification", "success");
+                        toast.success("Посилання-запрошення згенеровано!");
+                      } catch (err: any) {
+                        console.error("Error generating invite link:", err);
+                        triggerHapticFeedback("notification", "error");
+                        toast.error(err?.message || "Не вдалося згенерувати посилання");
+                      } finally {
+                        setIsGeneratingInvite(false);
+                      }
+                    }}
+                  >
+                    {isGeneratingInvite ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        Генеруємо…
+                      </>
+                    ) : (
+                      <>
+                        <Link2 className="h-4 w-4" />
+                        Згенерувати посилання-запрошення
+                      </>
+                    )}
+                  </Button>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
           {/* Manager & Bot Settings */}
           <Card>
             <CardHeader className="pb-3">
@@ -626,92 +795,6 @@ export default function StoreManagement() {
               <CardDescription>Налаштування зв'язку з клієнтами</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              {/* Manager Telegram username */}
-              <div className="space-y-2">
-                <Label className="text-sm">Telegram менеджера (нікнейм)</Label>
-                <Input
-                  value={shopData.manager_telegram}
-                  onChange={e => handleChange("manager_telegram", e.target.value)}
-                  placeholder="@manager_username"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Менеджер отримуватиме сповіщення від бота при зверненнях клієнтів та нових замовленнях
-                </p>
-              </div>
-
-              {/* Assign Manager by Telegram ID */}
-              <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 space-y-3">
-                <div className="flex items-center gap-2">
-                  <UserCog className="h-4 w-4 text-primary" />
-                  <p className="text-sm font-medium text-foreground">Призначити менеджера магазину</p>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Введіть Telegram ID вашого менеджера. Він отримає роль «Менеджер магазину» і зможе бачити 
-                  «Замовлення магазину» та відповідати клієнтам у додатку.
-                </p>
-                <div className="flex gap-2">
-                  <Input
-                    value={managerTelegramId}
-                    onChange={e => setManagerTelegramId(e.target.value.replace(/\D/g, ""))}
-                    placeholder="Telegram ID (числовий)"
-                    type="text"
-                    inputMode="numeric"
-                    className="flex-1"
-                  />
-                  <Button
-                    size="sm"
-                    disabled={!managerTelegramId.trim() || isAssigningManager}
-                    onClick={async () => {
-                      if (!managerTelegramId.trim() || !supplierId) return;
-                      setIsAssigningManager(true);
-                      try {
-                        // Find profile by telegram_id
-                        const { data: profiles } = await supabase
-                          .from("profiles")
-                          .select("id, first_name, last_name, telegram_id")
-                          .eq("telegram_id", parseInt(managerTelegramId))
-                          .limit(1);
-
-                        if (!profiles?.length) {
-                          toast.error("Користувача з таким Telegram ID не знайдено. Попросіть його спочатку відкрити додаток.");
-                          setIsAssigningManager(false);
-                          return;
-                        }
-
-                        const targetProfile = profiles[0];
-
-                        // Add shop_manager role
-                        await supabase
-                          .from("user_roles")
-                          .upsert(
-                            { user_id: targetProfile.id, role: "shop_manager" as any },
-                            { onConflict: "user_id,role" }
-                          );
-
-                        // Create link
-                        await supabase
-                          .from("shop_manager_links" as any)
-                          .upsert(
-                            { profile_id: targetProfile.id, supplier_id: supplierId, assigned_by: null },
-                            { onConflict: "profile_id,supplier_id" }
-                          );
-
-                        toast.success(
-                          `Менеджера ${targetProfile.first_name || ""} ${targetProfile.last_name || ""} призначено!`
-                        );
-                        setManagerTelegramId("");
-                      } catch (err: any) {
-                        toast.error(err.message || "Помилка призначення");
-                      } finally {
-                        setIsAssigningManager(false);
-                      }
-                    }}
-                  >
-                    {isAssigningManager ? <Loader2 className="h-4 w-4 animate-spin" /> : "Призначити"}
-                  </Button>
-                </div>
-              </div>
-
               {/* Bot Communication Toggle */}
               <div className="rounded-xl border border-border overflow-hidden">
                 <div className="flex items-center justify-between p-4 bg-muted/30">

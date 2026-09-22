@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { hapticImpact, hapticSelection } from "@/lib/haptics";
 import { AddressForm, AddressData } from "@/components/AddressForm";
 import { DeliveryMap } from "@/components/checkout/DeliveryMap";
+import { normalizeUaPhone } from "@/lib/uaValidation";
 import { motion, AnimatePresence } from "framer-motion";
 
 interface DeliveryAddress {
@@ -179,7 +180,7 @@ export function DeliveryAddressesPage({
       ? editingAddress as AddressData
       : {
           recipient_name: profile ? `${profile.first_name || ''} ${profile.last_name || ''}`.trim() : '',
-          phone: profile?.phone || '',
+          phone: normalizeUaPhone(profile?.phone || ''),
         } as AddressData;
 
     return (

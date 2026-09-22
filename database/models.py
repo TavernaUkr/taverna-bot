@@ -95,13 +95,21 @@ class PaidServiceStatus(str, enum.Enum):
     awaiting_execution = "awaiting_execution"
     completed = "completed"
 
-# --- Таблиця-посередник (Association Table) ---
-# ВОНА МАЄ БУТИ ТУТ, ПЕРЕД класами Supplier та Channel
+# --- Таблиці-посередники (Association Tables) ---
+# ВОНИ МАЮТЬ БУТИ ТУТ, ПЕРЕД класами Supplier та Channel
 supplier_channels = Table(
     'supplier_channels',
     Base.metadata,
     Column('supplier_id', Integer, ForeignKey('suppliers.id'), primary_key=True),
     Column('channel_id', Integer, ForeignKey('channels.id'), primary_key=True)
+)
+
+# Менеджери магазину: many-to-many між suppliers та users
+supplier_managers = Table(
+    'supplier_managers',
+    Base.metadata,
+    Column('supplier_id', Integer, ForeignKey('suppliers.id'), primary_key=True),
+    Column('user_id', Integer, ForeignKey('users.id'), primary_key=True)
 )
 
 # --- Моделі ---
@@ -201,6 +209,7 @@ class Supplier(Base):
     user = relationship("User", back_populates="suppliers")
     
     channels = relationship("Channel", secondary=supplier_channels, back_populates="suppliers")
+    managers = relationship("User", secondary=supplier_managers, backref="managed_suppliers")
     products = relationship("Product", back_populates="supplier", cascade="all, delete-orphan")
 
 
@@ -214,6 +223,20 @@ class SupplierHistoryLog(Base):
     source_link = Column(Text, nullable=True, index=True)
     deleted_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
     reason = Column(String(512), nullable=True)
+
+
+class ManagerInvite(Base):
+    """Інвайт-посилання для запрошення менеджера до магазину (Supplier)."""
+    __tablename__ = "manager_invites"
+
+    id = Column(Integer, primary_key=True)
+    token = Column(String(100), unique=True, index=True, nullable=False)  # сам токен запрошення
+    supplier_id = Column(Integer, ForeignKey('suppliers.id'), nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=False)  # термін дії (24 години)
+    is_used = Column(Boolean, nullable=False, default=False)
+
+    supplier = relationship("Supplier")  # для joinedload у хендлері /start
 
 class Product(Base):
     __tablename__ = 'products'

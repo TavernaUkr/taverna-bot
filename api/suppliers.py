@@ -8,6 +8,7 @@ import html
 import json
 import logging
 import math
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -22,8 +23,11 @@ from api_models import (
     PartnerRegisterResponse,
     SupplierDeletionRequest,
     SupplierDeletionResponse,
+    SupplierInviteLinkResponse,
+    SupplierManagerResponse,
     SupplierMeResponse,
     SupplierQueueShopProgress,
+    SupplierShopCardResponse,
     TelegramChannelVerifyRequest,
     TelegramChannelVerifyResponse,
 )
@@ -40,6 +44,8 @@ from database.models import (
     SupplierType,
     User,
     UserRole,
+    supplier_managers,
+    ManagerInvite,
 )
 from api.auth import validate_init_data
 from services.mydrop_api import InvalidMyDropYmlLinkError, normalize_mydrop_yml_link
@@ -666,6 +672,172 @@ async def get_my_import_progress(
         payload["queue_position"] = _global_queue_position(row, view)
         mine.append(_widget_shop_from_row(payload))
     return mine
+
+
+# --- Менеджери магазину: список + інвайт-посилання ---
+
+INVITE_TOKEN_TTL_HOURS = 24
+# Заглушка, поки BOT_USERNAME не буде у config_reader (використовуємо bot_username)
+_FALLBACK_BOT_USERNAME = "TA_DROP_BOT"
+
+
+def _bot_username() -> str:
+    """Юзернейм бота для deep-link; бере з конфігу або заглушку."""
+    username = (getattr(config, "bot_username", "") or "").strip().lstrip("@")
+    return username or _FALLBACK_BOT_USERNAME
+
+
+def _display_name(user: User) -> str:
+    """Гарне ім'я менеджера: full_name → first+last → username → 'Користувач'."""
+    if user.full_name:
+        return user.full_name
+    parts = [p for p in (user.first_name, user.last_name) if p]
+    if parts:
+        return " ".join(parts)
+    if user.username:
+        return user.username
+    return "Користувач"
+
+
+@router.get("/me/managers", response_model=List[SupplierManagerResponse])
+async def get_my_managers(
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Список менеджерів поточного магазину (telegram_id + імена)."""
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    supplier = await _get_supplier_for_telegram(db, telegram_id)
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+
+    stmt = (
+        select(User)
+        .join(supplier_managers, supplier_managers.c.user_id == User.id)
+        .where(supplier_managers.c.supplier_id == supplier.id)
+        .order_by(User.id)
+    )
+    managers = list((await db.execute(stmt)).scalars().all())
+    return [
+        SupplierManagerResponse(
+            user_id=manager.id,
+            telegram_id=int(manager.telegram_id) if manager.telegram_id is not None else None,
+            username=manager.username,
+            full_name=_display_name(manager),
+            first_name=manager.first_name,
+            last_name=manager.last_name,
+        )
+        for manager in managers
+    ]
+
+
+@router.get("/me/shops", response_model=List[SupplierShopCardResponse])
+async def get_my_shops(
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    «Мої магазини»: де користувач — власник (user_id) або менеджер
+    (таблиця-посередник supplier_managers). Без видалених магазинів.
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        return []
+
+    # Магазини, де юзер — власник
+    stmt = (
+        select(Supplier)
+        .where(
+            or_(
+                Supplier.user_id == user.id,
+                Supplier.managers.any(id=user.id),
+            ),
+            Supplier.status != SupplierStatus.deleted,
+        )
+        .order_by(
+            (Supplier.status == SupplierStatus.active).desc(),
+            Supplier.id.desc(),
+        )
+    )
+    suppliers = list((await db.execute(stmt)).scalars().all())
+
+    result: List[SupplierShopCardResponse] = []
+    for supplier in suppliers:
+        # Роль: власник, якщо user_id збігається; інакше — менеджер
+        is_owner = supplier.user_id == user.id
+        product_count, completed_products = await _product_stats(db, supplier.id)
+        result.append(
+            SupplierShopCardResponse(
+                id=supplier.id,
+                store_name=(supplier.store_name or supplier.name or f"Магазин #{supplier.id}"),
+                supplier_type=_enum_value(supplier.supplier_type),
+                status=_enum_value(supplier.status) or "pending_ai_analysis",
+                is_active=_enum_value(supplier.status) == SupplierStatus.active.value,
+                role="owner" if is_owner else "manager",
+                shop_url=supplier.shop_url,
+                logo_url=None,  # логотипи поки живуть у Supabase Storage
+                product_count=product_count,
+                completed_products=completed_products,
+                deletion_requested=_deletion_requested(supplier),
+                created_at=getattr(supplier, "created_at", None),
+            )
+        )
+    return result
+
+
+@router.post("/me/invite-link", response_model=SupplierInviteLinkResponse)
+async def create_manager_invite_link(
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Генерує інвайт-посилання для менеджера (токен живе 24 години)."""
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    supplier = await _get_supplier_for_telegram(db, telegram_id)
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+
+    token = secrets.token_urlsafe(16)
+    expires_at = datetime.now(timezone.utc) + timedelta(hours=INVITE_TOKEN_TTL_HOURS)
+
+    invite = ManagerInvite(
+        token=token,
+        supplier_id=supplier.id,
+        expires_at=expires_at,
+        is_used=False,
+    )
+    db.add(invite)
+    await db.commit()
+    await db.refresh(invite)
+
+    link = f"https://t.me/{_bot_username()}?start=manager_{token}"
+    logger.info(
+        "Інвайт для менеджера: supplier_id=%s, invite_id=%s, expires=%s",
+        supplier.id, invite.id, expires_at.isoformat(),
+    )
+    return SupplierInviteLinkResponse(
+        ok=True,
+        link=link,
+        token=token,
+        expires_at=expires_at,
+    )
 
 
 def _telegram_id_from_authorization(authorization: Optional[str]) -> Optional[int]:

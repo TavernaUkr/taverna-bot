@@ -4,6 +4,15 @@ import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import {
+  UA_PHONE_PREFIX,
+  applyUaPhoneMask,
+  blocksPrefixDeletion,
+  insertUaPrefixOnFocus,
+  isValidUaPhone,
+  normalizeUaPhone,
+  UA_PHONE_ERROR,
+} from "@/lib/uaValidation";
 
 interface Profile {
   id: string;
@@ -35,7 +44,7 @@ export function PersonalDataPage({ profile, onBack, onUpdateProfile }: PersonalD
     first_name: profile?.first_name || telegramUser?.first_name || "",
     last_name: profile?.last_name || telegramUser?.last_name || "",
     telegram_username: profile?.telegram_username || telegramUser?.username || "",
-    phone: profile?.phone || "",
+    phone: normalizeUaPhone(profile?.phone || ""),
     email: profile?.email || "",
   };
 
@@ -48,7 +57,7 @@ export function PersonalDataPage({ profile, onBack, onUpdateProfile }: PersonalD
       first_name: profile?.first_name || telegramUser?.first_name || "",
       last_name: profile?.last_name || telegramUser?.last_name || "",
       telegram_username: profile?.telegram_username || telegramUser?.username || "",
-      phone: profile?.phone || "",
+      phone: normalizeUaPhone(profile?.phone || ""),
       email: profile?.email || "",
     });
   }, [
@@ -62,7 +71,15 @@ export function PersonalDataPage({ profile, onBack, onUpdateProfile }: PersonalD
     telegramUser?.username,
   ]);
 
+  const [phoneError, setPhoneError] = useState("");
+
   const handleSave = async () => {
+    if (editData.phone && !isValidUaPhone(editData.phone)) {
+      setPhoneError(UA_PHONE_ERROR);
+      toast.error(UA_PHONE_ERROR);
+      return;
+    }
+    setPhoneError("");
     setIsLoading(true);
     try {
       const result = await onUpdateProfile(editData);
@@ -84,9 +101,10 @@ export function PersonalDataPage({ profile, onBack, onUpdateProfile }: PersonalD
       first_name: profile?.first_name || telegramUser?.first_name || "",
       last_name: profile?.last_name || telegramUser?.last_name || "",
       telegram_username: profile?.telegram_username || telegramUser?.username || "",
-      phone: profile?.phone || "",
+      phone: normalizeUaPhone(profile?.phone || ""),
       email: profile?.email || "",
     });
+    setPhoneError("");
     setIsEditing(false);
   };
 
@@ -171,7 +189,7 @@ export function PersonalDataPage({ profile, onBack, onUpdateProfile }: PersonalD
               </Label>
               <Input
                 id="telegram_username"
-                value={editData.telegram_username ? `@${editData.telegram_username}` : ""}
+                value={editData.telegram_username ? `@${editData.telegram_username.replace(/^@/, '')}` : ""}
                 disabled
                 placeholder="@username"
               />
@@ -185,11 +203,29 @@ export function PersonalDataPage({ profile, onBack, onUpdateProfile }: PersonalD
               <Input
                 id="phone"
                 type="tel"
+                inputMode="tel"
+                maxLength={13}
                 value={editData.phone}
-                onChange={(e) => setEditData(prev => ({ ...prev, phone: e.target.value }))}
+                onFocus={(e) => {
+                  if (isEditing) {
+                    insertUaPrefixOnFocus(e, (value) => setEditData(prev => ({ ...prev, phone: value })), UA_PHONE_PREFIX);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (blocksPrefixDeletion(e, UA_PHONE_PREFIX)) e.preventDefault();
+                }}
+                onChange={(e) => {
+                  if (!isEditing) return;
+                  const masked = applyUaPhoneMask(e.target.value);
+                  e.target.value = masked;
+                  setEditData(prev => ({ ...prev, phone: masked }));
+                  setPhoneError(masked && !isValidUaPhone(masked) && masked.length >= UA_PHONE_PREFIX.length ? UA_PHONE_ERROR : "");
+                }}
                 disabled={!isEditing}
-                placeholder="+380 XX XXX XX XX"
+                placeholder="+380671234567"
+                className={phoneError ? "border-destructive" : ""}
               />
+              {phoneError && <p className="text-xs text-destructive">{phoneError}</p>}
             </div>
 
             <div className="space-y-2">

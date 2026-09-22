@@ -29,6 +29,7 @@ import {
 import { DeliveryEstimate } from './checkout/DeliveryEstimate';
 import { WalletPayment } from './checkout/WalletPayment';
 import { useWallet } from '@/hooks/useWallet';
+import { isValidUaPhone, normalizeUaPhone } from '@/lib/uaValidation';
 import { useModalHistory } from '@/hooks/useModalHistory';
 
 const PROMO_STORAGE_KEY = "taverna_active_promo";
@@ -269,7 +270,7 @@ export function CheckoutModal({ isOpen, onClose, items, onOrderComplete }: Check
       setContactData({
         firstName: profile.first_name || '',
         lastName: profile.last_name || '',
-        phone: profile.phone || '',
+        phone: normalizeUaPhone(profile.phone || ''),
       });
     }
   }, [isAuthenticated, profile]);
@@ -293,7 +294,7 @@ export function CheckoutModal({ isOpen, onClose, items, onOrderComplete }: Check
       setContactData(prev => ({
         firstName: nameParts[0] || prev.firstName,
         lastName: nameParts.slice(1).join(' ') || prev.lastName,
-        phone: address.phone || prev.phone,
+        phone: normalizeUaPhone(address.phone || prev.phone),
       }));
     }
     
@@ -355,13 +356,13 @@ export function CheckoutModal({ isOpen, onClose, items, onOrderComplete }: Check
           setContactData({
             firstName: nameParts[0] || profile?.first_name || '',
             lastName: nameParts.slice(1).join(' ') || profile?.last_name || '',
-            phone: defaultAddress.phone || profile?.phone || '',
+            phone: normalizeUaPhone(defaultAddress.phone || profile?.phone || ''),
           });
         } else if (isAuthenticated && profile) {
           setContactData({
             firstName: profile.first_name || '',
             lastName: profile.last_name || '',
-            phone: profile.phone || '',
+            phone: normalizeUaPhone(profile.phone || ''),
           });
         }
         
@@ -380,7 +381,7 @@ export function CheckoutModal({ isOpen, onClose, items, onOrderComplete }: Check
         setContactData({
           firstName: profile.first_name || '',
           lastName: profile.last_name || '',
-          phone: profile.phone || '',
+          phone: normalizeUaPhone(profile.phone || ''),
         });
         setDeliveryData({
           service: autoService,
@@ -426,8 +427,8 @@ export function CheckoutModal({ isOpen, onClose, items, onOrderComplete }: Check
     if (!contactData.lastName.trim()) {
       newErrors.lastName = "Введіть прізвище";
     }
-    if (!contactData.phone || contactData.phone.length !== 12) {
-      newErrors.phone = "Введіть повний номер телефону";
+    if (!contactData.phone || !isValidUaPhone(contactData.phone)) {
+      newErrors.phone = "Телефон: +380, код оператора та 7 цифр";
     }
     
     setErrors(newErrors);
@@ -881,7 +882,7 @@ export function CheckoutModal({ isOpen, onClose, items, onOrderComplete }: Check
         <p className="text-sm text-muted-foreground">
           {contactData.firstName} {contactData.lastName}
         </p>
-        <p className="text-sm text-muted-foreground">+{contactData.phone}</p>
+        <p className="text-sm text-muted-foreground">{contactData.phone}</p>
       </div>
 
       {/* Delivery Info */}

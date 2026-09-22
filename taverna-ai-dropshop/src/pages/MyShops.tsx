@@ -19,14 +19,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { supabase } from "@/integrations/supabase/client";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { toast } from "sonner";
 import { useToast } from "@/hooks/use-toast";
 import { hapticSelection } from "@/lib/haptics";
 import {
   BackendApiError,
-  fetchMySuppliers,
+  getMyShops,
   requestSupplierDeletion,
   transferSupplierOwnership,
 } from "@/lib/backendApi";
@@ -280,93 +279,22 @@ export default function MyShops() {
   const fetchShops = async (opts?: { silent?: boolean }) => {
     if (!opts?.silent) setIsLoading(true);
     try {
-      const allShops: ShopInfo[] = [];
-
-      if (isSupplier || isAdmin) {
-        const mine = await fetchMySuppliers();
-        for (const shop of Array.isArray(mine) ? mine : []) {
-          if (!shop?.store_name) continue;
-          allShops.push({
-            id: String(shop.id),
-            shop_name: shop.store_name,
-            logo_url: null,
-            is_active: shop.status === "active",
-            product_count: shop.product_count || 0,
-            review_count: 0,
-            role: "owner",
-            supplier_type: shop.supplier_type,
-            status: shop.status,
-            completed_products: shop.completed_products,
-            deletion_requested: shop.deletion_requested,
-          });
-        }
-      }
-
-      // Магазини, де користувач — менеджер (поки ще з Supabase-зв'язок)
-      if (profile?.id && isShopManager) {
-        const { data: links } = await supabase
-          .from("shop_manager_links")
-          .select("supplier_id")
-          .eq("profile_id", profile.id);
-
-        if (links?.length) {
-          const supplierIds = links.map((l) => l.supplier_id);
-          const existingIds = new Set(allShops.map((s) => s.id));
-          const newIds = supplierIds.filter((id) => !existingIds.has(id));
-
-          if (newIds.length) {
-            const { data: managedShops } = await supabase
-              .from("suppliers")
-              .select("id, shop_name, logo_url, is_active")
-              .in("id", newIds);
-
-            if (managedShops) {
-              for (const shop of managedShops) {
-                const { count: productCount } = await supabase
-                  .from("products")
-                  .select("*", { count: "exact", head: true })
-                  .eq("supplier_id", shop.id);
-
-                allShops.push({
-                  ...shop,
-                  product_count: productCount || 0,
-                  review_count: 0,
-                  role: "manager",
-                });
-              }
-            }
-          }
-        }
-      }
-
-      // DEV FALLBACK: In Lovable dev environment, if no managed shops found for
-      // shop_manager test role, fetch a couple active suppliers as mock "manager"
-      // shops so promotion buttons can be tested.
-      if (allShops.length === 0 && isLovableDevEnvironment() && isShopManager) {
-        const { data: devShops } = await supabase
-          .from("suppliers")
-          .select("id, shop_name, logo_url, is_active")
-          .eq("is_active", true)
-          .limit(2);
-
-        if (devShops) {
-          for (const shop of devShops) {
-            const { count: productCount } = await supabase
-              .from("products")
-              .select("*", { count: "exact", head: true })
-              .eq("supplier_id", shop.id);
-
-            allShops.push({
-              ...shop,
-              product_count: productCount || 0,
-              review_count: 0,
-              role: "manager",
-            });
-          }
-        }
-      }
-
-      setShops(allShops);
+      const response = await getMyShops();
+      setShops(
+        response.map((shop) => ({
+          id: String(shop.id),
+          shop_name: shop.store_name,
+          logo_url: shop.logo_url || null,
+          is_active: shop.is_active,
+          product_count: shop.product_count || 0,
+          review_count: 0,
+          role: shop.role === "manager" ? "manager" : "owner",
+          supplier_type: shop.supplier_type,
+          status: shop.status,
+          completed_products: shop.completed_products,
+          deletion_requested: shop.deletion_requested,
+        }))
+      );
     } catch (err) {
       console.error("Error fetching shops:", err);
       toast.error("Помилка завантаження магазинів");

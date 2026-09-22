@@ -791,6 +791,9 @@ export async function verifyTelegramChannel(
 
 export const SUPPLIERS_REQUEST_DELETION_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/request-deletion`;
 export const SUPPLIERS_IMPORT_PROGRESS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/import-progress`;
+export const SUPPLIERS_MANAGERS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/managers`;
+export const SUPPLIERS_INVITE_LINK_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/invite-link`;
+export const MY_SHOPS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/shops`;
 export const ADMIN_PENDING_SUPPLIERS_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/pending`;
 export const ADMIN_DIRECT_CREATE_SUPPLIER_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/direct-create`;
 
@@ -982,6 +985,69 @@ export async function requestSupplierDeletion(reason: string): Promise<{ ok: boo
     SUPPLIERS_REQUEST_DELETION_ENDPOINT,
     { reason },
     "Не вдалося надіслати заявку на видалення",
+    adminTelegramHeaders()
+  );
+}
+
+// --- Менеджери магазину + інвайт-посилання ----------------------------------
+
+export interface BackendMyShop {
+  id: number;
+  store_name: string;
+  supplier_type?: string | null;
+  status: string;
+  is_active: boolean;
+  /** 'owner' — власник, 'manager' — менеджер через supplier_managers. */
+  role: "owner" | "manager";
+  shop_url?: string | null;
+  logo_url?: string | null;
+  product_count: number;
+  completed_products: number;
+  deletion_requested: boolean;
+  created_at?: string | null;
+}
+
+/** GET /api/v1/suppliers/me/shops — магазини, де я власник або менеджер. */
+export async function getMyShops(): Promise<BackendMyShop[]> {
+  const data = await backendGet<BackendMyShop[]>(
+    MY_SHOPS_ENDPOINT,
+    adminTelegramHeaders()
+  );
+  return Array.isArray(data) ? data.filter(Boolean) : [];
+}
+
+export interface BackendSupplierManager {
+  user_id: number;
+  telegram_id?: number | null;
+  username?: string | null;
+  full_name?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+}
+
+export interface BackendSupplierInviteLink {
+  ok: boolean;
+  /** Готове t.me-посилання (поле link у відповіді бекенду). */
+  link: string;
+  token: string;
+  expires_at?: string | null;
+}
+
+/** GET /api/v1/suppliers/me/managers — список менеджерів поточного магазину. */
+export async function getManagers(): Promise<BackendSupplierManager[]> {
+  const data = await backendGet<BackendSupplierManager[]>(
+    SUPPLIERS_MANAGERS_ENDPOINT,
+    adminTelegramHeaders()
+  );
+  return Array.isArray(data) ? data.filter(Boolean) : [];
+}
+
+/** POST /api/v1/suppliers/me/invite-link — згенерувати інвайт (токен живе 24 год). */
+export async function generateManagerInviteLink(): Promise<BackendSupplierInviteLink> {
+  return backendPost<BackendSupplierInviteLink>(
+    SUPPLIERS_INVITE_LINK_ENDPOINT,
+    {},
+    "Не вдалося згенерувати посилання-запрошення",
     adminTelegramHeaders()
   );
 }
