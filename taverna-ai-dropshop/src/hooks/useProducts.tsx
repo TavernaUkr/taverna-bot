@@ -366,7 +366,10 @@ export function useProducts() {
   /** Пошук товарів напряму через бекенд (без клієнтських фільтрів fetchProducts). */
   const searchBackendCatalog = useCallback(async (query: string, supplierId?: number): Promise<Product[]> => {
     try {
-      const backendProducts = await searchBackendProducts(query, { supplier_id: supplierId });
+      const backendProducts = await searchBackendProducts({
+        search: query,
+        supplier_id: supplierId,
+      });
       return backendProducts.map(mapBackendProductToUi);
     } catch (err) {
       console.error('Search products error:', err);

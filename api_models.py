@@ -482,6 +482,29 @@ class SupplierDetailResponse(UtcJsonDates):
     approved_at: Optional[datetime] = None
 
 
+class PublicSupplierResponse(UtcJsonDates):
+    """
+    Публічна вітрина магазину (GET /suppliers/{id}/public).
+    БЕЗ авторизації — те, що бачить покупець на сторінці /supplier/{id}.
+    Ніяких email / телефонів / реквізитів / внутрішніх статусів.
+    """
+    id: int
+    name: Optional[str] = None
+    store_name: str
+    store_description: Optional[str] = None
+    logo_url: Optional[str] = None
+    cover_image_url: Optional[str] = None
+    telegram_channel_link: Optional[str] = None
+    # Поля вкладки «Інфо» сторінки магазину (політики/доставка) —
+    # без них UI показував би загальні заглушки замість даних власника.
+    is_active: bool = True
+    return_policy: Optional[str] = None
+    exchange_policy: Optional[str] = None
+    shipping_schedule: Optional[str] = None
+    shipping_days: List[str] = []
+    created_at: Optional[datetime] = None
+
+
 class PendingSupplierApplicationResponse(UtcJsonDates):
     """Заявка для React-адмінки, включно з AI-звітом."""
     model_config = ConfigDict(from_attributes=True)

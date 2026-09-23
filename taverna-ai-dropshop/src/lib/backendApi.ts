@@ -413,19 +413,21 @@ export async function fetchProductColorVariants(
  * виконується на сервері (ilike по name/description/supplier_sku/brand/model)
  * і повертає лише першу сторінку результатів — замість колишнього
  * тягнення всього каталогу на клієнт і фільтрації на фронті.
+ *
+ * Вітрина магазину: передай { supplier_id } без search — отримаєш товари
+ * конкретного постачальника; { supplier_id, search } — пошук лише в ньому.
  */
 export async function searchBackendProducts(
-  query: string,
-  options?: { limit?: number; supplier_id?: number }
+  filters: { search?: string; supplier_id?: number; limit?: number } = {}
 ): Promise<BackendProduct[]> {
-  const search = (query ?? "").trim();
-  if (!search) {
-    return fetchBackendProducts({ limit: options?.limit ?? 50 });
+  const search = (filters.search ?? "").trim();
+  if (!search && filters.supplier_id == null) {
+    return fetchBackendProducts({ limit: filters.limit ?? 50 });
   }
   const { items } = await fetchBackendProductList({
-    search,
-    supplier_id: options?.supplier_id,
-    limit: Math.min(Math.max(options?.limit ?? 50, 1), 100),
+    search: search || undefined,
+    supplier_id: filters.supplier_id,
+    limit: Math.min(Math.max(filters.limit ?? 50, 1), 100),
   });
   return items;
 }
@@ -1130,6 +1132,61 @@ export async function updateSupplier(
     "Не вдалося зберегти магазин",
     adminTelegramHeaders()
   );
+}
+
+// --- Публічна вітрина магазину (без авторизації) ------------------------------
+
+export interface BackendPublicSupplier {
+  id: number;
+  name?: string | null;
+  store_name: string;
+  store_description?: string | null;
+  logo_url?: string | null;
+  cover_image_url?: string | null;
+  telegram_channel_link?: string | null;
+  is_active: boolean;
+  return_policy?: string | null;
+  exchange_policy?: string | null;
+  shipping_schedule?: string | null;
+  shipping_days?: string[];
+  created_at?: string | null;
+}
+
+/**
+ * GET /api/v1/suppliers/{id}/public — публічні дані вітрини магазину
+ * (сторінка /supplier/{id}). БЕЗ Authorization: покупець може не мати
+ * Telegram-авторизації. 404 → null («Магазин не знайдено»).
+ */
+export async function getPublicSupplier(id: string | number): Promise<BackendPublicSupplier | null> {
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(
+      `${SUPPLIER_DETAIL_ENDPOINT}/${encodeURIComponent(String(id))}/public`
+    );
+  } catch (networkError) {
+    if (networkError instanceof DOMException && networkError.name === "AbortError") {
+      throw new BackendApiError(
+        `Бекенд не відповів за ${REQUEST_TIMEOUT_MS / 1000}с. Перевірте, чи запущений ` +
+          `FastAPI (uvicorn web_app:app) на ${API_BASE_URL}.`
+      );
+    }
+    throw new BackendApiError(
+      "Не вдалося з'єднатися з сервером бекенду. Перевірте, чи запущений " +
+        `FastAPI (uvicorn web_app:app) на ${API_BASE_URL}, та чи дозволений CORS для цього джерела.`
+    );
+  }
+
+  if (response.status === 404) {
+    return null;
+  }
+  if (!response.ok) {
+    throw new BackendApiError(
+      `Бекенд повернув помилку ${response.status} (${response.statusText})`,
+      response.status
+    );
+  }
+
+  return (await response.json()) as BackendPublicSupplier;
 }
 
 /** GET /api/v1/suppliers/me/import-progress — масив магазинів у XML/AI-черзі. */

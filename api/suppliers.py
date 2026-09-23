@@ -21,6 +21,7 @@ from sqlalchemy.exc import IntegrityError
 from api_models import (
     PartnerRegisterRequest,
     PartnerRegisterResponse,
+    PublicSupplierResponse,
     SupplierDeletionRequest,
     SupplierDeletionResponse,
     SupplierDetailResponse,
@@ -514,6 +515,51 @@ def _to_me_response(
         restored_at=getattr(supplier, "restored_at", None),
         deleted_at=getattr(supplier, "deleted_at", None),
     )
+
+
+# --- Публічна вітрина магазину (без авторизації) ----------------------------
+
+def _to_public_response(supplier: Supplier) -> PublicSupplierResponse:
+    """Лише безпечні поля для покупця. Жодних email/телефонів/реквізитів."""
+    return PublicSupplierResponse(
+        id=supplier.id,
+        name=supplier.name,
+        store_name=(supplier.store_name or supplier.name or f"Магазин #{supplier.id}"),
+        store_description=supplier.store_description,
+        logo_url=supplier.logo_url,
+        cover_image_url=supplier.cover_image_url,
+        telegram_channel_link=supplier.telegram_channel_link,
+        is_active=_enum_value(supplier.status) == SupplierStatus.active.value,
+        return_policy=supplier.return_policy,
+        exchange_policy=supplier.exchange_policy,
+        shipping_schedule=supplier.shipping_schedule,
+        shipping_days=list(supplier.shipping_days) if supplier.shipping_days else [],
+        created_at=getattr(supplier, "created_at", None),
+    )
+
+
+@router.get("/{supplier_id}/public", response_model=PublicSupplierResponse)
+async def get_public_supplier(
+    supplier_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    ПУБЛІЧНИЙ ендпоінт вітрини магазину (сторінка /supplier/{id} в MiniApp).
+    Без Authorization — його відкривають покупці без Telegram-авторизації.
+
+    Віддаємо магазин, який не видалено та не заблоковано: status == active
+    показує галочку «офіційний партнер» (is_active), решта живих статусів
+    (parsing / pending_* тощо) просто віддає вітрину без галочки.
+    Магазини зі status in (deleted, banned) — 404, як ніби їх не існує.
+    """
+    supplier = await db.get(Supplier, supplier_id)
+    if not supplier or _enum_value(supplier.status) in (
+        SupplierStatus.deleted.value,
+        SupplierStatus.banned.value,
+    ):
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+
+    return _to_public_response(supplier)
 
 
 @router.get("/me", response_model=List[SupplierMeResponse])

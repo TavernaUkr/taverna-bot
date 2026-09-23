@@ -14,40 +14,23 @@ import { ProductCard } from "@/components/ProductCard";
 import { BottomNavigation } from "@/components/BottomNavigation";
 import { useCartContext } from "@/contexts/CartContext";
 import { useFavoritesContext } from "@/components/FavoritesContext";
+// ВАЖЛИВО: supabase тут лишається ЛИШЕ для відгуків (reviews) — їх мігруємо
+// на FastAPI окремим етапом. Профіль магазину та товари йдуть через бекенд.
 import { supabase } from "@/integrations/supabase/client";
+import { getPublicSupplier, searchBackendProducts, type BackendPublicSupplier } from "@/lib/backendApi";
+import {
+  mapBackendProductToUi,
+  buildCategoriesFromProducts,
+  type Category,
+  type Product,
+} from "@/hooks/useProducts";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 
-interface Supplier {
-  id: string;
-  shop_name: string;
-  is_active: boolean;
-  description?: string;
-  logo_url?: string;
-  cover_image_url?: string;
-  return_policy?: string;
-  exchange_policy?: string;
-  shipping_schedule?: string;
-  shipping_days?: string[];
-}
+// Магазин: публічна вітрина з FastAPI (GET /api/v1/suppliers/{id}/public).
+// type Supplier більше не потрібен — використовуємо BackendPublicSupplier.
 
-interface Product {
-  id: string;
-  name: string;
-  price: number;
-  original_price?: number;
-  images: string[];
-  in_stock: boolean;
-  stock_quantity?: number;
-  sizes?: string[];
-  colors?: string[];
-  // Ця сторінка бере товари напряму з Supabase (без attributes/колонки
-  // "color"), тож поле лишається порожнім — ProductCard/модалка кошика
-  // просто не покажуть чіп кольору тут (legacy-джерело даних).
-  color?: string;
-  category?: { id: string; name: string };
-}
-
+// Відгуки (reviews) — legacy Supabase-тип, мігруємо на FastAPI окремим етапом.
 interface Review {
   id: string;
   author_name: string;
@@ -58,17 +41,15 @@ interface Review {
   helpful_count: number;
 }
 
-interface Category {
-  id: string;
-  name: string;
-  productCount: number;
-}
+// Категорії будуємо з товарів бекенду (buildCategoriesFromProducts),
+// тож беремо готовий тип з useProducts — локальний interface Category
+// з productCount більше не потрібен (формат полів інший: product_count).
 
 const SupplierProfile = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState("products");
-  const [supplier, setSupplier] = useState<Supplier | null>(null);
+  const [supplier, setSupplier] = useState<BackendPublicSupplier | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -95,65 +76,33 @@ const SupplierProfile = () => {
     
     setIsLoading(true);
     try {
-      // Fetch supplier info (try full table first, fallback to public view)
-      const { data: supplierData, error: supplierError } = await supabase
-        .from("suppliers")
-        .select("id, shop_name, is_active, description, logo_url, cover_image_url, return_policy, exchange_policy, shipping_schedule, shipping_days")
-        .eq("id", id)
-        .single();
-
-      if (supplierError) {
-        // Fallback to public view
-        const { data: pubData, error: pubError } = await supabase
-          .from("suppliers_public")
-          .select("*")
-          .eq("id", id)
-          .single();
-        if (pubError) throw pubError;
-        setSupplier(pubData as Supplier);
-      } else {
-        setSupplier(supplierData as any as Supplier);
+      // 1) Магазин: публічний ендпоінт FastAPI (без авторизації).
+      //    404 → null («Магазин не знайдено»), мережа/5xx → помилка.
+      const supplierData = await getPublicSupplier(id);
+      if (!supplierData) {
+        toast.error("Магазин не знайдено");
+        navigate("/suppliers");
+        return;
       }
+      setSupplier(supplierData);
 
-      // Fetch products for this supplier
-      const { data: productsData, error: productsError } = await supabase
-        .from("products")
-        .select("id, name, price, original_price, images, in_stock, stock_quantity, sizes, colors, category:categories(id, name)")
-        .eq("supplier_id", id)
-        .eq("in_stock", true)
-        .limit(50);
+      // 2) Товари магазину: бекенд-вітрина (?supplier_id=...) через
+      //    searchBackendProducts — той самий каталог, що й на головній.
+      const supplierIdNum = Number(supplierData.id);
+      const backendProducts = await searchBackendProducts({
+        supplier_id: Number.isFinite(supplierIdNum) && supplierIdNum > 0 ? supplierIdNum : undefined,
+        limit: 50,
+      });
+      const mapped = backendProducts.map(mapBackendProductToUi);
 
-      if (!productsError && productsData) {
-        setProducts(productsData as Product[]);
-        
-        // Build category list from products
-        const categoryMap = new Map<string, { name: string; count: number }>();
-        productsData.forEach((p: any) => {
-          if (p.category?.id) {
-            const existing = categoryMap.get(p.category.id);
-            if (existing) {
-              existing.count++;
-            } else {
-              categoryMap.set(p.category.id, { name: p.category.name, count: 1 });
-            }
-          }
-        });
-        
-        setCategories(
-          Array.from(categoryMap.entries()).map(([id, { name, count }]) => ({
-            id,
-            name,
-            productCount: count,
-          }))
-        );
-      }
+      setProducts(mapped);
+      setCategories(buildCategoriesFromProducts(mapped));
 
-      // Fetch reviews for this supplier's products
+      // 3) Відгуки: поки що Supabase (мігруємо окремим етапом).
       await fetchReviews();
     } catch (err) {
       console.error("Error fetching supplier:", err);
-      toast.error("Постачальника не знайдено");
-      navigate("/suppliers");
+      toast.error("Не вдалося завантажити магазин");
     } finally {
       setIsLoading(false);
     }
@@ -246,12 +195,22 @@ const SupplierProfile = () => {
     }
   };
 
-  const handleAddToCart = async (product: Product) => {
+  const handleAddToCart = async (
+    product: Product,
+    size?: string,
+    color?: string,
+    variantId?: string,
+    quantity: number = 1
+  ) => {
     const success = await addItem(
       product.id,
       product.name,
       product.price,
-      product.images?.[0] || "/placeholder.svg"
+      product.images?.[0] || "/placeholder.svg",
+      size,
+      color,
+      quantity,
+      variantId
     );
     if (success) {
       toast.success(`${product.name} додано до кошика`);
@@ -322,7 +281,7 @@ const SupplierProfile = () => {
           </Button>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <h1 className="font-bold text-lg truncate">{supplier.shop_name}</h1>
+              <h1 className="font-bold text-lg truncate">{supplier.store_name}</h1>
               {supplier.is_active && (
                 <Verified className="h-4 w-4 text-primary flex-shrink-0" />
               )}
@@ -350,13 +309,13 @@ const SupplierProfile = () => {
         <div className="px-4 pb-3">
           <div className="w-20 h-20 -mt-10 relative z-10 rounded-2xl bg-gradient-to-br from-primary/30 to-primary/10 flex items-center justify-center border-4 border-background shadow-lg overflow-hidden">
             {supplier.logo_url ? (
-              <img src={supplier.logo_url} alt={supplier.shop_name} className="w-full h-full object-cover" />
+              <img src={supplier.logo_url} alt={supplier.store_name} className="w-full h-full object-cover" />
             ) : (
               <Store className="h-10 w-10 text-primary" />
             )}
           </div>
           <div className="mt-3 min-w-0">
-            <h2 className="font-bold text-lg text-foreground truncate">{supplier.shop_name}</h2>
+            <h2 className="font-bold text-lg text-foreground truncate">{supplier.store_name}</h2>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm mt-1 min-w-0">
               <span className="flex items-center gap-1 text-foreground">
                 <Star className="h-4 w-4 text-warning fill-warning shrink-0" />
@@ -416,7 +375,7 @@ const SupplierProfile = () => {
                         : "bg-muted text-muted-foreground hover:text-foreground"
                     )}
                   >
-                    {cat.name} ({cat.productCount})
+                    {cat.name} ({cat.product_count})
                   </button>
                 ))}
               </div>
@@ -433,15 +392,21 @@ const SupplierProfile = () => {
                   price={product.price}
                   originalPrice={product.original_price}
                   image={product.images?.[0] || "/placeholder.svg"}
+                  videoUrl={product.video_url}
                   category={product.category?.name}
                   inStock={product.in_stock !== false}
                   stockQuantity={product.stock_quantity}
                   sizes={product.sizes}
                   colors={product.colors}
                   color={product.color}
+                  variants={product.variants}
+                  options={product.options}
+                  supplierName={product.supplier_name}
                   isFavorite={isFavorite(product.id)}
                   onClick={() => navigate(`/product/${product.id}`)}
-                  onAddToCart={() => handleAddToCart(product)}
+                  onAddToCart={(size?: string, color?: string, variantId?: string, quantity?: number) =>
+                    handleAddToCart(product, size, color, variantId, quantity)
+                  }
                   onToggleFavorite={() => handleToggleFavorite(product)}
                 />
               ))}
@@ -595,7 +560,7 @@ const SupplierProfile = () => {
               <h3 className="font-semibold text-foreground">Про магазин</h3>
             </div>
             <p className="text-sm text-muted-foreground leading-relaxed">
-              {supplier.description || `${supplier.shop_name} — офіційний партнер маркетплейсу Taverna Group. Всі товари проходять перевірку якості перед відправкою.`}
+              {supplier.store_description || `${supplier.store_name} — офіційний партнер маркетплейсу Taverna Group. Всі товари проходять перевірку якості перед відправкою.`}
             </p>
           </div>
 
@@ -652,7 +617,7 @@ const SupplierProfile = () => {
         onClose={() => setIsRatingOpen(false)} 
         type="store" 
         targetId={id} 
-        targetName={supplier.shop_name} 
+        targetName={supplier.store_name} 
       />
 
       <BottomNavigation 
