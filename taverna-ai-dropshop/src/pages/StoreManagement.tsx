@@ -25,6 +25,7 @@ import { cn } from "@/lib/utils";
 import {
   getManagers,
   generateManagerInviteLink,
+  removeManager,
   getSupplierById,
   updateSupplier,
   type BackendSupplierManager,
@@ -88,6 +89,7 @@ export default function StoreManagement() {
   const [isUploadingCover, setIsUploadingCover] = useState(false);
   const [shopManagers, setShopManagers] = useState<BackendSupplierManager[]>([]);
   const [isManagersLoading, setIsManagersLoading] = useState(false);
+  const [isRemovingManager, setIsRemovingManager] = useState<number | null>(null);
   const [inviteLink, setInviteLink] = useState<string | null>(null);
   const [isGeneratingInvite, setIsGeneratingInvite] = useState(false);
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
@@ -153,7 +155,12 @@ export default function StoreManagement() {
         });
 
         await loadReviews(String(s.id));
-        await loadManagers();
+        // Список менеджерів вантажимо ТІЛЬКИ власнику: ендпоінт
+        // GET /me/managers на бекенді шукає магазин власника, тому
+        // для менеджера він повертає 404. Менеджер цей блок і не бачить.
+        if (s.role !== "manager") {
+          await loadManagers();
+        }
       } else {
         // Без ID у URL — на сторінку вибору магазинів
         navigate("/my-shops", { replace: true });
@@ -183,6 +190,28 @@ export default function StoreManagement() {
       toast.error(err?.message || "Не вдалося завантажити менеджерів");
     } finally {
       setIsManagersLoading(false);
+    }
+  };
+
+  /** Генерує НОВЕ унікальне посилання-запрошення (кожен виклик = новий токен). */
+  const handleGenerateInvite = async () => {
+    if (isGeneratingInvite || !supplierId) return;
+    setIsGeneratingInvite(true);
+    try {
+      const response = await generateManagerInviteLink();
+      const url = response?.link || (response as any)?.invite_url;
+      if (!url) {
+        throw new Error("Бекенд не повернув посилання");
+      }
+      setInviteLink(url);
+      triggerHapticFeedback("notification", "success");
+      toast.success("Посилання-запрошення згенеровано!");
+    } catch (err: any) {
+      console.error("Error generating invite link:", err);
+      triggerHapticFeedback("notification", "error");
+      toast.error(err?.message || "Не вдалося згенерувати посилання");
+    } finally {
+      setIsGeneratingInvite(false);
     }
   };
 
@@ -707,7 +736,8 @@ export default function StoreManagement() {
           )}
 
 
-          {/* === Managers Section === */}
+          {/* === Managers Section (owner only) === */}
+          {myRole === "owner" && (
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
@@ -749,6 +779,36 @@ export default function StoreManagement() {
                           )}
                         </div>
                         <Badge variant="secondary" className="text-[10px] shrink-0">Менеджер</Badge>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-8 w-8 p-0 text-destructive hover:bg-destructive/10 shrink-0"
+                          title="Видалити менеджера"
+                          disabled={isRemovingManager === m.user_id}
+                          onClick={async () => {
+                            if (isRemovingManager === m.user_id) return;
+                            setIsRemovingManager(m.user_id);
+                            try {
+                              await removeManager(m.user_id);
+                              triggerHapticFeedback("notification", "success");
+                              toast.success("Менеджера видалено");
+                              await loadManagers();
+                            } catch (err: any) {
+                              console.error("Error removing manager:", err);
+                              triggerHapticFeedback("notification", "error");
+                              toast.error(err?.message || "Не вдалося видалити менеджера");
+                            } finally {
+                              setIsRemovingManager(null);
+                            }
+                          }}
+                        >
+                          {isRemovingManager === m.user_id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Trash2 className="h-4 w-4" />
+                          )}
+                          <span className="sr-only">Видалити менеджера</span>
+                        </Button>
                       </div>
                     ))}
                   </div>
@@ -797,17 +857,36 @@ export default function StoreManagement() {
                         <Share2 className="h-4 w-4" />
                         Поділитись
                       </Button>
+                      {/* Кожен клік = НОВИЙ унікальний токен для наступного менеджера */}
                       <Button
                         size="sm"
                         variant="outline"
+                        className="gap-2"
+                        disabled={isGeneratingInvite}
+                        onClick={() => {
+                          // Очищаємо старий лінк, щоб кнопка «Згенерувати»
+                          // знову стала активною, і одразу генеруємо новий.
+                          setInviteLink(null);
+                          handleGenerateInvite();
+                        }}
+                      >
+                        {isGeneratingInvite ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Link2 className="h-4 w-4" />
+                        )}
+                        Нове посилання
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
                         onClick={() => setInviteLink(null)}
                       >
                         <X className="h-4 w-4" />
-                        Скасувати
                       </Button>
                     </div>
                     <p className="text-[11px] text-muted-foreground">
-                      Посилання діє 24 години і працює один раз.
+                      Кожне посилання діє 24 години і працює один раз. Для запрошення другого менеджера натисніть «Нове посилання».
                     </p>
                   </div>
                 ) : (
@@ -816,26 +895,7 @@ export default function StoreManagement() {
                     variant="outline"
                     className="w-full gap-2"
                     disabled={isGeneratingInvite || !supplierId}
-                    onClick={async () => {
-                      if (isGeneratingInvite || !supplierId) return;
-                      setIsGeneratingInvite(true);
-                      try {
-                        const response = await generateManagerInviteLink();
-                        const url = response?.link || (response as any)?.invite_url;
-                        if (!url) {
-                          throw new Error("Бекенд не повернув посилання");
-                        }
-                        setInviteLink(url);
-                        triggerHapticFeedback("notification", "success");
-                        toast.success("Посилання-запрошення згенеровано!");
-                      } catch (err: any) {
-                        console.error("Error generating invite link:", err);
-                        triggerHapticFeedback("notification", "error");
-                        toast.error(err?.message || "Не вдалося згенерувати посилання");
-                      } finally {
-                        setIsGeneratingInvite(false);
-                      }
-                    }}
+                    onClick={handleGenerateInvite}
                   >
                     {isGeneratingInvite ? (
                       <>
@@ -853,6 +913,7 @@ export default function StoreManagement() {
               </div>
             </CardContent>
           </Card>
+          )}
 
           {/* Manager & Bot Settings */}
           <Card>

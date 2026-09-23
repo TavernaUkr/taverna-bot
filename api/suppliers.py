@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from fastapi import APIRouter, Depends, HTTPException, Header, Query
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from api_models import (
@@ -1141,6 +1141,51 @@ async def create_manager_invite_link(
         token=token,
         expires_at=expires_at,
     )
+
+
+@router.delete("/me/managers/{user_id}")
+async def delete_my_manager(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Видаляє менеджера з магазину поточного власника.
+    DELETE /api/v1/suppliers/me/managers/{user_id}
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    supplier = await _get_supplier_for_telegram(db, telegram_id)
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+
+    # Захист: не можна видалити самозв'язку — власник (user_id) не є
+    # рядком у supplier_managers, але на всяк випадок перевіряємо.
+    owner = await _get_user_by_telegram_id(db, telegram_id)
+    if owner and owner.id == user_id:
+        raise HTTPException(status_code=400, detail="Не можна видалити самого себе (власника).")
+
+    # ПРЯМИЙ запит до таблиці-посередника — без ORM-колекцій і lazy-load.
+    stmt = (
+        delete(supplier_managers)
+        .where(supplier_managers.c.supplier_id == supplier.id)
+        .where(supplier_managers.c.user_id == user_id)
+    )
+    result = await db.execute(stmt)
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="Менеджера з таким user_id у вашому магазині немає")
+
+    await db.commit()
+    logger.info(
+        "Видалено менеджера user_id=%s зі supplier_id=%s (власник tg=%s)",
+        user_id, supplier.id, telegram_id,
+    )
+    return {"status": "ok"}
 
 
 def _telegram_id_from_authorization(authorization: Optional[str]) -> Optional[int]:

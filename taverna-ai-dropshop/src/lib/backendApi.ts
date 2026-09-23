@@ -1061,6 +1061,15 @@ export async function generateManagerInviteLink(): Promise<BackendSupplierInvite
   );
 }
 
+/** DELETE /api/v1/suppliers/me/managers/{user_id} — видалити менеджера (тільки власник). */
+export async function removeManager(userId: number): Promise<{ status: string }> {
+  return backendDelete<{ status: string }>(
+    `${SUPPLIERS_MANAGERS_ENDPOINT}/${userId}`,
+    "Не вдалося видалити менеджера",
+    adminTelegramHeaders()
+  );
+}
+
 // --- Картка магазину: GET/PATCH /suppliers/{id} ------------------------------
 
 export interface BackendSupplierDetail {
