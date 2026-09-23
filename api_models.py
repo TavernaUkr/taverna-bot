@@ -503,6 +503,11 @@ class PublicSupplierResponse(UtcJsonDates):
     shipping_schedule: Optional[str] = None
     shipping_days: List[str] = []
     created_at: Optional[datetime] = None
+    # Статистика магазину: заповнюється лише у списку
+    # GET /suppliers/public (сторінка «Постачальники»), через _product_stats.
+    # На вітрині /{id}/public лишається 0 — фронт там ці поля не показує.
+    product_count: int = 0
+    completed_products: int = 0
 
 
 class PendingSupplierApplicationResponse(UtcJsonDates):

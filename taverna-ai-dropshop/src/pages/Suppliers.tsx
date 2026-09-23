@@ -1,30 +1,38 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Store, Star, MapPin, Package, ChevronRight, Loader2, User, MessageSquare, Tag } from "lucide-react";
+import { Store, Star, Package, ChevronRight, Loader2, Tag, Search, X } from "lucide-react";
 import { Header } from "@/components/Header";
 import { BottomNavigation } from "@/components/BottomNavigation";
-import { Badge } from "@/components/ui/badge";
 import { SupplierBadge, getSupplierBadge, type SupplierBadgeInfo } from "@/components/ui/supplier-badge";
 import { useCartContext } from "@/contexts/CartContext";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 import { SearchModal } from "@/components/SearchModal";
 import { CartModal } from "@/components/CartModal";
 import { WishlistModal } from "@/components/WishlistModal";
-import { supabase } from "@/integrations/supabase/client";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
+import { getPublicSuppliers } from "@/lib/backendApi";
+import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 
+// Формат даних з FastAPI (GET /api/v1/suppliers/public). Відгуки/категорії
+// з Supabase більше не тягнемо — FastAPI їх поки не віддає, тому в
+// мапінгу лишаємо нульові значення (UI сам ховає ці блоки).
 interface Supplier {
-  id: string | null;
-  shop_name: string | null;
-  is_active: boolean | null;
+  id: number;
+  name?: string | null;
+  store_name: string;
+  store_description?: string | null;
   logo_url?: string | null;
   cover_image_url?: string | null;
-  description?: string | null;
+  telegram_channel_link?: string | null;
+  is_active: boolean;
   product_count?: number;
+  completed_products?: number;
   review_count?: number;
   avg_rating?: number;
   categories?: string[];
   badge?: SupplierBadgeInfo;
+  created_at?: string | null;
 }
 
 const Suppliers = () => {
@@ -35,82 +43,47 @@ const Suppliers = () => {
   const [isWishlistOpen, setIsWishlistOpen] = useState(false);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  // Пошук магазинів: debounce 500мс, сам пошук відбувається НА БЕКЕНДІ
+  // (?search= через ilike по store_name/name), а не фільтром на клієнті.
+  const [searchInput, setSearchInput] = useState("");
+  const debouncedSearch = useDebouncedValue(searchInput.trim(), 500);
   
   const { items: cartItems, totalItems, updateQuantity, removeItem } = useCartContext();
   const { totalFavorites } = useFavoritesContext();
 
-  useEffect(() => {
-    fetchSuppliers();
-  }, []);
-
-  const fetchSuppliers = async () => {
+  const fetchSuppliers = useCallback(async (search: string) => {
     try {
       setIsLoading(true);
-      
-      // Fetch suppliers with logo and cover
-      const { data: suppliersData, error } = await supabase
-        .from('suppliers')
-        .select('id, shop_name, is_active, logo_url, cover_image_url, description')
-        .eq('is_active', true);
-      
-      if (error) throw error;
-      
-      // Get product counts, reviews, and categories for each supplier
-      const suppliersWithDetails = await Promise.all(
-        (suppliersData || []).map(async (supplier) => {
-          // Product count
-          const { count } = await supabase
-            .from('products')
-            .select('*', { count: 'exact', head: true })
-            .eq('supplier_id', supplier.id)
-            .eq('in_stock', true);
 
-          // Reviews for this supplier's products
-          const { data: productIds } = await supabase
-            .from('products')
-            .select('id')
-            .eq('supplier_id', supplier.id);
+      // GET /api/v1/suppliers/public — публічний запит, БЕЗ авторизації.
+      // Бекенд сам фільтрує живі магазини (active/parsing) і рахує
+      // product_count для кожного.
+      const backendSuppliers = await getPublicSuppliers({
+        search: search || undefined,
+        limit: 100,
+      });
 
-          let reviewCount = 0;
-          let avgRating = 0;
-          if (productIds?.length) {
-            const { data: reviews } = await supabase
-              .from('reviews')
-              .select('rating')
-              .in('product_id', productIds.map(p => p.id));
-            
-            reviewCount = reviews?.length || 0;
-            avgRating = reviewCount > 0 
-              ? reviews!.reduce((sum, r) => sum + r.rating, 0) / reviewCount 
-              : 0;
-          }
-
-          // Categories
-          const { data: productCats } = await supabase
-            .from('products')
-            .select('category:categories(name)')
-            .eq('supplier_id', supplier.id)
-            .eq('in_stock', true)
-            .limit(20);
-
-          const categorySet = new Set<string>();
-          (productCats || []).forEach((p: any) => {
-            if (p.category?.name) categorySet.add(p.category.name);
-          });
-          
-          return {
-            ...supplier,
-            product_count: count || 0,
-            review_count: reviewCount,
-            avg_rating: avgRating,
-            categories: Array.from(categorySet),
-            badge: { tier: null } as SupplierBadgeInfo, // will be assigned after sorting
-          };
-        })
-      );
+      const mapped: Supplier[] = backendSuppliers.map((s) => ({
+        id: s.id,
+        name: s.name,
+        store_name: s.store_name,
+        store_description: s.store_description,
+        logo_url: s.logo_url,
+        cover_image_url: s.cover_image_url,
+        telegram_channel_link: s.telegram_channel_link,
+        is_active: s.is_active,
+        product_count: s.product_count || 0,
+        completed_products: s.completed_products || 0,
+        review_count: 0,
+        avg_rating: 0,
+        categories: [],
+        badge: { tier: null } as SupplierBadgeInfo, // will be assigned after sorting
+        created_at: s.created_at,
+      }));
 
       // Assign badges based on revenue/product ranking (simulate weekly/monthly/yearly)
-      const sorted = [...suppliersWithDetails].sort((a, b) => (b.product_count || 0) - (a.product_count || 0));
+      const sorted = [...mapped].sort((a, b) => (b.product_count || 0) - (a.product_count || 0));
       sorted.forEach((s, idx) => {
         const rank = idx + 1;
         // Use rank to determine badge tier
@@ -121,14 +94,18 @@ const Suppliers = () => {
         );
       });
       
-      setSuppliers(suppliersWithDetails);
+      setSuppliers(mapped);
     } catch (error) {
       console.error('Error fetching suppliers:', error);
       toast.error('Помилка завантаження постачальників');
     } finally {
       setIsLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    fetchSuppliers(debouncedSearch);
+  }, [fetchSuppliers, debouncedSearch]);
 
   const handleTabChange = (tab: string) => {
     if (tab === "catalog") {
@@ -172,6 +149,33 @@ const Suppliers = () => {
           Обирайте товари від перевірених партнерів Taverna Group
         </p>
 
+        {/* Пошук магазинів — запит летить на бекенд після 500мс паузи */}
+        <div className="relative mb-6">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
+          <input
+            type="text"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Пошук магазину..."
+            className={cn(
+              "w-full h-11 pl-10 pr-10 rounded-xl",
+              "bg-muted/50 border border-border",
+              "text-foreground placeholder:text-muted-foreground",
+              "focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary",
+              "transition-all"
+            )}
+          />
+          {searchInput && (
+            <button
+              type="button"
+              onClick={() => setSearchInput("")}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          )}
+        </div>
+
         {isLoading ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="h-8 w-8 animate-spin text-primary" />
@@ -179,10 +183,21 @@ const Suppliers = () => {
         ) : suppliers.length === 0 ? (
           <div className="text-center py-12">
             <Store className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
-            <p className="text-muted-foreground">Постачальників ще немає</p>
-            <p className="text-sm text-muted-foreground mt-2">
-              Станьте першим партнером Taverna Group!
-            </p>
+            {debouncedSearch ? (
+              <>
+                <p className="text-muted-foreground">За запитом «{debouncedSearch}» нічого не знайдено</p>
+                <p className="text-sm text-muted-foreground mt-2">
+                  Спробуйте іншу назву магазину
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-muted-foreground">Постачальників ще немає</p>
+                <p className="text-sm text-muted-foreground mt-2">
+                  Станьте першим партнером Taverna Group!
+                </p>
+              </>
+            )}
           </div>
         ) : (
           <div className="space-y-5">
@@ -213,7 +228,7 @@ const Suppliers = () => {
                   <div className="absolute -bottom-7 left-4 z-10">
                     <div className="w-14 h-14 rounded-xl bg-card border-2 border-card shadow-xl flex items-center justify-center flex-shrink-0 overflow-hidden ring-2 ring-background">
                       {supplier.logo_url ? (
-                        <img src={supplier.logo_url} alt={supplier.shop_name || ''} className="w-full h-full object-cover" />
+                        <img src={supplier.logo_url} alt={supplier.store_name || ''} className="w-full h-full object-cover" />
                       ) : (
                         <Store className="h-7 w-7 text-primary" />
                       )}
@@ -226,7 +241,7 @@ const Suppliers = () => {
                   {/* Name & verified */}
                   <div className="flex items-center gap-2 mb-1">
                     <h3 className="font-bold text-foreground truncate text-base group-hover:text-primary transition-colors">
-                      {supplier.shop_name}
+                      {supplier.store_name}
                     </h3>
                     {supplier.badge && supplier.badge.tier && (
                       <SupplierBadge badge={supplier.badge} size="sm" />

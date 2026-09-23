@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Query
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -519,7 +519,11 @@ def _to_me_response(
 
 # --- Публічна вітрина магазину (без авторизації) ----------------------------
 
-def _to_public_response(supplier: Supplier) -> PublicSupplierResponse:
+def _to_public_response(
+    supplier: Supplier,
+    product_count: int = 0,
+    completed_products: int = 0,
+) -> PublicSupplierResponse:
     """Лише безпечні поля для покупця. Жодних email/телефонів/реквізитів."""
     return PublicSupplierResponse(
         id=supplier.id,
@@ -535,7 +539,60 @@ def _to_public_response(supplier: Supplier) -> PublicSupplierResponse:
         shipping_schedule=supplier.shipping_schedule,
         shipping_days=list(supplier.shipping_days) if supplier.shipping_days else [],
         created_at=getattr(supplier, "created_at", None),
+        product_count=product_count,
+        completed_products=completed_products,
     )
+
+
+def _escape_ilike(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+@router.get("/public", response_model=List[PublicSupplierResponse])
+async def list_public_suppliers(
+    search: Optional[str] = Query(None, description="Пошук по назві магазину (ilike, без регістру)"),
+    limit: int = Query(50, ge=1, le=100, description="Скільки магазинів віддати"),
+    offset: int = Query(0, ge=0, description="Зсув для наступної сторінки"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    ПУБЛІЧНИЙ список магазинів (сторінка «Постачальники» в MiniApp).
+    БЕЗ Authorization — покупець може бути не авторизований у Telegram.
+
+    Лише живі магазини: status in (active, parsing). Магазини з
+    deleted / banned / rejected / pending_* у списку не з'являються.
+    ?search= — фільтр по store_name АБО name через ilike (без регістру).
+    """
+    live_statuses = (
+        SupplierStatus.active,
+        SupplierStatus.parsing,
+    )
+    stmt = (
+        select(Supplier)
+        .where(Supplier.status.in_(live_statuses))
+    )
+    search_value = (search or "").strip()
+    if search_value:
+        pattern = f"%{_escape_ilike(search_value)}%"
+        stmt = stmt.where(
+            or_(
+                Supplier.store_name.ilike(pattern, escape="\\"),
+                Supplier.name.ilike(pattern, escape="\\"),
+            )
+        )
+    stmt = (
+        stmt
+        .order_by(Supplier.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    suppliers = list((await db.execute(stmt)).scalars().all())
+
+    result: List[PublicSupplierResponse] = []
+    for supplier in suppliers:
+        product_count, completed_products = await _product_stats(db, supplier.id)
+        result.append(_to_public_response(supplier, product_count, completed_products))
+    return result
 
 
 @router.get("/{supplier_id}/public", response_model=PublicSupplierResponse)

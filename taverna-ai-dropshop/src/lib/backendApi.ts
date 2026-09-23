@@ -802,6 +802,7 @@ export const SUPPLIERS_MANAGERS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/
 export const SUPPLIERS_INVITE_LINK_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/invite-link`;
 export const MY_SHOPS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/shops`;
 export const SUPPLIER_DETAIL_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers`;
+export const PUBLIC_SUPPLIERS_LIST_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/public`;
 export const ADMIN_PENDING_SUPPLIERS_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/pending`;
 export const ADMIN_DIRECT_CREATE_SUPPLIER_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/direct-create`;
 
@@ -1150,6 +1151,9 @@ export interface BackendPublicSupplier {
   shipping_schedule?: string | null;
   shipping_days?: string[];
   created_at?: string | null;
+  /** Заповнюється лише у списку /suppliers/public (сторінка «Постачальники»). */
+  product_count?: number;
+  completed_products?: number;
 }
 
 /**
@@ -1187,6 +1191,36 @@ export async function getPublicSupplier(id: string | number): Promise<BackendPub
   }
 
   return (await response.json()) as BackendPublicSupplier;
+}
+
+/**
+ * GET /api/v1/suppliers/public — публічний список магазинів (сторінка
+ * «Постачальники»). БЕЗ Authorization: покупець може не мати Telegram-
+ * авторизації. Статистику (product_count/completed_products) рахує бекенд.
+ */
+export async function getPublicSuppliers(params: {
+  search?: string;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<BackendPublicSupplier[]> {
+  const searchParams = new URLSearchParams();
+  const search = (params.search ?? "").trim();
+  if (search) searchParams.set("search", search);
+  const limit = Math.min(Math.max(params.limit ?? 50, 1), 100);
+  const offset = Math.max(params.offset ?? 0, 0);
+  searchParams.set("limit", String(limit));
+  searchParams.set("offset", String(offset));
+  const data = await backendGet<BackendPublicSupplier[] | BackendPublicSupplier>(
+    `${PUBLIC_SUPPLIERS_LIST_ENDPOINT}?${searchParams.toString()}`
+  );
+  if (Array.isArray(data)) {
+    return data.filter(Boolean);
+  }
+  // Бекенд з якихось причин повернув один об'єкт замість масиву — не падаємо.
+  if (data && typeof data === "object" && "id" in data) {
+    return [data];
+  }
+  return [];
 }
 
 /** GET /api/v1/suppliers/me/import-progress — масив магазинів у XML/AI-черзі. */
