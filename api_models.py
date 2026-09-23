@@ -427,6 +427,61 @@ class SupplierShopCardResponse(UtcJsonDates):
     created_at: Optional[datetime] = None
 
 
+class SupplierUpdateRequest(BaseModel):
+    """PATCH /suppliers/{id}: профіль магазину (власник або менеджер)."""
+    store_name: Optional[str] = None
+    store_description: Optional[str] = None
+    manager_telegram: Optional[str] = None
+    payout_method: Optional[str] = None  # 'iban' | 'card_token'
+    payout_iban: Optional[str] = None
+    payout_card_token: Optional[str] = None
+    # --- Поля дизайну/політик (Live-ensure колонок у database/db.py) ---
+    logo_url: Optional[str] = None
+    cover_image_url: Optional[str] = None
+    shop_photos: Optional[List[str]] = None
+    return_policy: Optional[str] = None
+    exchange_policy: Optional[str] = None
+    shipping_schedule: Optional[str] = None
+    shipping_days: Optional[List[str]] = None
+    return_contact_info: Optional[str] = None
+    allow_bot_chat: Optional[bool] = None
+    telegram_forward_enabled: Optional[bool] = None
+
+
+class SupplierDetailResponse(UtcJsonDates):
+    """Повна картка магазину (GET/PATCH /suppliers/{id})."""
+    id: int
+    store_name: str
+    store_description: Optional[str] = None
+    supplier_type: Optional[str] = None
+    status: str
+    is_active: bool = False
+    role: str  # 'owner' | 'manager'
+    shop_url: Optional[str] = None
+    manager_telegram: Optional[str] = None
+    contact_phone: Optional[str] = None
+    email: Optional[str] = None
+    payout_method: Optional[str] = None
+    payout_iban: Optional[str] = None
+    payout_card_token: Optional[str] = None
+    # --- Поля дизайну/політик ---
+    logo_url: Optional[str] = None
+    cover_image_url: Optional[str] = None
+    shop_photos: List[str] = []
+    return_policy: Optional[str] = None
+    exchange_policy: Optional[str] = None
+    shipping_schedule: Optional[str] = None
+    shipping_days: List[str] = []
+    return_contact_info: Optional[str] = None
+    allow_bot_chat: bool = True
+    telegram_forward_enabled: bool = False
+    product_count: int = 0
+    completed_products: int = 0
+    deletion_requested: bool = False
+    created_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+
+
 class PendingSupplierApplicationResponse(UtcJsonDates):
     """Заявка для React-адмінки, включно з AI-звітом."""
     model_config = ConfigDict(from_attributes=True)

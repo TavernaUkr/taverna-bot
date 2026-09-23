@@ -132,6 +132,10 @@ export type BackendProductsQuery = {
   gender?: QueryValue;
   /** JSON-характеристики: ключ «Виробник» → query ?char_Виробник=Китай */
   characteristics?: Record<string, QueryValue>;
+  /** Текстовий пошук по назві/опису/артикулу/бренду (бекенд, ilike). */
+  search?: string;
+  /** Вітрина конкретного магазину: лише товари цього постачальника. */
+  supplier_id?: number;
   limit?: number;
   offset?: number;
 };
@@ -309,6 +313,11 @@ export async function fetchBackendProductList(
   appendQueryValues(params, "target_niche", filters?.target_niche ?? filters?.niche);
   appendQueryValues(params, "gender", filters?.gender);
   appendCharFilters(params, filters?.characteristics);
+  const search = (filters?.search ?? "").trim();
+  if (search) params.set("search", search);
+  if (typeof filters?.supplier_id === "number" && Number.isFinite(filters.supplier_id)) {
+    params.set("supplier_id", String(filters.supplier_id));
+  }
   const limit = Math.min(Math.max(filters?.limit ?? 50, 1), 100);
   const offset = Math.max(filters?.offset ?? 0, 0);
   params.set("limit", String(limit));
@@ -400,29 +409,25 @@ export async function fetchProductColorVariants(
 /**
  * Пошук товарів через FastAPI-бекенд.
  *
- * Бекенд (GET /api/v1/products/) поки не приймає query-параметри пошуку,
- * тож фільтруємо на фронтенді по всьому каталогу — так само, як це робить
- * `useProducts().searchProducts`. Якщо бекенд згодом отримає власний
- * пошуковий ендпоінт (`?search=`), достатньо буде оновити тільки цю функцію.
+ * Тепер бекенд (GET /api/v1/products/) приймає ?search=, тож пошук
+ * виконується на сервері (ilike по name/description/supplier_sku/brand/model)
+ * і повертає лише першу сторінку результатів — замість колишнього
+ * тягнення всього каталогу на клієнт і фільтрації на фронті.
  */
-export async function searchBackendProducts(query: string): Promise<BackendProduct[]> {
-  const all = await fetchBackendProductsPaged();
-  const q = query.trim().toLowerCase();
-  if (!q) return all;
-
-  return all.filter((p) => {
-    const haystack = [
-      p.name,
-      p.description ?? "",
-      p.sku,
-      p.category ?? "",
-      p.sub_category ?? "",
-      p.season ?? "",
-    ]
-      .join(" ")
-      .toLowerCase();
-    return haystack.includes(q);
+export async function searchBackendProducts(
+  query: string,
+  options?: { limit?: number; supplier_id?: number }
+): Promise<BackendProduct[]> {
+  const search = (query ?? "").trim();
+  if (!search) {
+    return fetchBackendProducts({ limit: options?.limit ?? 50 });
+  }
+  const { items } = await fetchBackendProductList({
+    search,
+    supplier_id: options?.supplier_id,
+    limit: Math.min(Math.max(options?.limit ?? 50, 1), 100),
   });
+  return items;
 }
 
 // --- Замовлення (Checkout Mini App -> POST /api/v1/orders/) ------------------
@@ -794,6 +799,7 @@ export const SUPPLIERS_IMPORT_PROGRESS_ENDPOINT = `${API_BASE_URL}/api/v1/suppli
 export const SUPPLIERS_MANAGERS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/managers`;
 export const SUPPLIERS_INVITE_LINK_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/invite-link`;
 export const MY_SHOPS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/shops`;
+export const SUPPLIER_DETAIL_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers`;
 export const ADMIN_PENDING_SUPPLIERS_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/pending`;
 export const ADMIN_DIRECT_CREATE_SUPPLIER_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/direct-create`;
 
@@ -1048,6 +1054,80 @@ export async function generateManagerInviteLink(): Promise<BackendSupplierInvite
     SUPPLIERS_INVITE_LINK_ENDPOINT,
     {},
     "Не вдалося згенерувати посилання-запрошення",
+    adminTelegramHeaders()
+  );
+}
+
+// --- Картка магазину: GET/PATCH /suppliers/{id} ------------------------------
+
+export interface BackendSupplierDetail {
+  id: number;
+  store_name: string;
+  store_description?: string | null;
+  supplier_type?: string | null;
+  status: string;
+  is_active: boolean;
+  role: "owner" | "manager";
+  shop_url?: string | null;
+  manager_telegram?: string | null;
+  contact_phone?: string | null;
+  email?: string | null;
+  payout_method?: string | null;
+  payout_iban?: string | null;
+  payout_card_token?: string | null;
+  logo_url?: string | null;
+  cover_image_url?: string | null;
+  shop_photos?: string[];
+  return_policy?: string | null;
+  exchange_policy?: string | null;
+  shipping_schedule?: string | null;
+  shipping_days?: string[];
+  return_contact_info?: string | null;
+  allow_bot_chat?: boolean;
+  telegram_forward_enabled?: boolean;
+  product_count: number;
+  completed_products: number;
+  deletion_requested: boolean;
+  created_at?: string | null;
+  approved_at?: string | null;
+}
+
+export interface BackendSupplierUpdate {
+  store_name?: string;
+  store_description?: string;
+  manager_telegram?: string;
+  payout_method?: "iban" | "card_token";
+  payout_iban?: string;
+  payout_card_token?: string;
+  logo_url?: string;
+  cover_image_url?: string;
+  shop_photos?: string[];
+  return_policy?: string;
+  exchange_policy?: string;
+  shipping_schedule?: string;
+  shipping_days?: string[];
+  return_contact_info?: string;
+  allow_bot_chat?: boolean;
+  telegram_forward_enabled?: boolean;
+}
+
+/** GET /api/v1/suppliers/{id} — дані магазину (власник або менеджер). */
+export async function getSupplierById(id: string | number): Promise<BackendSupplierDetail> {
+  return backendGet<BackendSupplierDetail>(
+    `${SUPPLIER_DETAIL_ENDPOINT}/${id}`,
+    adminTelegramHeaders()
+  );
+}
+
+/** PATCH /api/v1/suppliers/{id} — оновити профіль магазину (власник або менеджер). */
+export async function updateSupplier(
+  id: string | number,
+  data: BackendSupplierUpdate
+): Promise<BackendSupplierDetail> {
+  return backendPatch<BackendSupplierDetail>(
+    `${SUPPLIER_DETAIL_ENDPOINT}/${id}`,
+    data,
+    "Не вдалося зберегти магазин",
     adminTelegramHeaders()
   );
 }

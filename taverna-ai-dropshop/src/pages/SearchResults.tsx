@@ -10,6 +10,7 @@ import { useFavoritesContext } from "@/components/FavoritesContext";
 import { useCartContext } from "@/contexts/CartContext";
 import { fetchBackendProductsPaged, fetchBackendCategories, fetchBackendFilters, BackendApiError, type BackendProductVariant, type BackendProductOption, type BackendFilterAttribute, type BackendCategorySub } from "@/lib/backendApi";
 import { mapBackendProductToUi, buildCategoriesFromProducts } from "@/hooks/useProducts";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import {
   PimFilterPills,
   FALLBACK_SEASONS,
@@ -159,8 +160,23 @@ export default function SearchResults() {
     [searchString]
   );
   const urlCharKey = useMemo(() => charFiltersKey(urlCharFilters), [urlCharFilters]);
+  // Вітрина конкретного магазину: /catalog?supplier_id=5
+  const urlSupplierId = useMemo(() => {
+    const raw = searchParams.get("supplier_id");
+    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }, [searchParams]);
   
   const [searchInput, setSearchInput] = useState(query);
+  // Debounce 500мс: запит на бекенд летить лише після паузи у введенні,
+  // а не на кожне натискання клавіші.
+  const debouncedSearch = useDebouncedValue(searchInput.trim(), 500);
+
+  // Тримаємо input синхронним з URL-параметром q (кнопка "назад" браузера
+  // або вхід на сторінку з готовим запитом, напр. із SearchModal).
+  useEffect(() => {
+    setSearchInput((prev) => (prev === query ? prev : query));
+  }, [query]);
   // Повний немодифікований каталог з FastAPI-бекенду (без фільтрів/пошуку).
   const [allProducts, setAllProducts] = useState<Product[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -209,8 +225,9 @@ export default function SearchResults() {
   const { isFavorite, toggleFavorite } = useFavoritesContext();
   const { addItem } = useCartContext();
 
-  // Завантажуємо каталог так само, як блок «Популярні»: без порожніх query-параметрів.
-  // Якщо в URL вже є категорія/ніша — передаємо лише непорожні фільтри.
+  // Завантажуємо каталог з FastAPI-бекенду. Текстовий пошук і вітрина
+  // магазину виконуються НА СЕРВЕРІ (?search= та ?supplier_id=), решта
+  // PIM-фільтрів (категорія/ніша/сезон/характеристики) теж уходить у запит.
   useEffect(() => {
     const loadCatalog = async () => {
       setIsLoading(true);
@@ -222,6 +239,8 @@ export default function SearchResults() {
           target_niche?: string[];
           gender?: string;
           characteristics?: Record<string, string[]>;
+          search?: string;
+          supplier_id?: number;
         } = {};
         if (urlCategory.trim()) queryFilters.category = urlCategory.trim();
         if (urlSubCategories.length) queryFilters.sub_category = urlSubCategories;
@@ -231,6 +250,10 @@ export default function SearchResults() {
         if (Object.keys(urlCharFilters).length) {
           queryFilters.characteristics = urlCharFilters;
         }
+        // Серверний пошук (debounced): непорожній текст -> ?search=
+        if (debouncedSearch) queryFilters.search = debouncedSearch;
+        // Вітрина магазину: /catalog?supplier_id=N -> лише товари постачальника N
+        if (urlSupplierId) queryFilters.supplier_id = urlSupplierId;
 
         const backendProducts = await fetchBackendProductsPaged(queryFilters);
         const mapped = backendProducts
@@ -275,7 +298,7 @@ export default function SearchResults() {
       }
     };
     loadCatalog();
-  }, [urlCategory, urlSubKey, nicheParam, seasonParam, urlGender, urlCharKey]);
+  }, [urlCategory, urlSubKey, nicheParam, seasonParam, urlGender, urlCharKey, debouncedSearch, urlSupplierId]);
 
   // Динамічні лічильники підкатегорій з бекенду під вибрані фільтри.
   useEffect(() => {
@@ -335,14 +358,10 @@ export default function SearchResults() {
   useEffect(() => {
     let filtered = allProducts;
 
-    // Текстовий пошук (пропускаємо, якщо показуємо всі товари)
-    if (query && !showAll) {
-      const q = query.toLowerCase();
-      filtered = filtered.filter((p) =>
-        [p.name, p.description, p.brand, p.model, p.vendor_code]
-          .some((field) => field?.toLowerCase().includes(q))
-      );
-    }
+    // Текстовий пошук тепер виконується НА БЕКЕНДІ (?search= в loadCatalog).
+    // Колишній клієнтський фільтр по name/description/brand/model прибрано:
+    // він "різав" серверні результати (напр., збіг по артикулі supplier_sku
+    // або бренду, яких немає у мапнутому Product, падав на клієнті).
 
     // Категорії з URL (AI текстові назви) + чекбокси фільтрів
     if (urlCategory) {
@@ -458,13 +477,19 @@ export default function SearchResults() {
         }))
       );
     }
-  }, [allProducts, query, showAll, filters, priceRange.max, urlCategory, urlSubCategories, urlGender, availableNiches.length, availableSeasons.length, availableGenders.length, availableAttributes.length]);
+  }, [allProducts, filters, priceRange.max, urlCategory, urlSubCategories, urlGender, availableNiches.length, availableSeasons.length, availableGenders.length, availableAttributes.length]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
-    if (searchInput.trim()) {
-      setSearchParams({ q: searchInput.trim() });
-    }
+    // Оновлюємо лише q, не витираючи category/niche/supplier_id з URL —
+    // пошук і так іде live через debounce, Enter лише фіксує запит в URL.
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      const trimmed = searchInput.trim();
+      if (trimmed) next.set("q", trimmed);
+      else next.delete("q");
+      return next;
+    });
   };
 
   const handleAddToCart = async (
@@ -1101,8 +1126,8 @@ export default function SearchResults() {
           <p className="text-sm text-muted-foreground">
             {showAll ? (
               <>Всі товари: {products.length}</>
-            ) : query ? (
-              <>Результати для "{query}": {products.length} товарів</>
+            ) : (query || debouncedSearch) ? (
+              <>Результати для "{debouncedSearch || query}": {products.length} товарів</>
             ) : (
               <>Товарів: {products.length}</>
             )}

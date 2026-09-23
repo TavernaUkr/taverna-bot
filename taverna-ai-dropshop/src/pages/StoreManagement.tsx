@@ -25,6 +25,8 @@ import { cn } from "@/lib/utils";
 import {
   getManagers,
   generateManagerInviteLink,
+  getSupplierById,
+  updateSupplier,
   type BackendSupplierManager,
 } from "@/lib/backendApi";
 
@@ -53,6 +55,10 @@ interface ShopData {
   manager_telegram: string;
   allow_bot_chat: boolean;
   telegram_forward_enabled: boolean;
+  // Платіжні реквізити
+  payout_method: "iban" | "card_token";
+  payout_iban: string;
+  payout_card_token: string; // маска ****1234 з бекенду або нова карта
 }
 
 interface Review {
@@ -108,7 +114,11 @@ export default function StoreManagement() {
     manager_telegram: "",
     allow_bot_chat: true,
     telegram_forward_enabled: false,
+    payout_method: "iban",
+    payout_iban: "",
+    payout_card_token: "",
   });
+  const [myRole, setMyRole] = useState<"owner" | "manager">("owner");
 
   useEffect(() => {
     loadSupplier();
@@ -117,36 +127,15 @@ export default function StoreManagement() {
   const loadSupplier = async () => {
     setIsLoading(true);
     try {
-      let query = supabase.from("suppliers").select("*");
-      
       if (paramSupplierId) {
-        // Accessing specific store by ID
-        query = query.eq("id", paramSupplierId);
-      } else {
-        // Supplier accessing their own store - check for multiple
-        const { data: allSuppliers } = await supabase
-          .from("suppliers")
-          .select("id")
-          .eq("is_active", true);
-        
-        if (allSuppliers && allSuppliers.length > 1) {
-          // Multiple shops - redirect to shop selector
-          navigate("/my-shops", { replace: true });
-          return;
-        }
-        
-        query = query.eq("is_active", true);
-      }
-      
-      const { data: suppliers } = await query.limit(1);
-
-      if (suppliers?.[0]) {
-        const s = suppliers[0] as any;
-        setSupplierId(s.id);
+        // Доступ до конкретного магазину через FastAPI (власник або менеджер)
+        const s = await getSupplierById(paramSupplierId);
+        setSupplierId(String(s.id));
+        setMyRole(s.role === "manager" ? "manager" : "owner");
         setShopData({
-          id: s.id,
-          shop_name: s.shop_name || "",
-          description: s.description || "",
+          id: String(s.id),
+          shop_name: s.store_name || "",
+          description: s.store_description || "",
           logo_url: s.logo_url || "",
           cover_image_url: s.cover_image_url || "",
           shop_photos: s.shop_photos || [],
@@ -157,15 +146,28 @@ export default function StoreManagement() {
           return_contact_info: s.return_contact_info || "",
           manager_telegram: s.manager_telegram || "",
           allow_bot_chat: s.allow_bot_chat !== false,
-          telegram_forward_enabled: (s as any).telegram_forward_enabled === true,
+          telegram_forward_enabled: s.telegram_forward_enabled === true,
+          payout_method: s.payout_method === "card_token" ? "card_token" : "iban",
+          payout_iban: s.payout_iban || "",
+          payout_card_token: s.payout_card_token || "",
         });
 
-        await loadReviews(s.id);
+        await loadReviews(String(s.id));
         await loadManagers();
+      } else {
+        // Без ID у URL — на сторінку вибору магазинів
+        navigate("/my-shops", { replace: true });
+        return;
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error loading supplier:", err);
-      toast.error("Помилка завантаження");
+      const status = err?.status;
+      if (status === 403) {
+        toast.error("Немає доступу до цього магазину");
+        navigate("/my-shops", { replace: true });
+        return;
+      }
+      toast.error(err?.message || "Помилка завантаження");
     } finally {
       setIsLoading(false);
     }
@@ -274,34 +276,36 @@ export default function StoreManagement() {
     triggerHapticFeedback("impact", "light");
 
     try {
-      const { error } = await supabase
-        .from("suppliers")
-        .update({
-          shop_name: shopData.shop_name.trim(),
-          description: shopData.description.trim(),
-          logo_url: shopData.logo_url.trim(),
-          cover_image_url: shopData.cover_image_url.trim(),
-          shop_photos: shopData.shop_photos,
-          return_policy: shopData.return_policy.trim(),
-          exchange_policy: shopData.exchange_policy.trim(),
-          shipping_schedule: shopData.shipping_schedule.trim(),
-          shipping_days: shopData.shipping_days,
-          return_contact_info: shopData.return_contact_info.trim(),
-          manager_telegram: shopData.manager_telegram.trim(),
-          allow_bot_chat: shopData.allow_bot_chat,
-          telegram_forward_enabled: shopData.telegram_forward_enabled,
-          updated_at: new Date().toISOString(),
-        } as any)
-        .eq("id", supplierId);
+      const updated = await updateSupplier(supplierId, {
+        store_name: shopData.shop_name.trim(),
+        store_description: shopData.description.trim(),
+        logo_url: shopData.logo_url.trim(),
+        cover_image_url: shopData.cover_image_url.trim(),
+        shop_photos: shopData.shop_photos,
+        return_policy: shopData.return_policy.trim(),
+        exchange_policy: shopData.exchange_policy.trim(),
+        shipping_schedule: shopData.shipping_schedule.trim(),
+        shipping_days: shopData.shipping_days,
+        return_contact_info: shopData.return_contact_info.trim(),
+        manager_telegram: shopData.manager_telegram.trim(),
+        allow_bot_chat: shopData.allow_bot_chat,
+        telegram_forward_enabled: shopData.telegram_forward_enabled,
+        payout_method: shopData.payout_method,
+        payout_iban: shopData.payout_method === "iban" ? shopData.payout_iban.trim() : "",
+        payout_card_token: shopData.payout_method === "card_token" ? shopData.payout_card_token.trim() : "",
+      });
 
-      if (error) throw error;
+      // Оновлюємо маску карти з відповіді, щоб не відправити її назад як "нову"
+      if (updated?.payout_card_token) {
+        setShopData(prev => ({ ...prev, payout_card_token: updated.payout_card_token || "" }));
+      }
 
       triggerHapticFeedback("notification", "success");
       toast.success("Магазин збережено!");
-    } catch (err) {
+    } catch (err: any) {
       console.error("Save error:", err);
       triggerHapticFeedback("notification", "error");
-      toast.error("Помилка збереження");
+      toast.error(err?.message || "Помилка збереження");
     } finally {
       setIsSaving(false);
     }
@@ -636,6 +640,71 @@ export default function StoreManagement() {
               </div>
             </CardContent>
           </Card>
+
+          {/* === Payment Details (owner only) === */}
+          {myRole === "owner" && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Wallet className="h-4 w-4 text-primary" />
+                Платіжні реквізити
+              </CardTitle>
+              <CardDescription>
+                Куди ми виплачуватимемо ваші кошти за замовлення
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={shopData.payout_method === "iban" ? "default" : "outline"}
+                  className="flex-1"
+                  onClick={() => handleChange("payout_method", "iban")}
+                >
+                  IBAN (р/р)
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={shopData.payout_method === "card_token" ? "default" : "outline"}
+                  className="flex-1"
+                  onClick={() => handleChange("payout_method", "card_token")}
+                >
+                  Карта
+                </Button>
+              </div>
+
+              {shopData.payout_method === "iban" ? (
+                <div className="space-y-2">
+                  <Label className="text-sm">IBAN (номер рахунку)</Label>
+                  <Input
+                    value={shopData.payout_iban}
+                    onChange={e => handleChange("payout_iban", e.target.value)}
+                    placeholder="UAXX XXXX XXXX XXXX XXXX XXXX XXXX"
+                    className="h-11 font-mono text-sm"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Рахунок ФОП у гривні для виплат за продані товари.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <Label className="text-sm">Токен карти</Label>
+                  <Input
+                    value={shopData.payout_card_token}
+                    onChange={e => handleChange("payout_card_token", e.target.value)}
+                    placeholder="Токен картки або новий номер"
+                    className="h-11 font-mono text-sm"
+                  />
+                  <p className="text-[11px] text-muted-foreground">
+                    Зберігається токен карти. Поточна карта показана маскою — залиште як є, якщо не змінюєте.
+                  </p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+          )}
 
 
           {/* === Managers Section === */}

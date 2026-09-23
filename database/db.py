@@ -289,6 +289,54 @@ async def ensure_supplier_history_log_table() -> None:
         await conn.run_sync(_ensure)
 
 
+async def ensure_supplier_showcase_columns() -> None:
+    """Live-режим: колонки вітрини магазину (мігровано з Supabase), якщо їх ще немає."""
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        insp = inspect(sync_conn)
+        if "suppliers" not in set(insp.get_table_names()):
+            return
+        cols = {col["name"] for col in insp.get_columns("suppliers")}
+        added = 0
+        if "logo_url" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN logo_url TEXT"))
+            added += 1
+        if "cover_image_url" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN cover_image_url TEXT"))
+            added += 1
+        if "shop_photos" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN shop_photos JSON"))
+            added += 1
+        if "return_policy" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN return_policy TEXT"))
+            added += 1
+        if "exchange_policy" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN exchange_policy TEXT"))
+            added += 1
+        if "shipping_schedule" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN shipping_schedule TEXT"))
+            added += 1
+        if "shipping_days" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN shipping_days JSON"))
+            added += 1
+        if "return_contact_info" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN return_contact_info TEXT"))
+            added += 1
+        if "allow_bot_chat" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN allow_bot_chat BOOLEAN DEFAULT TRUE NOT NULL"))
+            added += 1
+        if "telegram_forward_enabled" not in cols:
+            sync_conn.execute(text("ALTER TABLE suppliers ADD COLUMN telegram_forward_enabled BOOLEAN DEFAULT FALSE NOT NULL"))
+            added += 1
+        if added:
+            logger.info("Додано %s колонок вітрини suppliers.", added)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
 async def get_db() -> AsyncSession:
     """
     FastAPI "Dependency" для отримання сесії БД.
@@ -324,3 +372,4 @@ async def init_db() -> None:
     await ensure_supplier_parsing_status()
     await ensure_ai_categorization_rules_table()
     await ensure_supplier_history_log_table()
+    await ensure_supplier_showcase_columns()

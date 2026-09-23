@@ -153,7 +153,6 @@ class Supplier(Base):
     name = Column(String(255), nullable=False, index=True)
     type = Column(Enum(SupplierType), nullable=False, default=SupplierType.independent)
     status = Column(Enum(SupplierStatus), nullable=False, default=SupplierStatus.pending_ai_analysis, index=True)
-
     owner_email = Column(String(255), unique=True, index=True, nullable=True)
     contact_telegram_id = Column(BigInteger, index=True, nullable=True)
     contact_phone = Column(String(20), nullable=True)
@@ -188,6 +187,18 @@ class Supplier(Base):
     bank_name = Column(String(255), nullable=True)
     trial_ends_at = Column(DateTime(timezone=True), nullable=True)
     ai_score_report = Column(Text, nullable=True)
+
+    # --- Вітрина магазину (мігровано з Supabase) ---
+    logo_url = Column(Text, nullable=True)
+    cover_image_url = Column(Text, nullable=True)
+    shop_photos = Column(JSON, nullable=True)
+    return_policy = Column(Text, nullable=True)
+    exchange_policy = Column(Text, nullable=True)
+    shipping_schedule = Column(Text, nullable=True)
+    shipping_days = Column(JSON, nullable=True)
+    return_contact_info = Column(Text, nullable=True)
+    allow_bot_chat = Column(Boolean, nullable=False, default=True)
+    telegram_forward_enabled = Column(Boolean, nullable=False, default=False)
 
     payout_method = Column(Enum(PayoutMethod), nullable=True, default=PayoutMethod.iban)
     payout_iban = Column(String(100), nullable=True)

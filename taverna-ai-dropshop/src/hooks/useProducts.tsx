@@ -231,6 +231,7 @@ export function useProducts() {
   const fetchProducts = useCallback(async (filters?: {
     categoryId?: string;
     search?: string;
+    supplierId?: number;
     minPrice?: number;
     maxPrice?: number;
     inStock?: boolean;
@@ -242,12 +243,14 @@ export function useProducts() {
 
       const backendProducts = await fetchBackendProducts({
         category: filters?.categoryId?.trim() || undefined,
+        search: filters?.search?.trim() || undefined,
+        supplier_id: filters?.supplierId,
         limit: 50,
         offset: 0,
       });
       let mapped = backendProducts.map(mapBackendProductToUi);
 
-      // --- Клієнтська фільтрація (наш бекенд ще не приймає query-параметри) ---
+      // --- Клієнтська фільтрація (те, чого немає у бекенд-запиті) ---
       if (filters?.inStock !== false) {
         // За замовчуванням каталог показує лише товари в наявності,
         // так само як робив попередній запит до Supabase (.eq('in_stock', true)).
@@ -263,14 +266,10 @@ export function useProducts() {
         );
       }
 
-      if (filters?.search) {
-        const q = filters.search.toLowerCase();
-        mapped = mapped.filter(
-          (p) =>
-            p.name.toLowerCase().includes(q) ||
-            (p.description?.toLowerCase().includes(q) ?? false)
-        );
-      }
+      // Текстовий пошук тепер виконується НА БЕКЕНДІ (?search=): ilike по
+      // name/description/supplier_sku/brand/model. Клієнтський дублюючий
+      // фільтр прибрано — інакше він різав результати серверного пошуку
+      // (напр. збіг по артикулу не проходив би фільтр по name/description).
 
       if (filters?.minPrice !== undefined) {
         mapped = mapped.filter((p) => p.price >= filters.minPrice!);
@@ -360,14 +359,14 @@ export function useProducts() {
     }
   }, []);
 
-  const searchProducts = useCallback(async (query: string) => {
-    return fetchProducts({ search: query, limit: 20 });
+  const searchProducts = useCallback(async (query: string, supplierId?: number) => {
+    return fetchProducts({ search: query, supplierId, limit: 20 });
   }, [fetchProducts]);
 
   /** Пошук товарів напряму через бекенд (без клієнтських фільтрів fetchProducts). */
-  const searchBackendCatalog = useCallback(async (query: string): Promise<Product[]> => {
+  const searchBackendCatalog = useCallback(async (query: string, supplierId?: number): Promise<Product[]> => {
     try {
-      const backendProducts = await searchBackendProducts(query);
+      const backendProducts = await searchBackendProducts(query, { supplier_id: supplierId });
       return backendProducts.map(mapBackendProductToUi);
     } catch (err) {
       console.error('Search products error:', err);

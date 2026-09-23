@@ -23,11 +23,13 @@ from api_models import (
     PartnerRegisterResponse,
     SupplierDeletionRequest,
     SupplierDeletionResponse,
+    SupplierDetailResponse,
     SupplierInviteLinkResponse,
     SupplierManagerResponse,
     SupplierMeResponse,
     SupplierQueueShopProgress,
     SupplierShopCardResponse,
+    SupplierUpdateRequest,
     TelegramChannelVerifyRequest,
     TelegramChannelVerifyResponse,
 )
@@ -38,6 +40,7 @@ from database.models import (
     Product,
     ProductAIStatus,
     ProductStatus,
+    PayoutMethod,
     Supplier,
     SupplierLegalType,
     SupplierStatus,
@@ -795,6 +798,203 @@ async def get_my_shops(
             )
         )
     return result
+
+
+async def _get_supplier_with_access(
+    db: AsyncSession,
+    supplier_id: int,
+    telegram_id: int,
+) -> tuple[Optional[Supplier], Optional[User], Optional[str]]:
+    """
+    Магазин + юзер, якщо юзер — власник або менеджер.
+    Повертає (supplier, user, role) або (None, None, reason_403).
+    """
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        return None, None, "Користувача не знайдено"
+
+    supplier = await db.get(Supplier, supplier_id)
+    if not supplier or _enum_value(supplier.status) == SupplierStatus.deleted.value:
+        return None, None, "Магазин не знайдено"
+
+    if supplier.user_id == user.id:
+        return supplier, user, "owner"
+
+    is_manager = (
+        await db.execute(
+            select(supplier_managers.c.user_id).where(
+                supplier_managers.c.supplier_id == supplier.id,
+                supplier_managers.c.user_id == user.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if is_manager:
+        return supplier, user, "manager"
+
+    return None, None, "Немає доступу до цього магазину"
+
+
+def _to_detail_response(
+    supplier: Supplier,
+    role: str,
+    product_count: int,
+    completed_products: int,
+) -> SupplierDetailResponse:
+    return SupplierDetailResponse(
+        id=supplier.id,
+        store_name=(supplier.store_name or supplier.name or f"Магазин #{supplier.id}"),
+        store_description=supplier.store_description,
+        supplier_type=_enum_value(supplier.supplier_type),
+        status=_enum_value(supplier.status) or "pending_ai_analysis",
+        is_active=_enum_value(supplier.status) == SupplierStatus.active.value,
+        role=role,
+        shop_url=supplier.shop_url,
+        manager_telegram=supplier.manager_telegram,
+        contact_phone=supplier.phone,
+        email=supplier.email,
+        payout_method=_enum_value(supplier.payout_method),
+        payout_iban=supplier.payout_iban,
+        # Карта завжди маскується: показуємо лише останні 4 цифри
+        payout_card_token=(
+            f"****{str(supplier.payout_card_token)[-4:]}"
+            if supplier.payout_card_token
+            else None
+        ),
+        logo_url=supplier.logo_url,
+        cover_image_url=supplier.cover_image_url,
+        shop_photos=list(supplier.shop_photos) if supplier.shop_photos else [],
+        return_policy=supplier.return_policy,
+        exchange_policy=supplier.exchange_policy,
+        shipping_schedule=supplier.shipping_schedule,
+        shipping_days=list(supplier.shipping_days) if supplier.shipping_days else [],
+        return_contact_info=supplier.return_contact_info,
+        allow_bot_chat=bool(supplier.allow_bot_chat) if supplier.allow_bot_chat is not None else True,
+        telegram_forward_enabled=bool(supplier.telegram_forward_enabled or False),
+        product_count=product_count,
+        completed_products=completed_products,
+        deletion_requested=_deletion_requested(supplier),
+        created_at=getattr(supplier, "created_at", None),
+        approved_at=getattr(supplier, "approved_at", None),
+    )
+
+
+@router.get("/{supplier_id}", response_model=SupplierDetailResponse)
+async def get_supplier_by_id(
+    supplier_id: int,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Дані магазину: тільки власник або менеджер, інакше 403."""
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    supplier, _user, role = await _get_supplier_with_access(db, supplier_id, telegram_id)
+    if not supplier:
+        raise HTTPException(status_code=403, detail="Немає доступу до цього магазину")
+
+    product_count, completed_products = await _product_stats(db, supplier.id)
+    return _to_detail_response(supplier, role, product_count, completed_products)
+
+
+@router.patch("/{supplier_id}", response_model=SupplierDetailResponse)
+async def update_supplier_by_id(
+    supplier_id: int,
+    payload: SupplierUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Оновлення профілю магазину: тільки власник або менеджер, інакше 403."""
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    supplier, _user, role = await _get_supplier_with_access(db, supplier_id, telegram_id)
+    if not supplier:
+        raise HTTPException(status_code=403, detail="Немає доступу до цього магазину")
+
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="Немає полів для оновлення")
+
+    # Валідація: порожні рядки не перезаписують існуючі дані
+    if "store_name" in updates:
+        name = (updates["store_name"] or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Назва магазину не може бути порожньою")
+        supplier.store_name = name
+        supplier.name = name  # тримаємо обидва поля синхронно
+
+    if "store_description" in updates:
+        supplier.store_description = (updates["store_description"] or "").strip() or None
+
+    if "manager_telegram" in updates:
+        supplier.manager_telegram = (updates["manager_telegram"] or "").strip() or None
+
+    if "payout_method" in updates and updates["payout_method"]:
+        method = str(updates["payout_method"]).strip().lower()
+        if method not in ("iban", "card_token"):
+            raise HTTPException(status_code=400, detail="payout_method має бути 'iban' або 'card_token'")
+        supplier.payout_method = PayoutMethod(method)
+
+    if "payout_iban" in updates:
+        supplier.payout_iban = (updates["payout_iban"] or "").strip() or None
+
+    if "payout_card_token" in updates:
+        # Маска ****1234 не вважаємо новою картою — ігноруємо
+        raw = (updates["payout_card_token"] or "").strip()
+        if raw and not raw.startswith("****"):
+            supplier.payout_card_token = raw
+
+    # --- Поля дизайну/політик вітрини ---
+    if "logo_url" in updates:
+        supplier.logo_url = (updates["logo_url"] or "").strip() or None
+
+    if "cover_image_url" in updates:
+        supplier.cover_image_url = (updates["cover_image_url"] or "").strip() or None
+
+    if "shop_photos" in updates:
+        photos = updates["shop_photos"]
+        supplier.shop_photos = [str(u).strip() for u in photos if str(u).strip()] if photos else None
+
+    if "return_policy" in updates:
+        supplier.return_policy = (updates["return_policy"] or "").strip() or None
+
+    if "exchange_policy" in updates:
+        supplier.exchange_policy = (updates["exchange_policy"] or "").strip() or None
+
+    if "shipping_schedule" in updates:
+        supplier.shipping_schedule = (updates["shipping_schedule"] or "").strip() or None
+
+    if "shipping_days" in updates:
+        days = updates["shipping_days"]
+        supplier.shipping_days = [str(d).strip() for d in days if str(d).strip()] if days else None
+
+    if "return_contact_info" in updates:
+        supplier.return_contact_info = (updates["return_contact_info"] or "").strip() or None
+
+    if "allow_bot_chat" in updates:
+        supplier.allow_bot_chat = bool(updates["allow_bot_chat"])
+
+    if "telegram_forward_enabled" in updates:
+        supplier.telegram_forward_enabled = bool(updates["telegram_forward_enabled"])
+
+    try:
+        await db.commit()
+        await db.refresh(supplier)
+    except Exception as e:
+        await db.rollback()
+        logger.error("PATCH /suppliers/%s: %s", supplier_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+    product_count, completed_products = await _product_stats(db, supplier.id)
+    return _to_detail_response(supplier, role, product_count, completed_products)
 
 
 @router.post("/me/invite-link", response_model=SupplierInviteLinkResponse)

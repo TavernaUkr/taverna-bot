@@ -288,6 +288,38 @@ def _catalog_visibility_filter(stmt):
     )
 
 
+def _apply_search_and_supplier_filters(
+    stmt,
+    *,
+    search: Optional[str],
+    supplier_id: Optional[int],
+):
+    """
+    Глобальний текстовий пошук (?search=) та вітрина магазину (?supplier_id=).
+
+    Пошук — OR через ilike (без регістру) по полях name / description /
+    supplier_sku / brand / model. Артикул і бренд включені, бо UI пошуку
+    обіцяє «Пошук товарів, артикул...». Спецсимволи % та _ екрануються
+    через _escape_ilike, тож запит "50%" шукається буквально.
+    Порожній search (або лиш пробіли) фільтр не додає.
+    """
+    text_value = (search or "").strip()
+    if text_value:
+        pattern = f"%{_escape_ilike(text_value)}%"
+        stmt = stmt.where(
+            or_(
+                Product.name.ilike(pattern, escape="\\"),
+                Product.description.ilike(pattern, escape="\\"),
+                Product.supplier_sku.ilike(pattern, escape="\\"),
+                Product.brand.ilike(pattern, escape="\\"),
+                Product.model.ilike(pattern, escape="\\"),
+            )
+        )
+    if supplier_id is not None:
+        stmt = stmt.where(Product.supplier_id == supplier_id)
+    return stmt
+
+
 class ProductWithShareURL(ProductAPI):
     share_url: str
 
@@ -561,6 +593,8 @@ async def get_all_products(
     target_niche: Optional[List[str]] = Query(None, description="Ніша: Мілітарі / Дім / Електроніка"),
     niche: Optional[List[str]] = Query(None, description="Аліас target_niche"),
     gender: Optional[List[str]] = Query(None, description="Стать: Чоловічий / Жіночий / Унісекс"),
+    search: Optional[str] = Query(None, description="Глобальний текстовий пошук по назві, опису, артикулу, бренду, моделі", max_length=200),
+    supplier_id: Optional[int] = Query(None, ge=1, description="Вітрина конкретного магазину: лише товари цього постачальника"),
     limit: int = Query(50, ge=1, le=100, description="Скільки товарів віддати (захист від зависання)"),
     offset: int = Query(0, ge=0, description="Зсув для наступної сторінки"),
     db: AsyncSession = Depends(get_db),
@@ -570,6 +604,8 @@ async def get_all_products(
     Each product includes a share_url field that points to the product in the Telegram bot.
     Фільтри category / sub_category / season / niche працюють по текстових AI-полях.
     Динамічні характеристики: ?char_Виробник=Китай (JSON attributes / characteristics).
+    Глобальний пошук: ?search=рукавички (ilike, без регістру) — name/description/supplier_sku/brand/model.
+    Вітрина магазину: ?supplier_id=5 — лише товари цього постачальника.
     Кожен параметр можна передати як один рядок, CSV або кілька повторів.
 
     Пагінація обов'язкова: без limit сервер зависав на 1000+ товарів.
@@ -591,6 +627,9 @@ async def get_all_products(
         count_stmt = _apply_characteristic_filters(
             count_stmt, char_filters, is_postgres=is_postgres
         )
+        count_stmt = _apply_search_and_supplier_filters(
+            count_stmt, search=search, supplier_id=supplier_id
+        )
         count_stmt = _catalog_visibility_filter(count_stmt)
         total = int((await db.execute(count_stmt)).scalar_one() or 0)
 
@@ -601,6 +640,9 @@ async def get_all_products(
         )
         stmt = _apply_pim_filters(stmt, **filter_kwargs)
         stmt = _apply_characteristic_filters(stmt, char_filters, is_postgres=is_postgres)
+        stmt = _apply_search_and_supplier_filters(
+            stmt, search=search, supplier_id=supplier_id
+        )
         stmt = _catalog_visibility_filter(stmt)
         stmt = stmt.order_by(Product.id.desc()).offset(offset).limit(limit)
         result = await db.execute(stmt)
