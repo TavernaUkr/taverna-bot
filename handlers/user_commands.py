@@ -2,6 +2,7 @@
 from aiogram import Router, F, types
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from aiogram.filters import CommandStart, CommandObject
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.fsm.context import FSMContext
 # Ми ВИДАЛИЛИ імпорт get_main_kb, бо його немає.
 # Ми ВИДАЛИЛИ імпорт CartCallback, бо він тут не потрібен.
@@ -25,20 +26,6 @@ logger = logging.getLogger(__name__)
 
 # Створюємо роутер
 router = Router()
-
-@router.message(CommandStart(deep_link=False))
-async def cmd_start_simple(msg: Message, state: FSMContext):
-    """Обробник /start без deep-link."""
-    await state.clear()
-    
-    greeting_text = (
-        f"Вітаю, {msg.from_user.full_name}! 👋\n\n"
-        "Я — ваш бот-помічник 'Taverna'.\n\n"
-        "👉 Ви можете відкрити наш повний <b>Каталог (MiniApp)</b>, "
-        "натиснувши кнопку 'Меню' (ліворуч) або ввівши команду /catalog."
-    )
-    # Просто текст, без зайвих клавіатур (кнопка Меню вже налаштована в bot.py)
-    await msg.answer(greeting_text)
 
 
 # --- Deep-link: запрошення менеджера до магазину ---
@@ -69,15 +56,29 @@ def _invite_expired(expires_at: Optional[datetime]) -> bool:
     return expires < datetime.now(timezone.utc)
 
 
-@router.message(CommandStart(deep_link=True, magic=F.args.startswith("manager_")))
+@router.message(CommandStart(deep_link=True))
 async def cmd_start_manager_invite(msg: Message, command: CommandObject, state: FSMContext):
     """
     Обробляє інвайт-посилання: /start manager_{token}
     Токен з таблиці manager_invites (24 год, одноразовий).
+
+    Фільтр — максимально простий (лише deep_link=True), без magic-F.
+    Перевірку префікса робимо ВСЕРЕДИНІ: якщо це не інвайт менеджера —
+    просто виходимо (return), і жоден інший хендлер не постраждає.
     """
+    # Жорстка перевірка всередині хендлера: ловимо ЛИШЕ /start manager_...
+    if not command.args or not command.args.startswith("manager_"):
+        logger.info(
+            "Deep-link /start з іншим payload (%r) — інвайт-хендлер пропускає його.",
+            command.args,
+        )
+        # НЕ return: через SkipHandler лінк (show_sku_ тощо) йде далі
+        # по ланцюжку хендлерів, якби цього хендлера не існувало.
+        raise SkipHandler()
+
     await state.clear()
     try:
-        token = (command.args or "").replace("manager_", "").strip()
+        token = command.args.replace("manager_", "").strip()
         if not token:
             await msg.answer("❌ Посилання недійсне.")
             return
@@ -154,6 +155,27 @@ async def cmd_start_manager_invite(msg: Message, command: CommandObject, state: 
     except Exception as e:
         logger.error("Помилка deep-link 'manager_': %s", e, exc_info=True)
         await msg.answer("⚠️ Сталася помилка. Спробуйте відкрити посилання ще раз.")
+
+
+# --- /start БЕЗ deep-link: реєструємо ПІСЛЯ deep-link хендлера ---
+# ПОРЯДОК ВАЖЛИВИЙ: aiogram перевіряє хендлери послідовно, і перший, чий
+# фільтр зматчився, забирає оновлення. CommandStart(deep_link=False) також
+# матчить /start manager_... , тому цей хендлер обов'язково має йти ПІСЛЯ
+# cmd_start_manager_invite — інакше інвайт-хендлер ніколи не отримає керування.
+@router.message(CommandStart(deep_link=False))
+async def cmd_start_simple(msg: Message, state: FSMContext):
+    """Обробник /start без deep-link (звичайний запуск бота)."""
+    await state.clear()
+
+    greeting_text = (
+        f"Вітаю, {msg.from_user.full_name}! 👋\n\n"
+        "Я — ваш бот-помічник 'Taverna'.\n\n"
+        "👉 Ви можете відкрити наш повний <b>Каталог (MiniApp)</b>, "
+        "натиснувши кнопку 'Меню' (ліворуч) або ввівши команду /catalog."
+    )
+    # Просто текст, без зайвих клавіатур (кнопка Меню вже налаштована в bot.py)
+    await msg.answer(greeting_text)
+
 
 # --- Додаємо обробник /basket ---
 @router.message(F.text == "/basket")
