@@ -1035,6 +1035,8 @@ class TicketMessageResponse(BaseModel):
     sender_role: str
     text: str
     is_read: bool = False
+    media_url: Optional[str] = None        # Посилання на файл (голосове/кружечок)
+    is_transcribed: bool = False           # Чи розшифровано голосове
     created_at: Optional[datetime] = None
 
 
@@ -1049,6 +1051,7 @@ class TicketResponse(BaseModel):
     assigned_manager_id: Optional[int] = None
     status: str = "ai_handling"
     topic: str
+    ai_summary: Optional[str] = None     # Резюме від AI після закриття тікета
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     # Агрегати для списку (заповнюються вручну в ендпоінті)

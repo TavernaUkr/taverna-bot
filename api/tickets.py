@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import selectinload
 
@@ -33,6 +33,7 @@ from database.models import (
     User,
     supplier_managers,
 )
+from core.ai_support_service import ai_support_service  # AI-резюме при закритті тікета
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/tickets", tags=["Tickets (Mini App)"])
@@ -179,6 +180,7 @@ async def create_ticket(
         assigned_manager_id=ticket.assigned_manager_id,
         status=ticket.status,
         topic=ticket.topic,
+        ai_summary=ticket.ai_summary,
         created_at=ticket.created_at,
         updated_at=ticket.updated_at,
         message_count=1,
@@ -268,6 +270,7 @@ async def get_my_tickets(
             assigned_manager_id=t.assigned_manager_id,
             status=t.status,
             topic=t.topic,
+            ai_summary=t.ai_summary,
             created_at=t.created_at,
             updated_at=t.updated_at,
             message_count=int(message_count or 0),
@@ -275,6 +278,75 @@ async def get_my_tickets(
         )
         for (t, message_count, last_message_at) in rows
     ]
+
+
+@router.patch("/{ticket_id}/close", response_model=TicketResponse)
+async def close_ticket(
+    ticket_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Закриття тікета. Тільки представник магазину (власник/менеджер).
+    status → 'closed', після чого у фоні (BackgroundTasks) Gemini генерує
+    ai_summary — коротке резюме всієї переписки, щоб власник/модератор
+    одразу бачив суть проблеми та прийняте рішення.
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    ticket, reason = await _get_ticket_with_access(db, ticket_id, user)
+    if not ticket:
+        code = 404 if reason == "Тікет не знайдено" else 403
+        raise HTTPException(status_code=code, detail=reason)
+
+    # Лиш клієнт-автор не може закривати тікет — тільки магазин:
+    # менеджер або власник (supplier), що має доступ до цього магазину.
+    if ticket.customer_id == user.id and not await _user_manages_supplier(
+        db, user.id, ticket.supplier_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Закрити тікет може лише менеджер або власник магазину",
+        )
+
+    if ticket.status == "closed":
+        raise HTTPException(status_code=400, detail="Тікет уже закрито")
+
+    ticket.status = "closed"
+    ticket.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(ticket)
+
+    # Background Task: AI-резюме не блокує відповідь клієнту.
+    # Сервіс сам відкриє власну сесію БД (сесія запиту вже закриється).
+    background_tasks.add_task(ai_support_service.generate_ticket_summary, ticket.id)
+
+    logger.info("Тікет #%s закрито user=%s. AI-резюме поставлено у фонову чергу.", ticket.id, user.id)
+
+    return TicketResponse(
+        id=ticket.id,
+        order_id=ticket.order_id,
+        customer_id=ticket.customer_id,
+        supplier_id=ticket.supplier_id,
+        assigned_manager_id=ticket.assigned_manager_id,
+        status=ticket.status,
+        topic=ticket.topic,
+        ai_summary=ticket.ai_summary,
+        created_at=ticket.created_at,
+        updated_at=ticket.updated_at,
+        message_count=0,
+        last_message_at=None,
+    )
 
 
 @router.post("/{ticket_id}/messages", response_model=TicketMessageResponse, status_code=201)

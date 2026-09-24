@@ -39,7 +39,7 @@ from services import (
     payout_service, publisher_service,
     omnichannel_service as ads_service # <-- ОНОВЛЕНО
 )
-from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession, ensure_supplier_status_timestamps, ensure_user_settings_columns, ensure_supplier_telegram_source_columns, ensure_supplier_parsing_status, ensure_ai_categorization_rules_table, ensure_supplier_history_log_table, ensure_supplier_showcase_columns, ensure_supplier_managers_permissions_columns, ensure_wallet_tables, ensure_ticket_tables
+from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession, ensure_supplier_status_timestamps, ensure_user_settings_columns, ensure_supplier_telegram_source_columns, ensure_supplier_parsing_status, ensure_ai_categorization_rules_table, ensure_supplier_history_log_table, ensure_supplier_showcase_columns, ensure_supplier_managers_permissions_columns, ensure_wallet_tables, ensure_ticket_tables, ensure_ticket_ai_columns
 from services.ai_queue_worker import start_ai_product_queue
 from database.models import * # (Імпортуємо все)
 from config_reader import config
@@ -119,6 +119,10 @@ async def startup_event():
         await ensure_ticket_tables()
     except Exception as e:
         logger.error("Не вдалося створити таблиці support_tickets/ticket_messages: %s", e, exc_info=True)
+    try:
+        await ensure_ticket_ai_columns()
+    except Exception as e:
+        logger.error("Не вдалося додати AI-колонки тікетів (ai_summary/media_url/is_transcribed): %s", e, exc_info=True)
     try:
         await start_ai_product_queue()
     except Exception as e:

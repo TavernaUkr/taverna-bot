@@ -1584,6 +1584,8 @@ export async function createAdminAiRule(
   );
 }
 
+// --- Тікети підтримки (B2B чат менеджера з клієнтами) ------------------------
+
 /** DELETE /api/v1/admin/ai-rules/{id} — видалити правило. */
 export async function deleteAdminAiRule(
   ruleId: number,
@@ -1594,5 +1596,98 @@ export async function deleteAdminAiRule(
     `${API_BASE_URL}/api/v1/admin/ai-rules/${ruleId}${params}`,
     "Не вдалося видалити правило",
     adminTelegramHeaders()
+  );
+}
+
+export const TICKETS_ENDPOINT = `${API_BASE_URL}/api/v1/tickets`;
+
+/** Тікет підтримки з нашого FastAPI (api_models.TicketResponse). */
+export interface BackendTicket {
+  id: number;
+  order_id?: number;
+  customer_id: number;
+  supplier_id: number;
+  status: string;                 // 'ai_handling' | 'escalated' | 'closed'
+  topic: string;                  // 'delivery' | 'refund' | 'question' | 'other'
+  ai_summary?: string;           // 🤖 Коротке резюме від AI після закриття
+  created_at: string;
+  updated_at?: string;
+  message_count?: number;
+  last_message_at?: string;
+  assigned_manager_id?: number | null;
+}
+
+/** Одне повідомлення тікета (api_models.TicketMessageResponse). */
+export interface BackendMessage {
+  id: number;
+  ticket_id: number;
+  sender_id?: number | null;
+  sender_role: string;            // 'customer' | 'manager' | 'supplier' | 'ai_bot'
+  text: string;
+  is_read?: boolean;
+  media_url?: string;             // Посилання на файл (голосове/кружечок)
+  is_transcribed: boolean;        // Чи розшифровано голосове
+  created_at: string;
+}
+
+/** Заголовок авторизації з initData Telegram Mini App (Bearer). */
+function tgAuthHeaders(): Record<string, string> {
+  const initData =
+    typeof window !== "undefined"
+      ? String(
+          (window as any).Telegram?.WebApp?.initData ||
+            (window as any).__TAVERNA_INIT_DATA__ ||
+            sessionStorage.getItem("taverna_tg_init_data") ||
+            ""
+        )
+      : "";
+  const headers: Record<string, string> = {};
+  if (initData) {
+    headers.Authorization = `Bearer ${initData}`;
+  }
+  return headers;
+}
+
+/** GET /api/v1/tickets/me?role=manager|customer — тікети поточного юзера. */
+export async function getMyTickets(role: "manager" | "customer"): Promise<BackendTicket[]> {
+  const data = await backendGet<BackendTicket[] | BackendTicket>(
+    `${TICKETS_ENDPOINT}/me?role=${encodeURIComponent(role)}`,
+    tgAuthHeaders()
+  );
+  if (Array.isArray(data)) return data.filter(Boolean);
+  if (data && typeof data === "object" && "id" in data) return [data];
+  return [];
+}
+
+/** GET /api/v1/tickets/{ticketId}/messages — історія переписки (старіші → новіші). */
+export async function getTicketMessages(ticketId: number): Promise<BackendMessage[]> {
+  const data = await backendGet<BackendMessage[]>(
+    `${TICKETS_ENDPOINT}/${ticketId}/messages`,
+    tgAuthHeaders()
+  );
+  return Array.isArray(data) ? data.filter(Boolean) : [];
+}
+
+/** POST /api/v1/tickets/{ticketId}/messages — написати повідомлення в тікет. */
+export async function sendTicketMessage(
+  ticketId: number,
+  text: string,
+  role: string
+): Promise<BackendMessage> {
+  return backendPost<BackendMessage>(
+    `${TICKETS_ENDPOINT}/${ticketId}/messages`,
+    { text, sender_role: role },
+    "Не вдалося надіслати повідомлення",
+    tgAuthHeaders()
+  );
+}
+
+/** PATCH /api/v1/tickets/{ticketId}/close — закрити тікет (менеджер/власник). */
+export async function closeTicket(ticketId: number): Promise<BackendTicket> {
+  return backendPatch<BackendTicket>(
+    `${TICKETS_ENDPOINT}/${ticketId}/close`,
+    {},
+    "Не вдалося закрити тікет",
+    tgAuthHeaders()
   );
 }

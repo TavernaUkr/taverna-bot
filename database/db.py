@@ -428,6 +428,51 @@ async def ensure_ticket_tables() -> None:
         await conn.run_sync(_ensure)
 
 
+async def ensure_ticket_ai_columns() -> None:
+    """
+    Live-режим: AI-колонки омніканальних тікетів.
+    - support_tickets.ai_summary (Text) — резюме після закриття;
+    - ticket_messages.media_url (String) — файл голосового/кружечка;
+    - ticket_messages.is_transcribed (Boolean) — чи розшифровано голосове.
+    """
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        insp = inspect(sync_conn)
+        dialect = sync_conn.dialect.name
+        bool_default = "TRUE" if dialect == "postgresql" else "1"
+        added = 0
+
+        if "support_tickets" in set(insp.get_table_names()):
+            cols = {col["name"] for col in insp.get_columns("support_tickets")}
+            if "ai_summary" not in cols:
+                sync_conn.execute(text(
+                    "ALTER TABLE support_tickets ADD COLUMN ai_summary TEXT"
+                ))
+                added += 1
+
+        if "ticket_messages" in set(insp.get_table_names()):
+            cols = {col["name"] for col in insp.get_columns("ticket_messages")}
+            if "media_url" not in cols:
+                sync_conn.execute(text(
+                    "ALTER TABLE ticket_messages ADD COLUMN media_url VARCHAR"
+                ))
+                added += 1
+            if "is_transcribed" not in cols:
+                sync_conn.execute(text(
+                    "ALTER TABLE ticket_messages ADD COLUMN is_transcribed "
+                    f"BOOLEAN DEFAULT {bool_default} NOT NULL"
+                ))
+                added += 1
+
+        if added:
+            logger.info("Додано %s AI-колонок у таблиці тікетів.", added)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
 async def ensure_user_wallet(user_id: int, session: AsyncSession) -> "Wallet":
     """
     Гаманець-гаран: якщо у юзера немає гаманця — створює з нульовими
@@ -488,3 +533,4 @@ async def init_db() -> None:
     await ensure_supplier_managers_permissions_columns()
     await ensure_wallet_tables()
     await ensure_ticket_tables()
+    await ensure_ticket_ai_columns()

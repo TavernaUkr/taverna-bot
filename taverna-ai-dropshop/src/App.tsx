@@ -27,6 +27,7 @@ import OrdersHistoryPage from "./pages/OrdersHistoryPage";
 import SupplierStoreOrdersHistory from "./pages/SupplierStoreOrdersHistory";
 import MyShops from "./pages/MyShops";
 import ManagerChats from "./pages/ManagerChats";
+import SupportPanel from "./pages/SupportPanel";
 import WalletAccount from "./pages/WalletAccount";
 import SupportChat from "./components/SupportChat";
 import NotFound from "./pages/NotFound";
@@ -127,6 +128,8 @@ function AnimatedRoutes() {
             <Route path="/store-orders/:supplierId" element={<SupplierStoreOrders />} />
             <Route path="/my-shops" element={<MyShops />} />
             <Route path="/manager-chats" element={<ManagerChats />} />
+            {/* B2B Панель Підтримки: тікети клієнтів + AI-резюме (менеджер/власник) */}
+            <Route path="/support/panel" element={<SupportPanel />} />
             <Route path="/supplier-balance" element={<Navigate to="/wallet" replace />} />
             <Route path="/supplier-balance/:supplierId" element={<ShopWalletRedirect />} />
             <Route path="/orders-history" element={<OrdersHistoryPage />} />

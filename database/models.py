@@ -548,6 +548,9 @@ class SupportTicket(Base):
     status = Column(String(20), nullable=False, default="ai_handling", index=True)  # 'ai_handling' | 'escalated' | 'closed'
     topic = Column(String(50), nullable=False, index=True)  # 'delivery' | 'refund' | 'question' | 'other'
 
+    # Резюме від AI після закриття тікета (генерується у BackgroundTasks)
+    ai_summary = Column(Text, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -575,6 +578,11 @@ class TicketMessage(Base):
 
     text = Column(Text, nullable=False)
     is_read = Column(Boolean, nullable=False, default=False)
+
+    # Посилання на файл (якщо це голосове/кружечок) — підготовка під транскрипцію
+    media_url = Column(String, nullable=True)
+    # Чи розшифровано голосове (після транскрипції Gemini → True)
+    is_transcribed = Column(Boolean, nullable=False, default=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
