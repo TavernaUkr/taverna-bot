@@ -21,6 +21,10 @@ from sqlalchemy.exc import IntegrityError
 from api_models import (
     ManagerPermissions,
     ManagerPermissionsUpdateRequest,
+    ManagerCommSettings,
+    ManagerCommSettingsUpdateRequest,
+    ManagerContractRates,
+    ManagerContractUpdateRequest,
     PartnerRegisterRequest,
     PartnerRegisterResponse,
     PublicSupplierResponse,
@@ -807,6 +811,22 @@ def _display_name(user: User) -> str:
     return "Користувач"
 
 
+def _rates_from_row(rate_per_order: Any, rate_per_dispute: Any) -> ManagerContractRates:
+    """Тарифи менеджера з рядка supplier_managers (захист від NULL/сміття)."""
+    return ManagerContractRates(
+        rate_per_order=int(rate_per_order or 0),
+        rate_per_dispute=int(rate_per_dispute or 0),
+    )
+
+
+def _comm_from_row(chat_channel: Any, receive_notifications: Any) -> ManagerCommSettings:
+    """Комунікаційні налаштування з рядка supplier_managers."""
+    return ManagerCommSettings(
+        chat_channel=chat_channel if chat_channel in ("webapp", "telegram") else "webapp",
+        receive_notifications=bool(receive_notifications),
+    )
+
+
 @router.get("/me/managers", response_model=List[SupplierManagerResponse])
 async def get_my_managers(
     db: AsyncSession = Depends(get_db),
@@ -824,13 +844,17 @@ async def get_my_managers(
     if not supplier:
         raise HTTPException(status_code=404, detail="Магазин не знайдено")
 
-    # JOIN User × права з таблиці-посередника: одним запитом дістаємо
-    # і дані користувача, і його матрицю прав.
+    # JOIN User × права + тарифи + комунікація з таблиці-посередника:
+    # одним запитом дістаємо і дані користувача, і весь його «контракт».
     stmt = (
         select(User, supplier_managers.c.can_edit_info,
                supplier_managers.c.can_manage_products,
                supplier_managers.c.can_view_balance,
-               supplier_managers.c.can_resolve_disputes)
+               supplier_managers.c.can_resolve_disputes,
+               supplier_managers.c.rate_per_order,
+               supplier_managers.c.rate_per_dispute,
+               supplier_managers.c.chat_channel,
+               supplier_managers.c.receive_notifications)
         .join(supplier_managers, supplier_managers.c.user_id == User.id)
         .where(supplier_managers.c.supplier_id == supplier.id)
         .order_by(User.id)
@@ -850,8 +874,12 @@ async def get_my_managers(
                 can_view_balance=bool(can_view_balance),
                 can_resolve_disputes=bool(can_resolve_disputes),
             ),
+            rates=_rates_from_row(rate_per_order, rate_per_dispute),
+            comm_settings=_comm_from_row(chat_channel, receive_notifications),
         )
-        for (manager, can_edit_info, can_manage_products, can_view_balance, can_resolve_disputes) in rows
+        for (manager, can_edit_info, can_manage_products, can_view_balance,
+             can_resolve_disputes, rate_per_order, rate_per_dispute,
+             chat_channel, receive_notifications) in rows
     ]
 
 
@@ -956,6 +984,8 @@ def _to_detail_response(
     product_count: int,
     completed_products: int,
     my_permissions: Optional[ManagerPermissions] = None,
+    my_rates: Optional[ManagerContractRates] = None,
+    my_comm_settings: Optional[ManagerCommSettings] = None,
 ) -> SupplierDetailResponse:
     return SupplierDetailResponse(
         id=supplier.id,
@@ -990,6 +1020,9 @@ def _to_detail_response(
         product_count=product_count,
         completed_products=completed_products,
         deletion_requested=_deletion_requested(supplier),
+        my_permissions=my_permissions,
+        my_rates=my_rates,
+        my_comm_settings=my_comm_settings,
         created_at=getattr(supplier, "created_at", None),
         approved_at=getattr(supplier, "approved_at", None),
     )
@@ -1015,6 +1048,9 @@ async def get_supplier_by_id(
 
     # RBAC: права поточного менеджера (owner'у повертаємо None — можна все).
     my_permissions: Optional[ManagerPermissions] = None
+    # B2B-контракт менеджера: тарифи + комунікація (owner — None).
+    my_rates: Optional[ManagerContractRates] = None
+    my_comm_settings: Optional[ManagerCommSettings] = None
     if role == "manager":
         row = (
             await db.execute(
@@ -1023,6 +1059,10 @@ async def get_supplier_by_id(
                     supplier_managers.c.can_manage_products,
                     supplier_managers.c.can_view_balance,
                     supplier_managers.c.can_resolve_disputes,
+                    supplier_managers.c.rate_per_order,
+                    supplier_managers.c.rate_per_dispute,
+                    supplier_managers.c.chat_channel,
+                    supplier_managers.c.receive_notifications,
                 ).where(
                     supplier_managers.c.supplier_id == supplier.id,
                     supplier_managers.c.user_id == _user.id,
@@ -1036,9 +1076,14 @@ async def get_supplier_by_id(
                 can_view_balance=bool(row[2]),
                 can_resolve_disputes=bool(row[3]),
             )
+            my_rates = _rates_from_row(row[4], row[5])
+            my_comm_settings = _comm_from_row(row[6], row[7])
 
     product_count, completed_products = await _product_stats(db, supplier.id)
-    return _to_detail_response(supplier, role, product_count, completed_products, my_permissions)
+    return _to_detail_response(
+        supplier, role, product_count, completed_products,
+        my_permissions, my_rates, my_comm_settings,
+    )
 
 
 @router.patch("/{supplier_id}", response_model=SupplierDetailResponse)
@@ -1286,6 +1331,170 @@ async def update_my_manager_permissions(
         perms.can_view_balance, perms.can_resolve_disputes,
     )
     return {"status": "ok", "permissions": perms}
+
+
+@router.patch("/me/managers/{user_id}/contract")
+async def update_my_manager_contract(
+    user_id: int,
+    payload: ManagerContractUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Оновлює B2B-контракт менеджера: тарифи (rate_per_order, rate_per_dispute)
+    та/або права. PATCH /api/v1/suppliers/me/managers/{user_id}/contract
+    Доступно ЛИШЕ власнику магазину (supplier.user_id == user.id).
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    owner = await _get_user_by_telegram_id(db, telegram_id)
+    supplier = await _get_supplier_for_telegram(db, telegram_id)
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+    if not owner or supplier.user_id != owner.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Змінювати контракт менеджера може лише власник магазину.",
+        )
+    if owner.id == user_id:
+        raise HTTPException(status_code=400, detail="Не можна змінювати контракт самого себе.")
+
+    rates = payload.rates
+    perms = payload.permissions
+    if not rates and not perms:
+        raise HTTPException(
+            status_code=400,
+            detail="Передайте rates та/або permissions для оновлення.",
+        )
+
+    # Збираємо VALUES тільки з фактично переданих полів (partial update).
+    values: dict[str, Any] = {}
+    if rates:
+        values["rate_per_order"] = rates.rate_per_order
+        values["rate_per_dispute"] = rates.rate_per_dispute
+    if perms:
+        values["can_edit_info"] = perms.can_edit_info
+        values["can_manage_products"] = perms.can_manage_products
+        values["can_view_balance"] = perms.can_view_balance
+        values["can_resolve_disputes"] = perms.can_resolve_disputes
+
+    # ПРЯМИЙ атомарний UPDATE таблиці-посередника — без ORM-колекцій.
+    stmt = (
+        update(supplier_managers)
+        .where(supplier_managers.c.supplier_id == supplier.id)
+        .where(supplier_managers.c.user_id == user_id)
+        .values(**values)
+    )
+    result = await db.execute(stmt)
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="Менеджера з таким user_id у вашому магазині немає")
+
+    await db.commit()
+    logger.info(
+        "Оновлено контракт менеджера user_id=%s у supplier_id=%s (власник tg=%s): "
+        "rate_per_order=%s, rate_per_dispute=%s, perms=%s",
+        user_id, supplier.id, telegram_id,
+        values.get("rate_per_order"), values.get("rate_per_dispute"),
+        perms.model_dump() if perms else None,
+    )
+    return {
+        "status": "ok",
+        "rates": rates.model_dump() if rates else None,
+        "permissions": perms.model_dump() if perms else None,
+    }
+
+
+@router.patch("/me/managers/{user_id}/communication")
+async def update_my_manager_communication(
+    user_id: int,
+    payload: ManagerCommSettingsUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Оновлює комунікаційні налаштування менеджера (chat_channel,
+    receive_notifications). PATCH /api/v1/suppliers/me/managers/{user_id}/communication
+    Доступно самому менеджеру (user_id == свій id) АБО власнику магазину.
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    me = await _get_user_by_telegram_id(db, telegram_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Користувача не знайдено")
+
+    is_self = me.id == user_id
+    supplier: Optional[Supplier] = None
+
+    if is_self:
+        # Сам менеджер міняє СВОЇ налаштування: шукаємо перший магазин,
+        # де він менеджер (сортування як у /me/shops: активні першими).
+        # _get_supplier_for_telegram тут НЕ підходить — він шукає магазин
+        # лише за власником (user_id / contact_telegram_id).
+        supplier = (
+            await db.execute(
+                select(Supplier)
+                .join(supplier_managers, supplier_managers.c.supplier_id == Supplier.id)
+                .where(
+                    supplier_managers.c.user_id == me.id,
+                    Supplier.status != SupplierStatus.deleted,
+                )
+                .order_by(
+                    (Supplier.status == SupplierStatus.active).desc(),
+                    Supplier.id.desc(),
+                )
+                .limit(1)
+            )
+        ).scalars().first()
+        if not supplier:
+            raise HTTPException(status_code=404, detail="Ви не є менеджером жодного магазину")
+    else:
+        # Хтось інший (очікувано власник) міняє налаштування менеджера user_id.
+        supplier = await _get_supplier_for_telegram(db, telegram_id)
+        if not supplier:
+            raise HTTPException(status_code=404, detail="Магазин не знайдено")
+        # _get_supplier_for_telegram шукає і за contact_telegram_id —
+        # контакт може бути не власником, тому перевіряємо строго.
+        if supplier.user_id != me.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Змінювати канал комунікації може лише сам менеджер або власник магазину.",
+            )
+
+    comm = payload.comm_settings
+
+    # ПРЯМИЙ атомарний UPDATE таблиці-посередника — без ORM-колекцій.
+    stmt = (
+        update(supplier_managers)
+        .where(supplier_managers.c.supplier_id == supplier.id)
+        .where(supplier_managers.c.user_id == user_id)
+        .values(
+            chat_channel=comm.chat_channel,
+            receive_notifications=comm.receive_notifications,
+        )
+    )
+    result = await db.execute(stmt)
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="Менеджера з таким user_id у вашому магазині немає")
+
+    await db.commit()
+    logger.info(
+        "Оновлено комунікацію менеджера user_id=%s у supplier_id=%s (tg=%s, %s): "
+        "chat_channel=%s, receive_notifications=%s",
+        user_id, supplier.id, telegram_id,
+        "сам менеджер" if is_self else "власник",
+        comm.chat_channel, comm.receive_notifications,
+    )
+    return {"status": "ok", "comm_settings": comm.model_dump()}
 
 
 def _telegram_id_from_authorization(authorization: Optional[str]) -> Optional[int]:

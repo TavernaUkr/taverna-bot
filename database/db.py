@@ -364,8 +364,30 @@ async def ensure_supplier_managers_permissions_columns() -> None:
                     f"BOOLEAN DEFAULT {default} NOT NULL"
                 ))
                 added += 1
+        # B2B-економіка: тарифікація послуг менеджера (що платить постачальник).
+        # Суми — цілі числа (копійки/центи).
+        for col_name in ("rate_per_order", "rate_per_dispute"):
+            if col_name not in cols:
+                sync_conn.execute(text(
+                    f"ALTER TABLE supplier_managers ADD COLUMN {col_name} "
+                    f"INTEGER DEFAULT 0 NOT NULL"
+                ))
+                added += 1
+        # Omnichannel: налаштування комунікації менеджера.
+        if "chat_channel" not in cols:
+            sync_conn.execute(text(
+                "ALTER TABLE supplier_managers ADD COLUMN chat_channel "
+                "VARCHAR(20) DEFAULT 'webapp' NOT NULL"
+            ))
+            added += 1
+        if "receive_notifications" not in cols:
+            sync_conn.execute(text(
+                f"ALTER TABLE supplier_managers ADD COLUMN receive_notifications "
+                f"BOOLEAN DEFAULT {bool_default} NOT NULL"
+            ))
+            added += 1
         if added:
-            logger.info("Додано %s RBAC-колонок у supplier_managers.", added)
+            logger.info("Додано %s колонок у supplier_managers (RBAC + B2B + comm).", added)
 
     async with engine.begin() as conn:
         await conn.run_sync(_ensure)

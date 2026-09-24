@@ -117,6 +117,13 @@ supplier_managers = Table(
     Column('can_manage_products', Boolean, nullable=False, default=True),
     Column('can_view_balance', Boolean, nullable=False, default=False),
     Column('can_resolve_disputes', Boolean, nullable=False, default=False),
+    # --- B2B-економіка: тарифікація послуг менеджера (що платить постачальник) ---
+    # Суми в копійках/центах, щоб уникнути дробових чисел у фінансах.
+    Column('rate_per_order', Integer, nullable=False, default=0),   # оплата за обробку замовлення
+    Column('rate_per_dispute', Integer, nullable=False, default=0),  # оплата за вирішення спору
+    # --- Omnichannel: як менеджер отримує комунікацію ---
+    Column('chat_channel', String(20), nullable=False, default='webapp'),  # 'webapp' | 'telegram'
+    Column('receive_notifications', Boolean, nullable=False, default=True),
 )
 
 # --- Моделі ---

@@ -1,6 +1,6 @@
 # api_models.py
 from pydantic import BaseModel, EmailStr, HttpUrl, Field, ConfigDict, field_serializer
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime, timezone
 from database.models import (
     SupplierType, SupplierStatus, OrderStatus, UserRole, PayoutMethod,
@@ -401,6 +401,18 @@ class ManagerPermissions(BaseModel):
     can_resolve_disputes: bool = False
 
 
+class ManagerContractRates(BaseModel):
+    """Тарифікація послуг менеджера (B2B-економіка). Суми в копійках/центах."""
+    rate_per_order: int = Field(default=0, ge=0, description="Оплата за обробку замовлення")
+    rate_per_dispute: int = Field(default=0, ge=0, description="Оплата за вирішення спору")
+
+
+class ManagerCommSettings(BaseModel):
+    """Omnichannel: як менеджер працює з комунікацією."""
+    chat_channel: Literal["webapp", "telegram"] = "webapp"
+    receive_notifications: bool = True
+
+
 class SupplierManagerResponse(BaseModel):
     """Менеджер магазину для GET /suppliers/me/managers."""
     user_id: int
@@ -410,11 +422,30 @@ class SupplierManagerResponse(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     permissions: ManagerPermissions = Field(default_factory=ManagerPermissions)
+    rates: ManagerContractRates = Field(default_factory=ManagerContractRates)
+    comm_settings: ManagerCommSettings = Field(default_factory=ManagerCommSettings)
 
 
 class ManagerPermissionsUpdateRequest(BaseModel):
     """Тіло PATCH /suppliers/me/managers/{user_id}/permissions."""
     permissions: ManagerPermissions
+
+
+class ManagerContractUpdateRequest(BaseModel):
+    """
+    Тіло PATCH /suppliers/me/managers/{user_id}/contract.
+    Доступно ЛИШЕ власнику: тарифи + права (все опційне, крім хоча б одного поля).
+    """
+    rates: Optional[ManagerContractRates] = None
+    permissions: Optional[ManagerPermissions] = None
+
+
+class ManagerCommSettingsUpdateRequest(BaseModel):
+    """
+    Тіло PATCH /suppliers/me/managers/{user_id}/communication.
+    Доступно самому менеджеру (щоб обрати канал) або власнику.
+    """
+    comm_settings: ManagerCommSettings
 
 
 class SupplierInviteLinkResponse(BaseModel):
@@ -495,6 +526,10 @@ class SupplierDetailResponse(UtcJsonDates):
     # RBAC: власні права поточного менеджера (owner отримує None —
     # йому дозволено все). Заповнюється лише в GET /suppliers/{id}.
     my_permissions: Optional[ManagerPermissions] = None
+    # B2B-контракт поточного менеджера: тарифи та комунікація
+    # (owner отримує None — він не менеджер). Заповнюється лише в GET /suppliers/{id}.
+    my_rates: Optional[ManagerContractRates] = None
+    my_comm_settings: Optional[ManagerCommSettings] = None
     created_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
 
