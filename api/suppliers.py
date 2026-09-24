@@ -19,6 +19,8 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from api_models import (
+    ManagerPermissions,
+    ManagerPermissionsUpdateRequest,
     PartnerRegisterRequest,
     PartnerRegisterResponse,
     PublicSupplierResponse,
@@ -810,7 +812,7 @@ async def get_my_managers(
     db: AsyncSession = Depends(get_db),
     authorization: Optional[str] = Header(default=None),
 ):
-    """Список менеджерів поточного магазину (telegram_id + імена)."""
+    """Список менеджерів поточного магазину (telegram_id, імена + RBAC-права)."""
     telegram_id = _telegram_id_from_authorization(authorization)
     if not telegram_id:
         raise HTTPException(
@@ -822,13 +824,18 @@ async def get_my_managers(
     if not supplier:
         raise HTTPException(status_code=404, detail="Магазин не знайдено")
 
+    # JOIN User × права з таблиці-посередника: одним запитом дістаємо
+    # і дані користувача, і його матрицю прав.
     stmt = (
-        select(User)
+        select(User, supplier_managers.c.can_edit_info,
+               supplier_managers.c.can_manage_products,
+               supplier_managers.c.can_view_balance,
+               supplier_managers.c.can_resolve_disputes)
         .join(supplier_managers, supplier_managers.c.user_id == User.id)
         .where(supplier_managers.c.supplier_id == supplier.id)
         .order_by(User.id)
     )
-    managers = list((await db.execute(stmt)).scalars().all())
+    rows = (await db.execute(stmt)).all()
     return [
         SupplierManagerResponse(
             user_id=manager.id,
@@ -837,8 +844,14 @@ async def get_my_managers(
             full_name=_display_name(manager),
             first_name=manager.first_name,
             last_name=manager.last_name,
+            permissions=ManagerPermissions(
+                can_edit_info=bool(can_edit_info),
+                can_manage_products=bool(can_manage_products),
+                can_view_balance=bool(can_view_balance),
+                can_resolve_disputes=bool(can_resolve_disputes),
+            ),
         )
-        for manager in managers
+        for (manager, can_edit_info, can_manage_products, can_view_balance, can_resolve_disputes) in rows
     ]
 
 
@@ -942,6 +955,7 @@ def _to_detail_response(
     role: str,
     product_count: int,
     completed_products: int,
+    my_permissions: Optional[ManagerPermissions] = None,
 ) -> SupplierDetailResponse:
     return SupplierDetailResponse(
         id=supplier.id,
@@ -999,8 +1013,32 @@ async def get_supplier_by_id(
     if not supplier:
         raise HTTPException(status_code=403, detail="Немає доступу до цього магазину")
 
+    # RBAC: права поточного менеджера (owner'у повертаємо None — можна все).
+    my_permissions: Optional[ManagerPermissions] = None
+    if role == "manager":
+        row = (
+            await db.execute(
+                select(
+                    supplier_managers.c.can_edit_info,
+                    supplier_managers.c.can_manage_products,
+                    supplier_managers.c.can_view_balance,
+                    supplier_managers.c.can_resolve_disputes,
+                ).where(
+                    supplier_managers.c.supplier_id == supplier.id,
+                    supplier_managers.c.user_id == _user.id,
+                )
+            )
+        ).first()
+        if row:
+            my_permissions = ManagerPermissions(
+                can_edit_info=bool(row[0]),
+                can_manage_products=bool(row[1]),
+                can_view_balance=bool(row[2]),
+                can_resolve_disputes=bool(row[3]),
+            )
+
     product_count, completed_products = await _product_stats(db, supplier.id)
-    return _to_detail_response(supplier, role, product_count, completed_products)
+    return _to_detail_response(supplier, role, product_count, completed_products, my_permissions)
 
 
 @router.patch("/{supplier_id}", response_model=SupplierDetailResponse)
@@ -1186,6 +1224,68 @@ async def delete_my_manager(
         user_id, supplier.id, telegram_id,
     )
     return {"status": "ok"}
+
+
+@router.patch("/me/managers/{user_id}/permissions")
+async def update_my_manager_permissions(
+    user_id: int,
+    payload: ManagerPermissionsUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Оновлює матрицю прав менеджера (RBAC).
+    PATCH /api/v1/suppliers/me/managers/{user_id}/permissions
+    Доступно ЛИШЕ власнику магазину (supplier.user_id == user.id).
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    # Перевірка власника: _get_supplier_for_telegram шукає і за
+    # contact_telegram_id, і за user_id — контакт може бути не власником.
+    owner = await _get_user_by_telegram_id(db, telegram_id)
+    supplier = await _get_supplier_for_telegram(db, telegram_id)
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+    if not owner or supplier.user_id != owner.id:
+        raise HTTPException(
+            status_code=403,
+            detail="Керувати правами менеджерів може лише власник магазину.",
+        )
+    if owner.id == user_id:
+        raise HTTPException(status_code=400, detail="Не можна змінювати власні права.")
+
+    perms = payload.permissions
+
+    # ПРЯМИЙ атомарний UPDATE таблиці-посередника — без ORM-колекцій.
+    stmt = (
+        update(supplier_managers)
+        .where(supplier_managers.c.supplier_id == supplier.id)
+        .where(supplier_managers.c.user_id == user_id)
+        .values(
+            can_edit_info=perms.can_edit_info,
+            can_manage_products=perms.can_manage_products,
+            can_view_balance=perms.can_view_balance,
+            can_resolve_disputes=perms.can_resolve_disputes,
+        )
+    )
+    result = await db.execute(stmt)
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="Менеджера з таким user_id у вашому магазині немає")
+
+    await db.commit()
+    logger.info(
+        "Оновлено права менеджера user_id=%s у supplier_id=%s (власник tg=%s): "
+        "edit_info=%s, manage_products=%s, view_balance=%s, resolve_disputes=%s",
+        user_id, supplier.id, telegram_id,
+        perms.can_edit_info, perms.can_manage_products,
+        perms.can_view_balance, perms.can_resolve_disputes,
+    )
+    return {"status": "ok", "permissions": perms}
 
 
 def _telegram_id_from_authorization(authorization: Optional[str]) -> Optional[int]:

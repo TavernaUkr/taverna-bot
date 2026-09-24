@@ -88,6 +88,7 @@ function StoreCard({
   shop,
   canEdit,
   isAdmin,
+  onOpen,
   onSettings,
   onWallet,
   onPromo,
@@ -99,6 +100,7 @@ function StoreCard({
   shop: ShopInfo;
   canEdit: boolean;
   isAdmin: boolean;
+  onOpen: (shop: ShopInfo) => void;
   onSettings: (shop: ShopInfo) => void;
   onWallet: (shop: ShopInfo) => void;
   onPromo: (shop: ShopInfo) => void;
@@ -108,7 +110,10 @@ function StoreCard({
   onDelete: (shop: ShopInfo) => void;
 }) {
   return (
-    <Card className="overflow-hidden">
+    <Card
+      className="overflow-hidden cursor-pointer transition-all hover:border-primary/40 active:scale-[0.99]"
+      onClick={() => onOpen(shop)}
+    >
       <CardContent className="p-4">
         <div className="flex items-start gap-3 mb-3">
           <Avatar className="h-14 w-14 rounded-xl">
@@ -163,13 +168,19 @@ function StoreCard({
             </div>
           </div>
 
-          {canEdit && (
+          {/* Шестерня = технічні налаштування. Лише для власника:
+              менеджер працює з замовленнями/відгуками, але не налаштовує магазин. */}
+          {shop.role === "owner" && (
             <Button
               size="icon"
               variant="ghost"
               className="shrink-0 h-10 w-10 rounded-full hover:bg-primary/10"
-              onClick={() => onSettings(shop)}
-              title="Редагувати магазин"
+              onClick={(e) => {
+                // Ловимо клік, щоб він НЕ спрацював по всій картці (onOpen)
+                e.stopPropagation();
+                onSettings(shop);
+              }}
+              title="Налаштування магазину"
             >
               <Settings className="h-5 w-5 text-primary" />
             </Button>
@@ -180,7 +191,10 @@ function StoreCard({
           size="sm"
           variant="outline"
           className="w-full h-9 mb-2 border-amber-500/40 text-amber-600 hover:bg-amber-500/10 hover:text-amber-600"
-          onClick={() => onWallet(shop)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onWallet(shop);
+          }}
         >
           <Wallet className="h-3.5 w-3.5 mr-1.5" />
           Баланс магазину
@@ -190,7 +204,10 @@ function StoreCard({
           size="sm"
           variant="premium"
           className="w-full h-9 mb-2"
-          onClick={() => onPromo(shop)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onPromo(shop);
+          }}
         >
           <Megaphone className="h-3.5 w-3.5 mr-1.5" />
           Просування
@@ -201,7 +218,10 @@ function StoreCard({
             size="sm"
             variant="outline"
             className="flex-1 h-9"
-            onClick={() => onOrders(shop)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOrders(shop);
+            }}
           >
             <ShoppingCart className="h-3.5 w-3.5 mr-1.5" />
             Замовлення
@@ -210,7 +230,10 @@ function StoreCard({
             size="sm"
             variant="outline"
             className="flex-1 h-9"
-            onClick={() => onReviews(shop)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onReviews(shop);
+            }}
           >
             <MessageSquare className="h-3.5 w-3.5 mr-1.5" />
             Відгуки
@@ -224,7 +247,10 @@ function StoreCard({
                 size="sm"
                 variant="outline"
                 className="flex-1 h-9 border-indigo-300 text-indigo-600 hover:bg-indigo-50 hover:text-indigo-700 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-900/30"
-                onClick={() => onTransfer(shop)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onTransfer(shop);
+                }}
               >
                 <UserPlus className="h-3.5 w-3.5 mr-1.5" />
                 Передати права
@@ -235,7 +261,10 @@ function StoreCard({
               variant="outline"
               className={`${isAdmin ? "flex-1" : "w-full"} h-9 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30 border border-red-200 dark:border-red-800`}
               disabled={shop.deletion_requested}
-              onClick={() => onDelete(shop)}
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete(shop);
+              }}
             >
               <Trash2 className="h-3.5 w-3.5 mr-1.5" />
               {shop.deletion_requested ? "Заявку надіслано" : "Видалити магазин"}
@@ -468,6 +497,11 @@ export default function MyShops() {
                 shop={shop}
                 canEdit={canEditShop(shop)}
                 isAdmin={isAdmin}
+                // Головний клік по картці → РОБОЧА панель (замовлення магазину)
+                onOpen={(item) => {
+                  hapticSelection();
+                  navigate(`/store-orders/${item.id}`);
+                }}
                 onSettings={(item) => {
                   hapticSelection();
                   navigate(`/store-management/${item.id}`);

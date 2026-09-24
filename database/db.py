@@ -337,6 +337,40 @@ async def ensure_supplier_showcase_columns() -> None:
         await conn.run_sync(_ensure)
 
 
+async def ensure_supplier_managers_permissions_columns() -> None:
+    """Live-режим: RBAC-колонки прав у supplier_managers, якщо їх ще немає."""
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        insp = inspect(sync_conn)
+        if "supplier_managers" not in set(insp.get_table_names()):
+            return
+        cols = {col["name"] for col in insp.get_columns("supplier_managers")}
+        dialect = sync_conn.dialect.name
+        bool_default = "TRUE" if dialect == "postgresql" else "1"
+        added = 0
+        # Дефолти ідентичні Column(..., default=...) у models.py:
+        # can_edit_info=False, can_manage_products=True, решта False.
+        for col_name, default in (
+            ("can_edit_info", "FALSE"),
+            ("can_manage_products", bool_default),
+            ("can_view_balance", "FALSE"),
+            ("can_resolve_disputes", "FALSE"),
+        ):
+            if col_name not in cols:
+                sync_conn.execute(text(
+                    f"ALTER TABLE supplier_managers ADD COLUMN {col_name} "
+                    f"BOOLEAN DEFAULT {default} NOT NULL"
+                ))
+                added += 1
+        if added:
+            logger.info("Додано %s RBAC-колонок у supplier_managers.", added)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
 async def get_db() -> AsyncSession:
     """
     FastAPI "Dependency" для отримання сесії БД.
@@ -373,3 +407,4 @@ async def init_db() -> None:
     await ensure_ai_categorization_rules_table()
     await ensure_supplier_history_log_table()
     await ensure_supplier_showcase_columns()
+    await ensure_supplier_managers_permissions_columns()

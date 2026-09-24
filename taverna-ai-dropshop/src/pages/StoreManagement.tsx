@@ -5,7 +5,7 @@ import {
   Truck, RotateCcw, Settings, Loader2, Camera, Plus, X, Trash2,
   Clock, AlertTriangle, ChevronRight, Package, Upload,
   Bot, UserCog, Reply, MapPin, Shield, Info, Edit3, Wallet,
-  Link2, Share2, Copy
+  Link2, Share2, Copy, Settings2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,6 +17,10 @@ import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter,
+  DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
 import { SupplierBalanceCard } from "@/components/supplier/SupplierBalanceCard";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
@@ -26,9 +30,11 @@ import {
   getManagers,
   generateManagerInviteLink,
   removeManager,
+  updateManagerPermissions,
   getSupplierById,
   updateSupplier,
   type BackendSupplierManager,
+  type ManagerPermissions,
 } from "@/lib/backendApi";
 
 const WEEK_DAYS = [
@@ -90,6 +96,12 @@ export default function StoreManagement() {
   const [shopManagers, setShopManagers] = useState<BackendSupplierManager[]>([]);
   const [isManagersLoading, setIsManagersLoading] = useState(false);
   const [isRemovingManager, setIsRemovingManager] = useState<number | null>(null);
+  // RBAC: власні права поточного менеджера (owner'у сервер повертає null)
+  const [myPermissions, setMyPermissions] = useState<ManagerPermissions | null>(null);
+  // Модалка «Керування менеджером»
+  const [permissionsDialogFor, setPermissionsDialogFor] = useState<BackendSupplierManager | null>(null);
+  const [permissionsDraft, setPermissionsDraft] = useState<ManagerPermissions | null>(null);
+  const [isSavingPermissions, setIsSavingPermissions] = useState(false);
   const [inviteLink, setInviteLink] = useState<string | null>(null);
   const [isGeneratingInvite, setIsGeneratingInvite] = useState(false);
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
@@ -134,6 +146,8 @@ export default function StoreManagement() {
         const s = await getSupplierById(paramSupplierId);
         setSupplierId(String(s.id));
         setMyRole(s.role === "manager" ? "manager" : "owner");
+        // RBAC: зберігаємо власні права менеджера (owner отримує null)
+        setMyPermissions(s.my_permissions ?? null);
         setShopData({
           id: String(s.id),
           shop_name: s.store_name || "",
@@ -212,6 +226,56 @@ export default function StoreManagement() {
       toast.error(err?.message || "Не вдалося згенерувати посилання");
     } finally {
       setIsGeneratingInvite(false);
+    }
+  };
+
+  /** Відкриває модалку прав із поточними значеннями менеджера. */
+  const openPermissionsDialog = (m: BackendSupplierManager) => {
+    setPermissionsDialogFor(m);
+    setPermissionsDraft({
+      can_edit_info: m.permissions?.can_edit_info ?? false,
+      can_manage_products: m.permissions?.can_manage_products ?? true,
+      can_view_balance: m.permissions?.can_view_balance ?? false,
+      can_resolve_disputes: m.permissions?.can_resolve_disputes ?? false,
+    });
+  };
+
+  /** Зберігає матрицю прав через PATCH, закриває модалку і освіжає список. */
+  const handleSavePermissions = async () => {
+    if (!permissionsDialogFor || !permissionsDraft || isSavingPermissions) return;
+    setIsSavingPermissions(true);
+    try {
+      await updateManagerPermissions(permissionsDialogFor.user_id, permissionsDraft);
+      triggerHapticFeedback("notification", "success");
+      toast.success("Права менеджера оновлено");
+      setPermissionsDialogFor(null);
+      setPermissionsDraft(null);
+      await loadManagers();
+    } catch (err: any) {
+      console.error("Error updating permissions:", err);
+      triggerHapticFeedback("notification", "error");
+      toast.error(err?.message || "Не вдалося оновити права менеджера");
+    } finally {
+      setIsSavingPermissions(false);
+    }
+  };
+
+  /** Видаляє менеджера (з модалки або зі списку). */
+  const handleRemoveManager = async (userId: number) => {
+    if (isRemovingManager) return;
+    setIsRemovingManager(userId);
+    try {
+      await removeManager(userId);
+      triggerHapticFeedback("notification", "success");
+      toast.success("Менеджера видалено");
+      setPermissionsDialogFor(null);
+      await loadManagers();
+    } catch (err: any) {
+      console.error("Error removing manager:", err);
+      triggerHapticFeedback("notification", "error");
+      toast.error(err?.message || "Не вдалося видалити менеджера");
+    } finally {
+      setIsRemovingManager(null);
     }
   };
 
@@ -391,6 +455,11 @@ export default function StoreManagement() {
   const averageRating = reviews.length 
     ? reviews.reduce((s, r) => s + r.rating, 0) / reviews.length 
     : 0;
+
+  // RBAC: власник може все; менеджер — лише за власною матрицею прав.
+  // Обчислення прав відбувається ДО isLoading-вихідного екрану, бо значення
+  // потрібне вже при першому рендері основного контенту.
+  const canEditInfo = myRole === "owner" || myPermissions?.can_edit_info === true;
 
   if (isLoading) {
     return (
@@ -648,6 +717,8 @@ export default function StoreManagement() {
               <CardTitle className="text-base">Інформація</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* RBAC: менеджер без can_edit_info бачить поля, але вони
+                  заблоковані (disabled) — дані видно, редагувати не можна. */}
               <div className="space-y-2">
                 <Label className="text-sm font-medium">Назва магазину *</Label>
                 <Input
@@ -655,7 +726,14 @@ export default function StoreManagement() {
                   onChange={e => handleChange("shop_name", e.target.value)}
                   placeholder="Мій магазин"
                   className="h-12 text-lg"
+                  disabled={!canEditInfo}
                 />
+                {!canEditInfo && (
+                  <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
+                    <Shield className="h-3 w-3" />
+                    Редагування дозволене лише власнику магазину
+                  </p>
+                )}
               </div>
               <div className="space-y-2">
                 <Label className="text-sm">Опис магазину</Label>
@@ -665,6 +743,7 @@ export default function StoreManagement() {
                   placeholder="Розкажіть про ваш магазин, асортимент та переваги..."
                   rows={4}
                   className="resize-none"
+                  disabled={!canEditInfo}
                 />
               </div>
             </CardContent>
@@ -764,7 +843,10 @@ export default function StoreManagement() {
                 ) : (
                   <div className="space-y-2">
                     {shopManagers.map((m) => (
-                      <div key={m.user_id} className="flex items-center gap-3 p-3 bg-muted/40 rounded-lg">
+                      <div
+                        key={m.user_id}
+                        className="flex items-center gap-3 p-3 bg-muted/40 rounded-lg"
+                      >
                         <Avatar className="h-8 w-8">
                           <AvatarFallback className="bg-primary/10 text-primary text-xs">
                             {(m.full_name || m.first_name || "М").charAt(0).toUpperCase()}
@@ -779,28 +861,24 @@ export default function StoreManagement() {
                           )}
                         </div>
                         <Badge variant="secondary" className="text-[10px] shrink-0">Менеджер</Badge>
+                        {/* Клік по картці/кнопці відкриває модалку прав */}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-8 w-8 p-0 text-muted-foreground hover:text-foreground shrink-0"
+                          title="Налаштувати права"
+                          onClick={() => openPermissionsDialog(m)}
+                        >
+                          <Settings2 className="h-4 w-4" />
+                          <span className="sr-only">Налаштувати права менеджера</span>
+                        </Button>
                         <Button
                           size="sm"
                           variant="ghost"
                           className="h-8 w-8 p-0 text-destructive hover:bg-destructive/10 shrink-0"
                           title="Видалити менеджера"
                           disabled={isRemovingManager === m.user_id}
-                          onClick={async () => {
-                            if (isRemovingManager === m.user_id) return;
-                            setIsRemovingManager(m.user_id);
-                            try {
-                              await removeManager(m.user_id);
-                              triggerHapticFeedback("notification", "success");
-                              toast.success("Менеджера видалено");
-                              await loadManagers();
-                            } catch (err: any) {
-                              console.error("Error removing manager:", err);
-                              triggerHapticFeedback("notification", "error");
-                              toast.error(err?.message || "Не вдалося видалити менеджера");
-                            } finally {
-                              setIsRemovingManager(null);
-                            }
-                          }}
+                          onClick={() => handleRemoveManager(m.user_id)}
                         >
                           {isRemovingManager === m.user_id ? (
                             <Loader2 className="h-4 w-4 animate-spin" />
@@ -914,6 +992,114 @@ export default function StoreManagement() {
             </CardContent>
           </Card>
           )}
+
+          {/* === Модалка «Керування менеджером» (RBAC, owner only) === */}
+          <Dialog
+            open={permissionsDialogFor !== null}
+            onOpenChange={(open) => {
+              if (!open) {
+                setPermissionsDialogFor(null);
+                setPermissionsDraft(null);
+              }
+            }}
+          >
+            <DialogContent className="max-w-md">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2">
+                  <UserCog className="h-5 w-5 text-primary" />
+                  Керування менеджером
+                </DialogTitle>
+                <DialogDescription>
+                  {permissionsDialogFor?.full_name ||
+                    [permissionsDialogFor?.first_name, permissionsDialogFor?.last_name]
+                      .filter(Boolean).join(" ") ||
+                    "Менеджер"}
+                  {permissionsDialogFor?.telegram_id ? ` • ID: ${permissionsDialogFor.telegram_id}` : ""}
+                </DialogDescription>
+              </DialogHeader>
+
+              {permissionsDraft && (
+                <div className="space-y-3">
+                  {([
+                    {
+                      key: "can_edit_info",
+                      label: "Редагування інфо",
+                      hint: "Назва та опис магазину",
+                    },
+                    {
+                      key: "can_manage_products",
+                      label: "Керування товарами",
+                      hint: "Додавати, редагувати та видаляти товари",
+                    },
+                    {
+                      key: "can_view_balance",
+                      label: "Перегляд балансу",
+                      hint: "Бачити надходження та виплати магазину",
+                    },
+                    {
+                      key: "can_resolve_disputes",
+                      label: "Вирішення спорів",
+                      hint: "Відповідати на скарги та запити клієнтів",
+                    },
+                  ] as const).map((perm) => (
+                    <div
+                      key={perm.key}
+                      className="flex items-center justify-between gap-3 p-3 rounded-xl border border-border bg-muted/30"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-sm font-medium text-foreground">{perm.label}</p>
+                        <p className="text-xs text-muted-foreground">{perm.hint}</p>
+                      </div>
+                      <Switch
+                        checked={permissionsDraft[perm.key]}
+                        onCheckedChange={(v) => {
+                          hapticSelection();
+                          setPermissionsDraft({ ...permissionsDraft, [perm.key]: v });
+                        }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <DialogFooter className="flex-col gap-2 sm:flex-col">
+                <Button
+                  className="w-full gap-2"
+                  disabled={isSavingPermissions || !permissionsDraft}
+                  onClick={handleSavePermissions}
+                >
+                  {isSavingPermissions ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Зберігаємо…
+                    </>
+                  ) : (
+                    <>
+                      <Settings2 className="h-4 w-4" />
+                      Зберегти права
+                    </>
+                  )}
+                </Button>
+                <Button
+                  variant="destructive"
+                  className="w-full gap-2"
+                  disabled={isRemovingManager !== null || permissionsDialogFor === null}
+                  onClick={() => {
+                    if (permissionsDialogFor) {
+                      handleRemoveManager(permissionsDialogFor.user_id);
+                    }
+                  }}
+                >
+                  {isRemovingManager === permissionsDialogFor?.user_id ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4" />
+                  )}
+                  Видалити менеджера
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
 
           {/* Manager & Bot Settings */}
           <Card>

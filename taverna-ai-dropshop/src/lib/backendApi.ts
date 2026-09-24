@@ -1025,6 +1025,14 @@ export async function getMyShops(): Promise<BackendMyShop[]> {
   return Array.isArray(data) ? data.filter(Boolean) : [];
 }
 
+/** Матриця прав менеджера (RBAC, B2B). */
+export interface ManagerPermissions {
+  can_edit_info: boolean;
+  can_manage_products: boolean;
+  can_view_balance: boolean;
+  can_resolve_disputes: boolean;
+}
+
 export interface BackendSupplierManager {
   user_id: number;
   telegram_id?: number | null;
@@ -1032,6 +1040,7 @@ export interface BackendSupplierManager {
   full_name?: string | null;
   first_name?: string | null;
   last_name?: string | null;
+  permissions?: ManagerPermissions;
 }
 
 export interface BackendSupplierInviteLink {
@@ -1070,6 +1079,19 @@ export async function removeManager(userId: number): Promise<{ status: string }>
   );
 }
 
+/** PATCH /api/v1/suppliers/me/managers/{user_id}/permissions — оновити права менеджера (RBAC). */
+export async function updateManagerPermissions(
+  userId: number,
+  permissions: ManagerPermissions
+): Promise<{ status: string; permissions: ManagerPermissions }> {
+  return backendPatch<{ status: string; permissions: ManagerPermissions }>(
+    `${SUPPLIERS_MANAGERS_ENDPOINT}/${userId}/permissions`,
+    { permissions },
+    "Не вдалося оновити права менеджера",
+    adminTelegramHeaders()
+  );
+}
+
 // --- Картка магазину: GET/PATCH /suppliers/{id} ------------------------------
 
 export interface BackendSupplierDetail {
@@ -1100,6 +1122,8 @@ export interface BackendSupplierDetail {
   product_count: number;
   completed_products: number;
   deletion_requested: boolean;
+  /** RBAC: власні права поточного менеджера (owner отримує null — можна все). */
+  my_permissions?: ManagerPermissions | null;
   created_at?: string | null;
   approved_at?: string | null;
 }

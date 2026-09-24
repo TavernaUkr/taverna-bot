@@ -393,6 +393,14 @@ class SupplierDeletionResponse(BaseModel):
     detail: str = "Заявка на видалення надіслана адміністратору"
 
 
+class ManagerPermissions(BaseModel):
+    """Матриця прав менеджера (RBAC, B2B)."""
+    can_edit_info: bool = False
+    can_manage_products: bool = True
+    can_view_balance: bool = False
+    can_resolve_disputes: bool = False
+
+
 class SupplierManagerResponse(BaseModel):
     """Менеджер магазину для GET /suppliers/me/managers."""
     user_id: int
@@ -401,6 +409,12 @@ class SupplierManagerResponse(BaseModel):
     full_name: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    permissions: ManagerPermissions = Field(default_factory=ManagerPermissions)
+
+
+class ManagerPermissionsUpdateRequest(BaseModel):
+    """Тіло PATCH /suppliers/me/managers/{user_id}/permissions."""
+    permissions: ManagerPermissions
 
 
 class SupplierInviteLinkResponse(BaseModel):
@@ -478,6 +492,9 @@ class SupplierDetailResponse(UtcJsonDates):
     product_count: int = 0
     completed_products: int = 0
     deletion_requested: bool = False
+    # RBAC: власні права поточного менеджера (owner отримує None —
+    # йому дозволено все). Заповнюється лише в GET /suppliers/{id}.
+    my_permissions: Optional[ManagerPermissions] = None
     created_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
 

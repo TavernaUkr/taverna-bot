@@ -109,7 +109,14 @@ supplier_managers = Table(
     'supplier_managers',
     Base.metadata,
     Column('supplier_id', Integer, ForeignKey('suppliers.id'), primary_key=True),
-    Column('user_id', Integer, ForeignKey('users.id'), primary_key=True)
+    Column('user_id', Integer, ForeignKey('users.id'), primary_key=True),
+    # --- RBAC: матриця прав менеджера (B2B) ---
+    # Дефолти підібрані так: новий менеджер одразу бачить замовлення/товари,
+    # але не може редагувати вітрину, бачити баланс і вирішувати спори.
+    Column('can_edit_info', Boolean, nullable=False, default=False),
+    Column('can_manage_products', Boolean, nullable=False, default=True),
+    Column('can_view_balance', Boolean, nullable=False, default=False),
+    Column('can_resolve_disputes', Boolean, nullable=False, default=False),
 )
 
 # --- Моделі ---

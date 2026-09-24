@@ -39,6 +39,7 @@ import { ModeratorGuideModal } from "@/components/guides/ModeratorGuideModal";
 import { ManagerGuideModal } from "@/components/guides/ManagerGuideModal";
 import { AppSettingsSheet } from "@/components/profile/AppSettingsSheet";
 import { useBonuses } from "@/hooks/useBonuses";
+import { getMyShops, type BackendMyShop } from "@/lib/backendApi";
 
 type TestRole = "guest" | "customer" | "supplier" | "shop_manager" | "moderator" | "admin";
 
@@ -107,6 +108,8 @@ export const ProfileDashboard = () => {
   const [showAppSettings, setShowAppSettings] = useState(false);
   const [showAccountSettings, setShowAccountSettings] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
+  // Магазини юзера (власник або менеджер) — для кнопки "Керування магазинами"
+  const [myShops, setMyShops] = useState<BackendMyShop[] | null>(null);
   const { reputationScore, balance } = useBonuses();
 
   const isSupplier = roles.includes('supplier') || roles.includes('admin');
@@ -117,6 +120,31 @@ export const ProfileDashboard = () => {
   const canSeeSupplierGuide = roles.includes('supplier') || isAdmin;
   const canSeeModeratorGuide = roles.includes('moderator') || isAdmin;
   const canSeeManagerGuide = roles.includes('shop_manager') || isAdmin;
+
+  // Юзер має хоча б один магазин (власник ЧИ менеджер) — це надійніше,
+  // ніж роль: клієнт з інвайтом менеджера теж отримає доступ.
+  const hasShops = Array.isArray(myShops) && myShops.length > 0;
+
+  useEffect(() => {
+    // Завантажуємо магазини юзера при відкритті профілю (авторизованого).
+    // Помилки ігноруємо — кнопка просто залишиться ролезалежною.
+    if (!isAuthenticated) {
+      setMyShops(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const shops = await getMyShops();
+        if (!cancelled) setMyShops(shops);
+      } catch {
+        if (!cancelled) setMyShops(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, realRoles]);
 
   useEffect(() => {
     // If we simulate Guest, ensure sensitive modals are closed.
@@ -430,8 +458,8 @@ export const ProfileDashboard = () => {
         </button>
       )}
 
-      {/* Store Management Button - For Suppliers and Shop Managers */}
-      {isAuthenticated && (isOnlySupplier || isShopManager) && !isAdmin && (
+      {/* Store Management Button - For Suppliers, Shop Managers and anyone with shops (owner/manager) */}
+      {isAuthenticated && (isOnlySupplier || isShopManager || hasShops) && !isAdmin && (
         <button
           onClick={() => {
             hapticSelection();
@@ -445,15 +473,15 @@ export const ProfileDashboard = () => {
           <div className="flex-1 text-left">
             <h4 className="font-semibold text-foreground">Керування магазинами</h4>
             <p className="text-xs text-muted-foreground">
-              {isShopManager ? "Замовлення та відгуки магазинів" : "Магазини, замовлення, налаштування"}
+              {isShopManager || hasShops ? "Замовлення та відгуки магазинів" : "Магазини, замовлення, налаштування"}
             </p>
           </div>
           <ChevronRight className="h-5 w-5 text-emerald-500" />
         </button>
       )}
 
-      {/* Become Partner Button - For Customers (not suppliers/admin/moderator/shop_manager) */}
-      {isAuthenticated && !isOnlySupplier && !isAdmin && !isModerator && !isShopManager && (
+      {/* Become Partner Button - Only for users WITHOUT any shops (hide if has shops, even if role is customer) */}
+      {isAuthenticated && !isOnlySupplier && !isAdmin && !isModerator && !isShopManager && !hasShops && (
         <button
           onClick={() => navigate("/partner")}
           className="w-full flex items-center gap-4 p-4 rounded-xl border transition-all bg-card border-border hover:border-primary/50"

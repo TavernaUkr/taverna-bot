@@ -39,12 +39,17 @@ router = Router()
 
 # --- Deep-link: запрошення менеджера до магазину ---
 
-def _manager_miniapp_kb(supplier_id: int) -> Optional[InlineKeyboardMarkup]:
-    """Кнопка «Відкрити Mini App» на сторінку керування магазином."""
+def _manager_miniapp_kb() -> Optional[InlineKeyboardMarkup]:
+    """
+    Кнопка «Відкрити Mini App» після прийняття інвайту.
+    Веде на /my-shops — список магазинів юзера, де він сам обирає,
+    що відкрити (робочу панель чи налаштування). НЕ кидаємо одразу
+    в технічні налаштування конкретного магазину.
+    """
     base = config.MINI_APP_URL
     if not base:
         return None
-    web_url = f"{base}/store-management/{supplier_id}?startapp=manager_{supplier_id}"
+    web_url = f"{base}/my-shops"
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -353,7 +358,7 @@ async def cb_invite_accept(call: types.CallbackQuery):
             "✅ Ви стали менеджером магазину "
             f"<b>{store_name}</b>."
         )
-        await _finish_invite(call, text, reply_markup=_manager_miniapp_kb(supplier.id))
+        await _finish_invite(call, text, reply_markup=_manager_miniapp_kb())
         await call.answer("✅ Готово!")
 
     except Exception as e:
