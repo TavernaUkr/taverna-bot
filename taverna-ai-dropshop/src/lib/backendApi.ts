@@ -1033,6 +1033,18 @@ export interface ManagerPermissions {
   can_resolve_disputes: boolean;
 }
 
+/** B2B-тарифи менеджера: СУМИ В КОПІЙКАХ (бекенд-контракт). */
+export interface ManagerContractRates {
+  rate_per_order: number;
+  rate_per_dispute: number;
+}
+
+/** Omnichannel: як менеджер отримує комунікацію. */
+export interface ManagerCommSettings {
+  chat_channel: "webapp" | "telegram" | string;
+  receive_notifications: boolean;
+}
+
 export interface BackendSupplierManager {
   user_id: number;
   telegram_id?: number | null;
@@ -1041,6 +1053,9 @@ export interface BackendSupplierManager {
   first_name?: string | null;
   last_name?: string | null;
   permissions?: ManagerPermissions;
+  /** B2B-контракт: тарифи (в копійках) та комунікація. */
+  rates?: ManagerContractRates;
+  comm_settings?: ManagerCommSettings;
 }
 
 export interface BackendSupplierInviteLink {
@@ -1088,6 +1103,39 @@ export async function updateManagerPermissions(
     `${SUPPLIERS_MANAGERS_ENDPOINT}/${userId}/permissions`,
     { permissions },
     "Не вдалося оновити права менеджера",
+    adminTelegramHeaders()
+  );
+}
+
+/**
+ * PATCH /api/v1/suppliers/me/managers/{user_id}/contract
+ * Оновлює B2B-контракт менеджера: тарифи та/або права (лише власник).
+ * rates передаються В КОПІЙКАХ — конвертую гривні→копійки робить викликець.
+ */
+export async function updateManagerContract(
+  userId: number,
+  payload: { rates?: ManagerContractRates; permissions?: ManagerPermissions }
+): Promise<{ status: string; rates?: ManagerContractRates | null; permissions?: ManagerPermissions | null }> {
+  return backendPatch<{ status: string; rates?: ManagerContractRates | null; permissions?: ManagerPermissions | null }>(
+    `${SUPPLIERS_MANAGERS_ENDPOINT}/${userId}/contract`,
+    payload,
+    "Не вдалося оновити контракт менеджера",
+    adminTelegramHeaders()
+  );
+}
+
+/**
+ * PATCH /api/v1/suppliers/me/managers/{user_id}/communication
+ * Оновлює канал комунікації менеджера (сам менеджер або власник).
+ */
+export async function updateManagerCommunication(
+  userId: number,
+  commSettings: ManagerCommSettings
+): Promise<{ status: string; comm_settings: ManagerCommSettings }> {
+  return backendPatch<{ status: string; comm_settings: ManagerCommSettings }>(
+    `${SUPPLIERS_MANAGERS_ENDPOINT}/${userId}/communication`,
+    { comm_settings: commSettings },
+    "Не вдалося оновити комунікаційні налаштування",
     adminTelegramHeaders()
   );
 }

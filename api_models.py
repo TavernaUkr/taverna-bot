@@ -979,3 +979,31 @@ class SupplierResponse(BaseModel):
     approved_at: Optional[datetime] = None
     restored_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None
+
+
+# --- МОДЕЛІ ДЛЯ `api/wallets.py` (Фінансове ядро: Wallet + Ledger) ---
+
+class WalletResponse(BaseModel):
+    """Гаманець поточного користувача. Усі суми — в копійках."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    main_balance: int = 0
+    hold_balance: int = 0
+    bonus_balance: int = 0
+    updated_at: Optional[datetime] = None
+
+
+class TransactionResponse(BaseModel):
+    """Запис журналу транзакцій (Ledger). amount в копійках: > 0 — нарахування, < 0 — списання."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    wallet_id: int
+    amount: int
+    currency: str = "UAH"
+    type: str
+    description: Optional[str] = None
+    reference_id: Optional[str] = None
+    created_at: Optional[datetime] = None

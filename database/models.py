@@ -147,6 +147,7 @@ class User(Base):
     orders = relationship("Order", back_populates="user")
     bonus_history = relationship("BonusHistory", back_populates="user")
     suppliers = relationship("Supplier", back_populates="user")
+    wallet = relationship("Wallet", back_populates="user", uselist=False)
 
 class Channel(Base):
     __tablename__ = 'channels'
@@ -472,3 +473,47 @@ class AICategorizationRule(Base):
     keyword = Column(String(255), nullable=False, index=True)
     correct_category = Column(String(255), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+# --- Фінансове ядро: Гаманці + Журнал транзакцій (Ledger) ---
+
+class Wallet(Base):
+    """
+    Гаманець користувача (постачальник/менеджер/модератор).
+    Усі суми — в копійках (цілі числа), щоб уникнути дробів у фінансах.
+    """
+    __tablename__ = "wallets"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, index=True, nullable=False)
+
+    main_balance = Column(Integer, nullable=False, default=0)   # доступно до виводу
+    hold_balance = Column(Integer, nullable=False, default=0)   # заморожено до закриття угоди
+    bonus_balance = Column(Integer, nullable=False, default=0)  # внутрішня валюта платформи
+
+    updated_at = Column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User", back_populates="wallet")
+    transactions = relationship("Transaction", back_populates="wallet")
+
+
+class Transaction(Base):
+    """
+    Запис у журналі транзакцій (Ledger) для мікро-білінгу та бонусів.
+    amount в копійках: > 0 — нарахування, < 0 — списання.
+    """
+    __tablename__ = "transactions"
+
+    id = Column(Integer, primary_key=True)
+    wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=False, index=True)
+
+    amount = Column(Integer, nullable=False)
+    currency = Column(String(10), nullable=False, default="UAH")   # 'UAH' | 'BONUS'
+    type = Column(String(50), nullable=False, index=True)          # 'order_reward', 'dispute_reward', 'withdrawal', 'platform_fee'...
+    description = Column(String(255), nullable=True)
+    reference_id = Column(String(100), nullable=True, index=True)  # ID замовлення/тікета (String для гнучкості)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    wallet = relationship("Wallet", back_populates="transactions")

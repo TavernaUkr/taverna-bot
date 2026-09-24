@@ -18,6 +18,13 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Dialog, DialogContent, DialogDescription, DialogFooter,
   DialogHeader, DialogTitle,
 } from "@/components/ui/dialog";
@@ -31,10 +38,14 @@ import {
   generateManagerInviteLink,
   removeManager,
   updateManagerPermissions,
+  updateManagerContract,
+  updateManagerCommunication,
   getSupplierById,
   updateSupplier,
   type BackendSupplierManager,
   type ManagerPermissions,
+  type ManagerContractRates,
+  type ManagerCommSettings,
 } from "@/lib/backendApi";
 
 const WEEK_DAYS = [
@@ -101,6 +112,10 @@ export default function StoreManagement() {
   // Модалка «Керування менеджером»
   const [permissionsDialogFor, setPermissionsDialogFor] = useState<BackendSupplierManager | null>(null);
   const [permissionsDraft, setPermissionsDraft] = useState<ManagerPermissions | null>(null);
+  // B2B: тарифи (у гривнях для UI; копійки конвертуємо при load/save)
+  const [ratesDraft, setRatesDraft] = useState<{ order: string; dispute: string }>({ order: "0", dispute: "0" });
+  // Omnichannel: канал комунікації + сповіщення
+  const [commDraft, setCommDraft] = useState<ManagerCommSettings>({ chat_channel: "webapp", receive_notifications: true });
   const [isSavingPermissions, setIsSavingPermissions] = useState(false);
   const [inviteLink, setInviteLink] = useState<string | null>(null);
   const [isGeneratingInvite, setIsGeneratingInvite] = useState(false);
@@ -229,7 +244,7 @@ export default function StoreManagement() {
     }
   };
 
-  /** Відкриває модалку прав із поточними значеннями менеджера. */
+  /** Відкриває модалку керування менеджером: права + тарифи + комунікація. */
   const openPermissionsDialog = (m: BackendSupplierManager) => {
     setPermissionsDialogFor(m);
     setPermissionsDraft({
@@ -238,23 +253,46 @@ export default function StoreManagement() {
       can_view_balance: m.permissions?.can_view_balance ?? false,
       can_resolve_disputes: m.permissions?.can_resolve_disputes ?? false,
     });
+    // Бекенд віддає КОПІЙКИ — у стейті UI тримаємо гривні (÷100).
+    setRatesDraft({
+      order: String((m.rates?.rate_per_order ?? 0) / 100),
+      dispute: String((m.rates?.rate_per_dispute ?? 0) / 100),
+    });
+    setCommDraft({
+      chat_channel: m.comm_settings?.chat_channel === "telegram" ? "telegram" : "webapp",
+      receive_notifications: m.comm_settings?.receive_notifications ?? true,
+    });
   };
 
-  /** Зберігає матрицю прав через PATCH, закриває модалку і освіжає список. */
+  /**
+   * Зберігає весь «контракт» менеджера: права + тарифи (через /contract)
+   * та комунікацію (через /communication) — паралельно через Promise.all.
+   * Гривні в UI → копійки для бекенду (Math.round(v * 100)).
+   */
   const handleSavePermissions = async () => {
     if (!permissionsDialogFor || !permissionsDraft || isSavingPermissions) return;
     setIsSavingPermissions(true);
     try {
-      await updateManagerPermissions(permissionsDialogFor.user_id, permissionsDraft);
+      const rates: ManagerContractRates = {
+        rate_per_order: Math.max(0, Math.round((parseFloat(ratesDraft.order) || 0) * 100)),
+        rate_per_dispute: Math.max(0, Math.round((parseFloat(ratesDraft.dispute) || 0) * 100)),
+      };
+      await Promise.all([
+        updateManagerContract(permissionsDialogFor.user_id, {
+          rates,
+          permissions: permissionsDraft,
+        }),
+        updateManagerCommunication(permissionsDialogFor.user_id, commDraft),
+      ]);
       triggerHapticFeedback("notification", "success");
-      toast.success("Права менеджера оновлено");
+      toast.success("Контракт менеджера оновлено");
       setPermissionsDialogFor(null);
       setPermissionsDraft(null);
       await loadManagers();
     } catch (err: any) {
-      console.error("Error updating permissions:", err);
+      console.error("Error updating manager contract:", err);
       triggerHapticFeedback("notification", "error");
-      toast.error(err?.message || "Не вдалося оновити права менеджера");
+      toast.error(err?.message || "Не вдалося оновити контракт менеджера");
     } finally {
       setIsSavingPermissions(false);
     }
@@ -1019,47 +1057,147 @@ export default function StoreManagement() {
               </DialogHeader>
 
               {permissionsDraft && (
-                <div className="space-y-3">
-                  {([
-                    {
-                      key: "can_edit_info",
-                      label: "Редагування інфо",
-                      hint: "Назва та опис магазину",
-                    },
-                    {
-                      key: "can_manage_products",
-                      label: "Керування товарами",
-                      hint: "Додавати, редагувати та видаляти товари",
-                    },
-                    {
-                      key: "can_view_balance",
-                      label: "Перегляд балансу",
-                      hint: "Бачити надходження та виплати магазину",
-                    },
-                    {
-                      key: "can_resolve_disputes",
-                      label: "Вирішення спорів",
-                      hint: "Відповідати на скарги та запити клієнтів",
-                    },
-                  ] as const).map((perm) => (
-                    <div
-                      key={perm.key}
-                      className="flex items-center justify-between gap-3 p-3 rounded-xl border border-border bg-muted/30"
-                    >
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium text-foreground">{perm.label}</p>
-                        <p className="text-xs text-muted-foreground">{perm.hint}</p>
-                      </div>
-                      <Switch
-                        checked={permissionsDraft[perm.key]}
-                        onCheckedChange={(v) => {
-                          hapticSelection();
-                          setPermissionsDraft({ ...permissionsDraft, [perm.key]: v });
-                        }}
-                      />
+                <Tabs defaultValue="permissions" className="w-full">
+                  <TabsList className="grid h-auto grid-cols-3 w-full">
+                    <TabsTrigger value="permissions" className="text-xs px-2 py-2">
+                      <Shield className="h-3.5 w-3.5 mr-1" />
+                      Дозволи
+                    </TabsTrigger>
+                    <TabsTrigger value="rates" className="text-xs px-2 py-2">
+                      <Wallet className="h-3.5 w-3.5 mr-1" />
+                      Оплата
+                    </TabsTrigger>
+                    <TabsTrigger value="communication" className="text-xs px-2 py-2">
+                      <MessageSquare className="h-3.5 w-3.5 mr-1" />
+                      Комунікація
+                    </TabsTrigger>
+                  </TabsList>
+
+                  {/* === Вкладка 1: Дозволи (RBAC) === */}
+                  <TabsContent value="permissions" className="mt-3">
+                    <div className="space-y-3">
+                      {([
+                        {
+                          key: "can_edit_info",
+                          label: "Редагування інфо",
+                          hint: "Назва та опис магазину",
+                        },
+                        {
+                          key: "can_manage_products",
+                          label: "Керування товарами",
+                          hint: "Додавати, редагувати та видаляти товари",
+                        },
+                        {
+                          key: "can_view_balance",
+                          label: "Перегляд балансу",
+                          hint: "Бачити надходження та виплати магазину",
+                        },
+                        {
+                          key: "can_resolve_disputes",
+                          label: "Вирішення спорів",
+                          hint: "Відповідати на скарги та запити клієнтів",
+                        },
+                      ] as const).map((perm) => (
+                        <div
+                          key={perm.key}
+                          className="flex items-center justify-between gap-3 p-3 rounded-xl border border-border bg-muted/30"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-foreground">{perm.label}</p>
+                            <p className="text-xs text-muted-foreground">{perm.hint}</p>
+                          </div>
+                          <Switch
+                            checked={permissionsDraft[perm.key]}
+                            onCheckedChange={(v) => {
+                              hapticSelection();
+                              setPermissionsDraft({ ...permissionsDraft, [perm.key]: v });
+                            }}
+                          />
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
+                  </TabsContent>
+
+                  {/* === Вкладка 2: Оплата праці (B2B, гривні в UI / копійки в API) === */}
+                  <TabsContent value="rates" className="mt-3">
+                    <div className="space-y-4">
+                      <p className="text-xs text-muted-foreground bg-muted/40 rounded-lg p-3">
+                        Тарифи, які сплачує постачальник за роботу менеджера. Вказуйте суму в гривнях —
+                        списання відбудеться за фактом обробленої дії.
+                      </p>
+                      <div className="space-y-2">
+                        <Label htmlFor="rate_per_order">
+                          За обробку замовлення (₴)
+                        </Label>
+                        <Input
+                          id="rate_per_order"
+                          type="number"
+                          inputMode="decimal"
+                          min="0"
+                          step="0.01"
+                          value={ratesDraft.order}
+                          onChange={(e) => setRatesDraft({ ...ratesDraft, order: e.target.value })}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="rate_per_dispute">
+                          За вирішення спору (₴)
+                        </Label>
+                        <Input
+                          id="rate_per_dispute"
+                          type="number"
+                          inputMode="decimal"
+                          min="0"
+                          step="0.01"
+                          value={ratesDraft.dispute}
+                          onChange={(e) => setRatesDraft({ ...ratesDraft, dispute: e.target.value })}
+                        />
+                      </div>
+                    </div>
+                  </TabsContent>
+
+                  {/* === Вкладка 3: Комунікація (Omnichannel) === */}
+                  <TabsContent value="communication" className="mt-3">
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <Label>Канал для чату з клієнтами</Label>
+                        <Select
+                          value={commDraft.chat_channel}
+                          onValueChange={(v) => {
+                            hapticSelection();
+                            setCommDraft({ ...commDraft, chat_channel: v as "webapp" | "telegram" });
+                          }}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue placeholder="Оберіть канал" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="webapp">Через Mini App</SelectItem>
+                            <SelectItem value="telegram">Через Telegram Бот</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          Де менеджер отримуватиме повідомлення від покупців магазину.
+                        </p>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 p-3 rounded-xl border border-border bg-muted/30">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-foreground">Сповіщення про нові події</p>
+                          <p className="text-xs text-muted-foreground">
+                            Замовлення, спори, скарги — миттєво сповіщаємо менеджера
+                          </p>
+                        </div>
+                        <Switch
+                          checked={commDraft.receive_notifications}
+                          onCheckedChange={(v) => {
+                            hapticSelection();
+                            setCommDraft({ ...commDraft, receive_notifications: v });
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </TabsContent>
+                </Tabs>
               )}
 
               <DialogFooter className="flex-col gap-2 sm:flex-col">
@@ -1076,7 +1214,7 @@ export default function StoreManagement() {
                   ) : (
                     <>
                       <Settings2 className="h-4 w-4" />
-                      Зберегти права
+                      Зберегти контракт
                     </>
                   )}
                 </Button>

@@ -3,7 +3,7 @@ import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from config_reader import config
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, select, text
 
 logger = logging.getLogger(__name__)
 
@@ -393,6 +393,45 @@ async def ensure_supplier_managers_permissions_columns() -> None:
         await conn.run_sync(_ensure)
 
 
+async def ensure_wallet_tables() -> None:
+    """
+    Live-режим: таблиці wallets та transactions фінансового ядра.
+    Base.metadata.create_all у init_db() створює їх для нових БД,
+    але для існуючих (Render/local) — створюємо тут через checkfirst.
+    """
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        from database.models import Wallet, Transaction
+        Wallet.__table__.create(bind=sync_conn, checkfirst=True)
+        Transaction.__table__.create(bind=sync_conn, checkfirst=True)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
+async def ensure_user_wallet(user_id: int, session: AsyncSession) -> "Wallet":
+    """
+    Гаманець-гаран: якщо у юзера немає гаманця — створює з нульовими
+    балансами. Повертає Wallet у будь-якому разі.
+    Викликається з активною сесією FastAPI (get_db); commit робить викликець.
+    """
+    from database.models import Wallet  # локальний імпорт: уникаємо циклу db↔models
+
+    wallet = (
+        await session.execute(
+            select(Wallet).where(Wallet.user_id == user_id)
+        )
+    ).scalar_one_or_none()
+    if wallet is None:
+        wallet = Wallet(user_id=user_id)
+        session.add(wallet)
+        await session.flush()  # одразу отримуємо wallet.id без окремого commit
+        logger.info("Створено гаманець для user_id=%s (wallet_id=%s)", user_id, wallet.id)
+    return wallet
+
+
 async def get_db() -> AsyncSession:
     """
     FastAPI "Dependency" для отримання сесії БД.
@@ -430,3 +469,4 @@ async def init_db() -> None:
     await ensure_supplier_history_log_table()
     await ensure_supplier_showcase_columns()
     await ensure_supplier_managers_permissions_columns()
+    await ensure_wallet_tables()
