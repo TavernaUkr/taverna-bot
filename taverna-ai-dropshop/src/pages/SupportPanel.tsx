@@ -6,6 +6,7 @@ import {
   Bot,
   CheckCircle2,
   Clock,
+  HandMetal,
   Loader2,
   MessageSquare,
   Package,
@@ -13,6 +14,7 @@ import {
   Store,
   Undo2,
   User,
+  UserCheck,
 } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
@@ -26,6 +28,7 @@ import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import {
   BackendMessage,
   BackendTicket,
+  assignTicket,
   closeTicket,
   getMyTickets,
   getTicketMessages,
@@ -82,7 +85,11 @@ function formatRelative(iso?: string | null): string {
 
 export default function SupportPanel() {
   const navigate = useNavigate();
-  const { isAuthenticated, roles } = useTelegramAuthContext();
+  const { isAuthenticated, roles, profile } = useTelegramAuthContext();
+
+  // Внутрішній ID користувача у FastAPI (туди мапиться profile.id).
+  // Порівнюємо з assigned_manager_id, щоб розуміти: тікет мій / нічий / чужий.
+  const currentUserId = profile?.id ? Number(profile.id) : null;
 
   // --- Стан панелі ---
   const [tickets, setTickets] = useState<BackendTicket[]>([]);
@@ -95,6 +102,7 @@ export default function SupportPanel() {
   const [newMessageText, setNewMessageText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [isClosing, setIsClosing] = useState(false);
+  const [isAssigning, setIsAssigning] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [mobileView, setMobileView] = useState<"list" | "chat">("list");
@@ -104,6 +112,13 @@ export default function SupportPanel() {
 
   const activeTicket = tickets.find((t) => t.id === activeTicketId) ?? null;
   const isTicketClosed = activeTicket?.status === "closed";
+  // Тікет нічий — жоден менеджер його ще не узяв
+  const isTicketUnclaimed = activeTicket != null && activeTicket.assigned_manager_id == null;
+  // Тікет узяв я (порівнюємо внутрішні ID користувачів FastAPI)
+  const isTicketMine =
+    activeTicket?.assigned_manager_id != null &&
+    currentUserId != null &&
+    activeTicket.assigned_manager_id === currentUserId;
 
   // --- Завантаження списку тікетів (role='manager') ---
   const loadTickets = useCallback(async () => {
@@ -259,6 +274,29 @@ export default function SupportPanel() {
     setMobileView("list");
   };
 
+  const handleAssignTicket = async () => {
+    if (activeTicketId == null || isAssigning || !isTicketUnclaimed) return;
+    hapticSelection();
+    setIsAssigning(true);
+    try {
+      const updated = await assignTicket(activeTicketId);
+      // Оновлюємо стан тікета у списку: тепер він мій, інпут відкриється
+      setTickets((prev) =>
+        prev.map((t) => (t.id === updated.id ? { ...t, ...updated, message_count: t.message_count } : t))
+      );
+      hapticNotification("success");
+      toast.success("Тікет взято в роботу");
+    } catch (err) {
+      console.error("Error assigning ticket:", err);
+      hapticNotification("error");
+      toast.error(err instanceof Error ? err.message : "Не вдалося взяти тікет у роботу");
+      // Хтось міг узяти тікет одночасно — підтягуємо актуальний список
+      void loadTickets();
+    } finally {
+      setIsAssigning(false);
+    }
+  };
+
   // --- Гейт: лише авторизовані представники магазину ---
   if (!isAuthenticated) {
     return (
@@ -301,7 +339,13 @@ export default function SupportPanel() {
             <h1 className="font-semibold text-foreground truncate">Панель підтримки</h1>
             <p className="text-xs text-muted-foreground truncate">
               {activeTicket
-                ? `${TOPIC_LABELS[activeTicket.topic] ?? activeTicket.topic} • ${STATUS_BADGES[activeTicket.status]?.label ?? activeTicket.status}`
+                ? `${TOPIC_LABELS[activeTicket.topic] ?? activeTicket.topic} • ${
+                    activeTicket.assigned_manager_id == null
+                      ? "Нічийний"
+                      : isTicketMine
+                        ? "У вас в роботі"
+                        : `Менеджер #${activeTicket.assigned_manager_id}`
+                  }`
                 : `Тікетів: ${tickets.length}`}
             </p>
           </div>
@@ -394,6 +438,21 @@ export default function SupportPanel() {
                       >
                         {badge.label}
                       </span>
+                      {/* Мій тікет: узяв у роботу поточний менеджер */}
+                      {ticket.assigned_manager_id != null &&
+                        currentUserId != null &&
+                        ticket.assigned_manager_id === currentUserId && (
+                          <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-emerald-500/10 text-emerald-500 flex items-center gap-1">
+                            <UserCheck className="h-3 w-3" />
+                            Мій
+                          </span>
+                        )}
+                      {/* Нічийний тікет — можна взяти в роботу */}
+                      {ticket.assigned_manager_id == null && ticket.status !== "closed" && (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-teal-500/10 text-teal-500">
+                          Нічийний
+                        </span>
+                      )}
                       {ticket.order_id != null && (
                         <span className="text-[11px] text-muted-foreground flex items-center gap-1">
                           <Package className="h-3 w-3" />
@@ -515,7 +574,7 @@ export default function SupportPanel() {
                 <div ref={messagesEndRef} />
               </div>
 
-              {/* Інпут або плашка "закрито" */}
+              {/* Інпут / Claim-кнопка / плашка "закрито" */}
               {isTicketClosed ? (
                 <div className="shrink-0 border-t border-border bg-muted/50 p-4 text-center">
                   <p className="text-sm text-muted-foreground flex items-center justify-center gap-2">
@@ -528,21 +587,47 @@ export default function SupportPanel() {
                     </p>
                   )}
                 </div>
+              ) : isTicketUnclaimed ? (
+                /* НІЧИЙНИЙ тікет: інпут схований, натомість — Claim-кнопка.
+                   Брати в роботу може будь-хто зі сторони магазину (менеджер/власник). */
+                <div className="shrink-0 border-t border-border p-4">
+                  <Button
+                    onClick={handleAssignTicket}
+                    disabled={isAssigning}
+                    className="w-full h-12 text-base font-semibold gap-2"
+                    size="lg"
+                  >
+                    {isAssigning ? (
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                    ) : (
+                      <HandMetal className="h-5 w-5" />
+                    )}
+                    {isAssigning ? "Забираю..." : "Взяти тікет в роботу"}
+                  </Button>
+                  <p className="text-xs text-muted-foreground text-center mt-2">
+                    Після взяття ви зможете відповідати клієнту, а при закритті
+                    отримаєте винагороду за тарифом
+                  </p>
+                </div>
               ) : (
                 <div className="shrink-0 border-t border-border p-3 pb-safe">
                   <form onSubmit={handleSendMessage} className="flex gap-2">
                     <Input
                       value={newMessageText}
                       onChange={(e) => setNewMessageText(e.target.value)}
-                      placeholder="Напишіть відповідь клієнту..."
+                      placeholder={
+                        isTicketMine
+                          ? "Напишіть відповідь клієнту..."
+                          : "Тікет у іншого менеджера — читання доступне, писати може лише він"
+                      }
                       className="flex-1 bg-muted border-0"
-                      disabled={isSending}
+                      disabled={isSending || !isTicketMine}
                       maxLength={4000}
                     />
                     <Button
                       type="submit"
                       size="icon"
-                      disabled={!newMessageText.trim() || isSending}
+                      disabled={!newMessageText.trim() || isSending || !isTicketMine}
                       className="shrink-0"
                       aria-label="Відправити"
                     >
@@ -553,6 +638,12 @@ export default function SupportPanel() {
                       )}
                     </Button>
                   </form>
+                  {isTicketMine && (
+                    <p className="text-xs text-muted-foreground mt-1.5 flex items-center gap-1">
+                      <UserCheck className="h-3 w-3 text-emerald-500" />
+                      Тікет у вас в роботі
+                    </p>
+                  )}
                 </div>
               )}
             </>

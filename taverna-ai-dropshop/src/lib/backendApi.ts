@@ -1614,6 +1614,7 @@ export interface BackendTicket {
   updated_at?: string;
   message_count?: number;
   last_message_at?: string;
+  /** Хто з менеджерів узяв тікет у роботу (білінг при закритті іде йому). */
   assigned_manager_id?: number | null;
 }
 
@@ -1666,6 +1667,16 @@ export async function getTicketMessages(ticketId: number): Promise<BackendMessag
     tgAuthHeaders()
   );
   return Array.isArray(data) ? data.filter(Boolean) : [];
+}
+
+/** POST /api/v1/tickets/{ticketId}/assign — «взяти тікет в роботу» (Claim Ticket). */
+export async function assignTicket(ticketId: number): Promise<BackendTicket> {
+  return backendPost<BackendTicket>(
+    `${TICKETS_ENDPOINT}/${ticketId}/assign`,
+    {},
+    "Не вдалося взяти тікет у роботу",
+    tgAuthHeaders()
+  );
 }
 
 /** POST /api/v1/tickets/{ticketId}/messages — написати повідомлення в тікет. */

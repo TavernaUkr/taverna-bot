@@ -34,6 +34,7 @@ from database.models import (
     supplier_managers,
 )
 from core.ai_support_service import ai_support_service  # AI-резюме при закритті тікета
+from core.billing_service import process_ticket_payout  # B2B-білінг: виплата менеджеру
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/tickets", tags=["Tickets (Mini App)"])
@@ -280,6 +281,78 @@ async def get_my_tickets(
     ]
 
 
+@router.post("/{ticket_id}/assign", response_model=TicketResponse)
+async def assign_ticket(
+    ticket_id: int,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    «Взяти тікет в роботу» (Claim Ticket). Менеджер/власник магазину
+    закріплює тікет за собою:
+    - assigned_manager_id = current_user.id (на це поле зав'язаний білінг
+      rate_per_dispute при закритті тікета);
+    - status: 'ai_handling' → 'escalated' (аналог «new/open → in_progress»:
+      'escalated' у цій системі і означає «взяв менеджер»).
+    Повторне взяття неможливе: 400, якщо тікет уже закріплено.
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    ticket, reason = await _get_ticket_with_access(db, ticket_id, user)
+    if not ticket:
+        code = 404 if reason == "Тікет не знайдено" else 403
+        raise HTTPException(status_code=code, detail=reason)
+
+    # Лиш представник магазину (менеджер/власник) може забрати тікет.
+    # Клієнт-автор сюди не доходить: гейт нижче його відсікає.
+    if not await _user_manages_supplier(db, user.id, ticket.supplier_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Взяти тікет в роботу може лише менеджер магазину",
+        )
+
+    if ticket.status == "closed":
+        raise HTTPException(status_code=400, detail="Тікет закрито")
+
+    if ticket.assigned_manager_id is not None:
+        raise HTTPException(status_code=400, detail="Ticket already assigned")
+
+    ticket.assigned_manager_id = user.id
+    if ticket.status == "ai_handling":
+        ticket.status = "escalated"
+    ticket.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    await db.refresh(ticket)
+
+    logger.info(
+        "Тікет #%s взято в роботу: manager user=%s (status=%s)",
+        ticket.id, user.id, ticket.status,
+    )
+
+    return TicketResponse(
+        id=ticket.id,
+        order_id=ticket.order_id,
+        customer_id=ticket.customer_id,
+        supplier_id=ticket.supplier_id,
+        assigned_manager_id=ticket.assigned_manager_id,
+        status=ticket.status,
+        topic=ticket.topic,
+        ai_summary=ticket.ai_summary,
+        created_at=ticket.created_at,
+        updated_at=ticket.updated_at,
+    )
+
+
 @router.patch("/{ticket_id}/close", response_model=TicketResponse)
 async def close_ticket(
     ticket_id: int,
@@ -324,6 +397,14 @@ async def close_ticket(
 
     ticket.status = "closed"
     ticket.updated_at = datetime.now(timezone.utc)
+
+    # B2B-білінг: розрахунок з менеджером за тарифом rate_per_dispute.
+    # Строго СИНХРОННО до commit (не BackgroundTasks!): переказ балансів,
+    # ledger-записи та закриття тікета — одна атомарна транзакція БД.
+    # Якщо білінг впаде (наприклад, контракт недоступний) — закриття
+    # відкотиться разом із ним, гроші не загубляться.
+    payout_amount = await process_ticket_payout(ticket.id, db)
+
     await db.commit()
     await db.refresh(ticket)
 
@@ -331,7 +412,10 @@ async def close_ticket(
     # Сервіс сам відкриє власну сесію БД (сесія запиту вже закриється).
     background_tasks.add_task(ai_support_service.generate_ticket_summary, ticket.id)
 
-    logger.info("Тікет #%s закрито user=%s. AI-резюме поставлено у фонову чергу.", ticket.id, user.id)
+    logger.info(
+        "Тікет #%s закрито user=%s. AI-резюме поставлено у фонову чергу. Виплата менеджеру: %s коп.",
+        ticket.id, user.id, payout_amount,
+    )
 
     return TicketResponse(
         id=ticket.id,
