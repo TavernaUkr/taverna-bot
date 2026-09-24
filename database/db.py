@@ -411,6 +411,23 @@ async def ensure_wallet_tables() -> None:
         await conn.run_sync(_ensure)
 
 
+async def ensure_ticket_tables() -> None:
+    """
+    Live-режим: таблиці support_tickets та ticket_messages
+    омніканального комунікаційного мосту (AI-роутинг → менеджер).
+    """
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        from database.models import SupportTicket, TicketMessage
+        SupportTicket.__table__.create(bind=sync_conn, checkfirst=True)
+        TicketMessage.__table__.create(bind=sync_conn, checkfirst=True)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
 async def ensure_user_wallet(user_id: int, session: AsyncSession) -> "Wallet":
     """
     Гаманець-гаран: якщо у юзера немає гаманця — створює з нульовими
@@ -470,3 +487,4 @@ async def init_db() -> None:
     await ensure_supplier_showcase_columns()
     await ensure_supplier_managers_permissions_columns()
     await ensure_wallet_tables()
+    await ensure_ticket_tables()

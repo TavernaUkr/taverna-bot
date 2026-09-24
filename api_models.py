@@ -1007,3 +1007,50 @@ class TransactionResponse(BaseModel):
     description: Optional[str] = None
     reference_id: Optional[str] = None
     created_at: Optional[datetime] = None
+
+
+# --- МОДЕЛІ ДЛЯ `api/tickets.py` (Омніканальний комунікаційний міст) ---
+
+class TicketCreate(BaseModel):
+    """Створення тікета клієнтом (за замовчуванням status='ai_handling')."""
+    supplier_id: int = Field(gt=0)
+    order_id: Optional[int] = Field(default=None, gt=0)
+    topic: Literal["delivery", "refund", "question", "other"]
+    text: str = Field(min_length=1, max_length=4000, description="Перше повідомлення в тікет")
+
+
+class MessageCreate(BaseModel):
+    """Додавання повідомлення в тікет (клієнт / менеджер / постачальник)."""
+    text: str = Field(min_length=1, max_length=4000)
+    sender_role: Literal["customer", "manager", "supplier"] = "customer"
+
+
+class TicketMessageResponse(BaseModel):
+    """Одне повідомлення тікета."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    ticket_id: int
+    sender_id: Optional[int] = None
+    sender_role: str
+    text: str
+    is_read: bool = False
+    created_at: Optional[datetime] = None
+
+
+class TicketResponse(BaseModel):
+    """Тікет підтримки з кількістю повідомлень (для списку /me)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    order_id: Optional[int] = None
+    customer_id: int
+    supplier_id: int
+    assigned_manager_id: Optional[int] = None
+    status: str = "ai_handling"
+    topic: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    # Агрегати для списку (заповнюються вручну в ендпоінті)
+    message_count: int = 0
+    last_message_at: Optional[datetime] = None

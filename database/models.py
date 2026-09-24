@@ -148,6 +148,13 @@ class User(Base):
     bonus_history = relationship("BonusHistory", back_populates="user")
     suppliers = relationship("Supplier", back_populates="user")
     wallet = relationship("Wallet", back_populates="user", uselist=False)
+    # Омніканальні тікети: як клієнт (створив) і як менеджер (взяв у роботу)
+    tickets_as_customer = relationship(
+        "SupportTicket", foreign_keys="SupportTicket.customer_id", back_populates="customer"
+    )
+    tickets_as_manager = relationship(
+        "SupportTicket", foreign_keys="SupportTicket.assigned_manager_id", back_populates="assigned_manager"
+    )
 
 class Channel(Base):
     __tablename__ = 'channels'
@@ -237,6 +244,7 @@ class Supplier(Base):
     channels = relationship("Channel", secondary=supplier_channels, back_populates="suppliers")
     managers = relationship("User", secondary=supplier_managers, backref="managed_suppliers")
     products = relationship("Product", back_populates="supplier", cascade="all, delete-orphan")
+    support_tickets = relationship("SupportTicket", back_populates="supplier")
 
 
 class SupplierHistoryLog(Base):
@@ -395,6 +403,7 @@ class Order(Base):
     supplier = relationship("Supplier") 
     parent = relationship("Order", remote_side=[id], back_populates="children")
     children = relationship("Order", back_populates="parent", cascade="all, delete-orphan")
+    support_tickets = relationship("SupportTicket", back_populates="order")
 
 class OrderItem(Base):
     __tablename__ = "order_items"
@@ -517,3 +526,57 @@ class Transaction(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     wallet = relationship("Wallet", back_populates="transactions")
+
+
+# --- Омніканальний комунікаційний міст: Support Tickets + AI-роутинг ---
+
+class SupportTicket(Base):
+    """
+    Тікет підтримки, прив'язаний до замовлення. AI-бот спочатку
+    обробляє тікет сам (status='ai_handling'); за потреби — ескалація
+    менеджеру магазину (status='escalated').
+    """
+    __tablename__ = "support_tickets"
+
+    id = Column(Integer, primary_key=True)
+
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=True, index=True)
+    customer_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=False, index=True)
+    assigned_manager_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+
+    status = Column(String(20), nullable=False, default="ai_handling", index=True)  # 'ai_handling' | 'escalated' | 'closed'
+    topic = Column(String(50), nullable=False, index=True)  # 'delivery' | 'refund' | 'question' | 'other'
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Зв'язки: кожному FK — свій relationship з foreign_keys, щоб уникнути
+    # неоднозначності (у SupportTicket два FK на users: customer_id і assigned_manager_id).
+    order = relationship("Order", back_populates="support_tickets")
+    customer = relationship("User", foreign_keys=[customer_id], back_populates="tickets_as_customer")
+    assigned_manager = relationship("User", foreign_keys=[assigned_manager_id], back_populates="tickets_as_manager")
+    supplier = relationship("Supplier", back_populates="support_tickets")
+    messages = relationship("TicketMessage", back_populates="ticket", cascade="all, delete-orphan")
+
+
+class TicketMessage(Base):
+    """
+    Повідомлення в тікеті. sender_id NULL — означає, що писав AI-бот
+    (sender_role='ai_bot').
+    """
+    __tablename__ = "ticket_messages"
+
+    id = Column(Integer, primary_key=True)
+
+    ticket_id = Column(Integer, ForeignKey("support_tickets.id"), nullable=False, index=True)
+    sender_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # NULL для ai_bot
+    sender_role = Column(String(20), nullable=False, index=True)  # 'customer' | 'manager' | 'supplier' | 'ai_bot'
+
+    text = Column(Text, nullable=False)
+    is_read = Column(Boolean, nullable=False, default=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    ticket = relationship("SupportTicket", back_populates="messages")
+    sender = relationship("User", foreign_keys=[sender_id])
