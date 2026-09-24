@@ -10,6 +10,12 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useWallet, type WalletTransaction } from "@/hooks/useWallet";
+import {
+  getMyWallet,
+  getMyTransactions,
+  type BackendWallet,
+  type BackendTransaction,
+} from "@/lib/backendApi";
 import { ConnectWalletSheet } from "@/components/wallet/ConnectWalletSheet";
 import { TopUpSheet } from "@/components/wallet/TopUpSheet";
 import { PayoutSheet } from "@/components/wallet/PayoutSheet";
@@ -52,7 +58,7 @@ export default function WalletAccount() {
   const navigate = useNavigate();
   const { supplierId } = useParams();
   const [searchParams] = useSearchParams();
-  const { effectiveRole } = useTelegramAuthContext() as any;
+  const { effectiveRole, isAuthenticated, profile } = useTelegramAuthContext() as any;
   const hasShops = ["supplier", "shop_manager", "admin", "moderator"].includes(effectiveRole);
 
   const {
@@ -76,6 +82,41 @@ export default function WalletAccount() {
   const [breakdownOpen, setBreakdownOpen] = useState(false);
   const [debtOverrides, setDebtOverrides] = useState<Record<string, number>>({});
   const payRef = useRef<HTMLDivElement | null>(null);
+
+  // === Фінансове ядро FastAPI (Wallet + Ledger) ===
+  const [coreWallet, setCoreWallet] = useState<BackendWallet | null>(null);
+  const [coreTransactions, setCoreTransactions] = useState<BackendTransaction[]>([]);
+  const [coreError, setCoreError] = useState<string | null>(null);
+
+  // Завантаження реальних балансів/транзакцій з FastAPI.
+  // УВАГА: бекенд віддає КОПІЙКИ — конвертуємо /100 лише для відображення.
+  useEffect(() => {
+    if (!isAuthenticated) {
+      setCoreWallet(null);
+      setCoreTransactions([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const [w, txs] = await Promise.all([
+          getMyWallet(),
+          getMyTransactions(50),
+        ]);
+        if (cancelled) return;
+        setCoreWallet(w);
+        setCoreTransactions(txs);
+        setCoreError(null);
+      } catch (err: any) {
+        if (cancelled) return;
+        setCoreWallet(null);
+        setCoreError(err?.message || "Не вдалося завантажити фінансовий рахунок");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthenticated, profile?.id]);
 
   /** Магазини, чиї кошти входять у загальний дохід постачальника (лише де він власник). */
   const shopsInPersonal = !supplierId && !readOnly && !bonusOnly
@@ -201,6 +242,116 @@ export default function WalletAccount() {
       </div>
 
       <div className="p-4 space-y-4">
+
+        {/* === Фінансове ядро платформи (FastAPI Wallet + Ledger) === */}
+        {isAuthenticated && (coreWallet || coreError) && (
+          <div className="rounded-2xl border border-primary/30 bg-gradient-to-br from-primary/10 via-primary/5 to-transparent p-5 space-y-4">
+            <div className="flex items-center gap-2">
+              <Wallet className="h-5 w-5 text-primary" />
+              <h3 className="font-semibold text-foreground">Фінансовий рахунок</h3>
+            </div>
+
+            {coreError ? (
+              <p className="text-sm text-destructive">{coreError}</p>
+            ) : coreWallet ? (
+              <>
+                {/* Головний баланс: копійки → гривні */}
+                <div>
+                  <p className="text-xs text-muted-foreground">Доступно до виводу</p>
+                  <p className="text-4xl font-bold text-foreground mt-1">
+                    {(coreWallet.main_balance / 100).toLocaleString("uk-UA", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                    <span className="text-2xl">₴</span>
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="rounded-xl bg-card/70 border border-border p-2.5">
+                    <p className="text-[11px] text-muted-foreground flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      В холді
+                    </p>
+                    <p className="text-sm font-semibold text-foreground">
+                      {(coreWallet.hold_balance / 100).toLocaleString("uk-UA", {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}₴
+                    </p>
+                  </div>
+                  <div className="rounded-xl bg-card/70 border border-border p-2.5">
+                    <p className="text-[11px] text-muted-foreground flex items-center gap-1">
+                      <Star className="h-3 w-3 text-rating" />
+                      Бонуси
+                    </p>
+                    <p className="text-sm font-semibold text-primary">
+                      {coreWallet.bonus_balance.toLocaleString("uk-UA")}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Ledger: історія транзакцій */}
+                <div className="pt-2">
+                  <h4 className="text-sm font-semibold text-foreground mb-2">
+                    Історія транзакцій
+                  </h4>
+                  {coreTransactions.length === 0 ? (
+                    <div className="py-6 text-center space-y-2">
+                      <div className="w-12 h-12 rounded-full bg-muted/50 mx-auto flex items-center justify-center">
+                        <Wallet className="h-6 w-6 text-muted-foreground/50" />
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        Історія порожня. Ваші перші транзакції з'являться тут
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {coreTransactions.map((tx) => {
+                        const isIncome = tx.amount > 0;
+                        const isBonus = tx.currency === "BONUS";
+                        return (
+                          <div
+                            key={tx.id}
+                            className="flex items-center gap-3 p-3 rounded-xl border border-border bg-card text-left"
+                          >
+                            <div className={cn(
+                              "w-9 h-9 rounded-full flex items-center justify-center",
+                              isIncome ? "bg-success/15" : "bg-muted",
+                            )}>
+                              <ArrowDownLeft className={cn("h-4 w-4", isIncome ? "text-success" : "text-muted-foreground")} />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-foreground truncate">
+                                {tx.description || tx.type}
+                              </p>
+                              <p className="text-[11px] text-muted-foreground">
+                                {tx.created_at ? formatLocalTime(tx.created_at) : ""}
+                              </p>
+                            </div>
+                            <p className={cn(
+                              "text-sm font-semibold shrink-0",
+                              isIncome ? "text-success" : "text-foreground",
+                            )}>
+                              {isIncome ? "+" : ""}
+                              {isBonus
+                                ? `${tx.amount.toLocaleString("uk-UA")} бон.`
+                                : `${(tx.amount / 100).toLocaleString("uk-UA", {
+                                    minimumFractionDigits: 2,
+                                    maximumFractionDigits: 2,
+                                  })}₴`}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : null}
+          </div>
+        )}
+
         {bonusOnly && !supplierId ? (
           <ClientBonusAccount
             bonusBalance={wallet.bonus_balance}

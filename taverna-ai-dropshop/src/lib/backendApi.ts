@@ -801,6 +801,8 @@ export const SUPPLIERS_IMPORT_PROGRESS_ENDPOINT = `${API_BASE_URL}/api/v1/suppli
 export const SUPPLIERS_MANAGERS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/managers`;
 export const SUPPLIERS_INVITE_LINK_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/invite-link`;
 export const MY_SHOPS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/shops`;
+export const MY_WALLET_ENDPOINT = `${API_BASE_URL}/api/v1/wallets/me`;
+export const MY_WALLET_TRANSACTIONS_ENDPOINT = `${API_BASE_URL}/api/v1/wallets/me/transactions`;
 export const SUPPLIER_DETAIL_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers`;
 export const PUBLIC_SUPPLIERS_LIST_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/public`;
 export const ADMIN_PENDING_SUPPLIERS_ENDPOINT = `${API_BASE_URL}/api/v1/admin/suppliers/pending`;
@@ -1138,6 +1140,50 @@ export async function updateManagerCommunication(
     "Не вдалося оновити комунікаційні налаштування",
     adminTelegramHeaders()
   );
+}
+
+// --- Фінансове ядро: Гаманець + Журнал транзакцій (Ledger) ------------------
+
+/**
+ * Гаманець користувача з FastAPI. УСІ СУМИ — В КОПІЙКАХ!
+ * На UI конвертуємо: (value / 100).toFixed(2).
+ */
+export interface BackendWallet {
+  id: number;
+  user_id: number;
+  main_balance: number;  // доступно до виводу (копійки)
+  hold_balance: number;   // заморожено до закриття угоди (копійки)
+  bonus_balance: number;  // внутрішня валюта платформи (бонуси, НЕ копійки)
+  updated_at?: string | null;
+}
+
+/** Запис журналу транзакцій (Ledger). amount — В КОПІЙКАХ: > 0 нарахування, < 0 списання. */
+export interface BackendTransaction {
+  id: number;
+  wallet_id: number;
+  amount: number;          // копійки
+  currency: string;        // 'UAH' | 'BONUS'
+  type: string;            // 'order_reward', 'dispute_reward', 'withdrawal', 'platform_fee', ...
+  description?: string | null;
+  reference_id?: string | null;
+  created_at?: string | null;
+}
+
+/** GET /api/v1/wallets/me — гаманець поточного користувача (створюється при першому виклику). */
+export async function getMyWallet(): Promise<BackendWallet> {
+  return backendGet<BackendWallet>(
+    MY_WALLET_ENDPOINT,
+    adminTelegramHeaders()
+  );
+}
+
+/** GET /api/v1/wallets/me/transactions — журнал транзакцій (новіші першими, limit=50). */
+export async function getMyTransactions(limit = 50): Promise<BackendTransaction[]> {
+  const data = await backendGet<BackendTransaction[]>(
+    `${MY_WALLET_TRANSACTIONS_ENDPOINT}?limit=${encodeURIComponent(String(limit))}`,
+    adminTelegramHeaders()
+  );
+  return Array.isArray(data) ? data.filter(Boolean) : [];
 }
 
 // --- Картка магазину: GET/PATCH /suppliers/{id} ------------------------------
