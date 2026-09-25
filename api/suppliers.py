@@ -19,22 +19,23 @@ from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from api_models import (
-    ManagerPermissions,
-    ManagerPermissionsUpdateRequest,
     ManagerCommSettings,
-    ManagerCommSettingsUpdateRequest,
+    ManagerContractMeResponse,
     ManagerContractRates,
     ManagerContractUpdateRequest,
+    ManagerPermissions,
     PartnerRegisterRequest,
     PartnerRegisterResponse,
     PublicSupplierResponse,
     SupplierDeletionRequest,
     SupplierDeletionResponse,
     SupplierDetailResponse,
+    SupplierFinanceUpdateRequest,
     SupplierInviteLinkResponse,
     SupplierManagerResponse,
     SupplierMeResponse,
     SupplierQueueShopProgress,
+    SupplierResponse,
     SupplierShopCardResponse,
     SupplierUpdateRequest,
     TelegramChannelVerifyRequest,
@@ -827,12 +828,16 @@ def _comm_from_row(chat_channel: Any, receive_notifications: Any) -> ManagerComm
     )
 
 
-@router.get("/me/managers", response_model=List[SupplierManagerResponse])
-async def get_my_managers(
-    db: AsyncSession = Depends(get_db),
-    authorization: Optional[str] = Header(default=None),
-):
-    """Список менеджерів поточного магазину (telegram_id, імена + RBAC-права)."""
+async def _get_owned_supplier_or_403(
+    db: AsyncSession,
+    supplier_id: int,
+    authorization: Optional[str],
+) -> tuple[Supplier, User]:
+    """
+    Магазин за supplier_id + строгий RBAC для ендпоінтів менеджерів:
+    доступ має ЛИШЕ власник (supplier.user_id == current_user.id).
+    Мультитенантність: жодних «перший-ліпший магазин юзера».
+    """
     telegram_id = _telegram_id_from_authorization(authorization)
     if not telegram_id:
         raise HTTPException(
@@ -840,9 +845,26 @@ async def get_my_managers(
             detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
         )
 
-    supplier = await _get_supplier_for_telegram(db, telegram_id)
-    if not supplier:
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    supplier = await db.get(Supplier, supplier_id)
+    if not supplier or _enum_value(supplier.status) == SupplierStatus.deleted.value:
         raise HTTPException(status_code=404, detail="Магазин не знайдено")
+    if not user or supplier.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return supplier, user
+
+
+@router.get("/{supplier_id}/managers", response_model=List[SupplierManagerResponse])
+async def get_supplier_managers(
+    supplier_id: int,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Список менеджерів КОНКРЕТНОГО магазину.
+    GET /api/v1/suppliers/{supplier_id}/managers — доступ: лише власник.
+    """
+    supplier, _owner = await _get_owned_supplier_or_403(db, supplier_id, authorization)
 
     # JOIN User × права + тарифи + комунікація з таблиці-посередника:
     # одним запитом дістаємо і дані користувача, і весь його «контракт».
@@ -881,6 +903,67 @@ async def get_my_managers(
              can_resolve_disputes, rate_per_order, rate_per_dispute,
              chat_channel, receive_notifications) in rows
     ]
+
+
+@router.get("/{supplier_id}/managers/me", response_model=ManagerContractMeResponse)
+async def get_my_manager_contract(
+    supplier_id: int,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Власний контракт/права менеджера магазину:
+    GET /api/v1/suppliers/{supplier_id}/managers/me
+    Доступ: поточний юзер є менеджером цього магазину
+    (є запис у supplier_managers для supplier_id + current_user.id).
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    me = await _get_user_by_telegram_id(db, telegram_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    supplier = await db.get(Supplier, supplier_id)
+    if not supplier or _enum_value(supplier.status) == SupplierStatus.deleted.value:
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+
+    row = (
+        await db.execute(
+            select(
+                supplier_managers.c.can_edit_info,
+                supplier_managers.c.can_manage_products,
+                supplier_managers.c.can_view_balance,
+                supplier_managers.c.can_resolve_disputes,
+                supplier_managers.c.rate_per_order,
+                supplier_managers.c.rate_per_dispute,
+                supplier_managers.c.chat_channel,
+                supplier_managers.c.receive_notifications,
+            ).where(
+                supplier_managers.c.supplier_id == supplier_id,
+                supplier_managers.c.user_id == me.id,
+            )
+        )
+    ).first()
+    if not row:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return ManagerContractMeResponse(
+        supplier_id=supplier.id,
+        user_id=me.id,
+        permissions=ManagerPermissions(
+            can_edit_info=bool(row[0]),
+            can_manage_products=bool(row[1]),
+            can_view_balance=bool(row[2]),
+            can_resolve_disputes=bool(row[3]),
+        ),
+        rates=_rates_from_row(row[4], row[5]),
+        comm_settings=_comm_from_row(row[6], row[7]),
+    )
 
 
 @router.get("/me/shops", response_model=List[SupplierShopCardResponse])
@@ -925,6 +1008,29 @@ async def get_my_shops(
         # Роль: власник, якщо user_id збігається; інакше — менеджер
         is_owner = supplier.user_id == user.id
         product_count, completed_products = await _product_stats(db, supplier.id)
+        # RBAC: права поточного менеджера в цьому магазині (власник — None)
+        my_permissions: Optional[ManagerPermissions] = None
+        if not is_owner:
+            row = (
+                await db.execute(
+                    select(
+                        supplier_managers.c.can_edit_info,
+                        supplier_managers.c.can_manage_products,
+                        supplier_managers.c.can_view_balance,
+                        supplier_managers.c.can_resolve_disputes,
+                    ).where(
+                        supplier_managers.c.supplier_id == supplier.id,
+                        supplier_managers.c.user_id == user.id,
+                    )
+                )
+            ).first()
+            if row:
+                my_permissions = ManagerPermissions(
+                    can_edit_info=bool(row[0]),
+                    can_manage_products=bool(row[1]),
+                    can_view_balance=bool(row[2]),
+                    can_resolve_disputes=bool(row[3]),
+                )
         result.append(
             SupplierShopCardResponse(
                 id=supplier.id,
@@ -940,6 +1046,7 @@ async def get_my_shops(
                 completed_products=completed_products,
                 deletion_requested=_deletion_requested(supplier),
                 created_at=getattr(supplier, "created_at", None),
+                permissions=my_permissions,
             )
         )
     return result
@@ -1184,22 +1291,18 @@ async def update_supplier_by_id(
     return _to_detail_response(supplier, role, product_count, completed_products)
 
 
-@router.post("/me/invite-link", response_model=SupplierInviteLinkResponse)
+@router.post("/{supplier_id}/invite-link", response_model=SupplierInviteLinkResponse)
 async def create_manager_invite_link(
+    supplier_id: int,
     db: AsyncSession = Depends(get_db),
     authorization: Optional[str] = Header(default=None),
 ):
-    """Генерує інвайт-посилання для менеджера (токен живе 24 години)."""
-    telegram_id = _telegram_id_from_authorization(authorization)
-    if not telegram_id:
-        raise HTTPException(
-            status_code=401,
-            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
-        )
-
-    supplier = await _get_supplier_for_telegram(db, telegram_id)
-    if not supplier:
-        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+    """
+    Генерує інвайт-посилання для менеджера КОНКРЕТНОГО магазину
+    (токен живе 24 години). POST /api/v1/suppliers/{supplier_id}/invite-link
+    Доступ: лише власник магазину.
+    """
+    supplier, _owner = await _get_owned_supplier_or_403(db, supplier_id, authorization)
 
     token = secrets.token_urlsafe(16)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=INVITE_TOKEN_TTL_HOURS)
@@ -1227,31 +1330,23 @@ async def create_manager_invite_link(
     )
 
 
-@router.delete("/me/managers/{user_id}")
-async def delete_my_manager(
+@router.delete("/{supplier_id}/managers/{user_id}")
+async def delete_supplier_manager(
+    supplier_id: int,
     user_id: int,
     db: AsyncSession = Depends(get_db),
     authorization: Optional[str] = Header(default=None),
 ):
     """
-    Видаляє менеджера з магазину поточного власника.
-    DELETE /api/v1/suppliers/me/managers/{user_id}
+    Видаляє менеджера з КОНКРЕТНОГО магазину.
+    DELETE /api/v1/suppliers/{supplier_id}/managers/{user_id}
+    Доступ: лише власник магазину.
     """
-    telegram_id = _telegram_id_from_authorization(authorization)
-    if not telegram_id:
-        raise HTTPException(
-            status_code=401,
-            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
-        )
-
-    supplier = await _get_supplier_for_telegram(db, telegram_id)
-    if not supplier:
-        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+    supplier, owner = await _get_owned_supplier_or_403(db, supplier_id, authorization)
 
     # Захист: не можна видалити самозв'язку — власник (user_id) не є
     # рядком у supplier_managers, але на всяк випадок перевіряємо.
-    owner = await _get_user_by_telegram_id(db, telegram_id)
-    if owner and owner.id == user_id:
+    if owner.id == user_id:
         raise HTTPException(status_code=400, detail="Не можна видалити самого себе (власника).")
 
     # ПРЯМИЙ запит до таблиці-посередника — без ORM-колекцій і lazy-load.
@@ -1267,110 +1362,37 @@ async def delete_my_manager(
     await db.commit()
     logger.info(
         "Видалено менеджера user_id=%s зі supplier_id=%s (власник tg=%s)",
-        user_id, supplier.id, telegram_id,
+        user_id, supplier.id, owner.telegram_id,
     )
     return {"status": "ok"}
 
 
-@router.patch("/me/managers/{user_id}/permissions")
-async def update_my_manager_permissions(
-    user_id: int,
-    payload: ManagerPermissionsUpdateRequest,
-    db: AsyncSession = Depends(get_db),
-    authorization: Optional[str] = Header(default=None),
-):
-    """
-    Оновлює матрицю прав менеджера (RBAC).
-    PATCH /api/v1/suppliers/me/managers/{user_id}/permissions
-    Доступно ЛИШЕ власнику магазину (supplier.user_id == user.id).
-    """
-    telegram_id = _telegram_id_from_authorization(authorization)
-    if not telegram_id:
-        raise HTTPException(
-            status_code=401,
-            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
-        )
-
-    # Перевірка власника: _get_supplier_for_telegram шукає і за
-    # contact_telegram_id, і за user_id — контакт може бути не власником.
-    owner = await _get_user_by_telegram_id(db, telegram_id)
-    supplier = await _get_supplier_for_telegram(db, telegram_id)
-    if not supplier:
-        raise HTTPException(status_code=404, detail="Магазин не знайдено")
-    if not owner or supplier.user_id != owner.id:
-        raise HTTPException(
-            status_code=403,
-            detail="Керувати правами менеджерів може лише власник магазину.",
-        )
-    if owner.id == user_id:
-        raise HTTPException(status_code=400, detail="Не можна змінювати власні права.")
-
-    perms = payload.permissions
-
-    # ПРЯМИЙ атомарний UPDATE таблиці-посередника — без ORM-колекцій.
-    stmt = (
-        update(supplier_managers)
-        .where(supplier_managers.c.supplier_id == supplier.id)
-        .where(supplier_managers.c.user_id == user_id)
-        .values(
-            can_edit_info=perms.can_edit_info,
-            can_manage_products=perms.can_manage_products,
-            can_view_balance=perms.can_view_balance,
-            can_resolve_disputes=perms.can_resolve_disputes,
-        )
-    )
-    result = await db.execute(stmt)
-    if not result.rowcount:
-        raise HTTPException(status_code=404, detail="Менеджера з таким user_id у вашому магазині немає")
-
-    await db.commit()
-    logger.info(
-        "Оновлено права менеджера user_id=%s у supplier_id=%s (власник tg=%s): "
-        "edit_info=%s, manage_products=%s, view_balance=%s, resolve_disputes=%s",
-        user_id, supplier.id, telegram_id,
-        perms.can_edit_info, perms.can_manage_products,
-        perms.can_view_balance, perms.can_resolve_disputes,
-    )
-    return {"status": "ok", "permissions": perms}
-
-
-@router.patch("/me/managers/{user_id}/contract")
-async def update_my_manager_contract(
+@router.patch("/{supplier_id}/managers/{user_id}")
+async def update_supplier_manager(
+    supplier_id: int,
     user_id: int,
     payload: ManagerContractUpdateRequest,
     db: AsyncSession = Depends(get_db),
     authorization: Optional[str] = Header(default=None),
 ):
     """
-    Оновлює B2B-контракт менеджера: тарифи (rate_per_order, rate_per_dispute)
-    та/або права. PATCH /api/v1/suppliers/me/managers/{user_id}/contract
-    Доступно ЛИШЕ власнику магазину (supplier.user_id == user.id).
+    Оновлює B2B-контракт менеджера КОНКРЕТНОГО магазину: тарифи
+    (rates.rate_per_order / rates.rate_per_dispute), права (permissions)
+    та/або комунікацію (comm_settings).
+    PATCH /api/v1/suppliers/{supplier_id}/managers/{user_id}
+    Доступ: лише власник магазину (supplier.user_id == current_user.id).
     """
-    telegram_id = _telegram_id_from_authorization(authorization)
-    if not telegram_id:
-        raise HTTPException(
-            status_code=401,
-            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
-        )
-
-    owner = await _get_user_by_telegram_id(db, telegram_id)
-    supplier = await _get_supplier_for_telegram(db, telegram_id)
-    if not supplier:
-        raise HTTPException(status_code=404, detail="Магазин не знайдено")
-    if not owner or supplier.user_id != owner.id:
-        raise HTTPException(
-            status_code=403,
-            detail="Змінювати контракт менеджера може лише власник магазину.",
-        )
+    supplier, owner = await _get_owned_supplier_or_403(db, supplier_id, authorization)
     if owner.id == user_id:
         raise HTTPException(status_code=400, detail="Не можна змінювати контракт самого себе.")
 
     rates = payload.rates
     perms = payload.permissions
-    if not rates and not perms:
+    comm = payload.comm_settings
+    if not rates and not perms and not comm:
         raise HTTPException(
             status_code=400,
-            detail="Передайте rates та/або permissions для оновлення.",
+            detail="Передайте rates, permissions та/або comm_settings для оновлення.",
         )
 
     # Збираємо VALUES тільки з фактично переданих полів (partial update).
@@ -1383,6 +1405,9 @@ async def update_my_manager_contract(
         values["can_manage_products"] = perms.can_manage_products
         values["can_view_balance"] = perms.can_view_balance
         values["can_resolve_disputes"] = perms.can_resolve_disputes
+    if comm:
+        values["chat_channel"] = comm.chat_channel
+        values["receive_notifications"] = comm.receive_notifications
 
     # ПРЯМИЙ атомарний UPDATE таблиці-посередника — без ORM-колекцій.
     stmt = (
@@ -1398,104 +1423,71 @@ async def update_my_manager_contract(
     await db.commit()
     logger.info(
         "Оновлено контракт менеджера user_id=%s у supplier_id=%s (власник tg=%s): "
-        "rate_per_order=%s, rate_per_dispute=%s, perms=%s",
-        user_id, supplier.id, telegram_id,
+        "rate_per_order=%s, rate_per_dispute=%s, perms=%s, comm=%s",
+        user_id, supplier.id, owner.telegram_id,
         values.get("rate_per_order"), values.get("rate_per_dispute"),
         perms.model_dump() if perms else None,
+        comm.model_dump() if comm else None,
     )
     return {
         "status": "ok",
         "rates": rates.model_dump() if rates else None,
         "permissions": perms.model_dump() if perms else None,
+        "comm_settings": comm.model_dump() if comm else None,
     }
 
 
-@router.patch("/me/managers/{user_id}/communication")
-async def update_my_manager_communication(
-    user_id: int,
-    payload: ManagerCommSettingsUpdateRequest,
+@router.patch("/{supplier_id}/finance", response_model=SupplierResponse)
+async def update_supplier_finance(
+    supplier_id: int,
+    payload: SupplierFinanceUpdateRequest,
     db: AsyncSession = Depends(get_db),
     authorization: Optional[str] = Header(default=None),
 ):
     """
-    Оновлює комунікаційні налаштування менеджера (chat_channel,
-    receive_notifications). PATCH /api/v1/suppliers/me/managers/{user_id}/communication
-    Доступно самому менеджеру (user_id == свій id) АБО власнику магазину.
+    Налаштування фінансів магазину: авто-вивід з операційного балансу.
+    PATCH /api/v1/suppliers/{supplier_id}/finance
+    Доступ: лише власник (через _get_owned_supplier_or_403).
+    Тіло: auto_payout_enabled, auto_payout_schedule ('daily' | 'weekly').
     """
-    telegram_id = _telegram_id_from_authorization(authorization)
-    if not telegram_id:
-        raise HTTPException(
-            status_code=401,
-            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
-        )
+    supplier, _owner = await _get_owned_supplier_or_403(db, supplier_id, authorization)
 
-    me = await _get_user_by_telegram_id(db, telegram_id)
-    if not me:
-        raise HTTPException(status_code=403, detail="Користувача не знайдено")
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="Немає полів для оновлення")
 
-    is_self = me.id == user_id
-    supplier: Optional[Supplier] = None
+    if "auto_payout_enabled" in updates:
+        supplier.auto_payout_enabled = bool(updates["auto_payout_enabled"])
 
-    if is_self:
-        # Сам менеджер міняє СВОЇ налаштування: шукаємо перший магазин,
-        # де він менеджер (сортування як у /me/shops: активні першими).
-        # _get_supplier_for_telegram тут НЕ підходить — він шукає магазин
-        # лише за власником (user_id / contact_telegram_id).
-        supplier = (
-            await db.execute(
-                select(Supplier)
-                .join(supplier_managers, supplier_managers.c.supplier_id == Supplier.id)
-                .where(
-                    supplier_managers.c.user_id == me.id,
-                    Supplier.status != SupplierStatus.deleted,
+    if "auto_payout_schedule" in updates:
+        # None скидає графік; рядок нормалізуємо
+        schedule = updates["auto_payout_schedule"]
+        if schedule is not None:
+            schedule = str(schedule).strip().lower()
+            if schedule not in ("daily", "weekly"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="auto_payout_schedule має бути 'daily' або 'weekly'",
                 )
-                .order_by(
-                    (Supplier.status == SupplierStatus.active).desc(),
-                    Supplier.id.desc(),
-                )
-                .limit(1)
-            )
-        ).scalars().first()
-        if not supplier:
-            raise HTTPException(status_code=404, detail="Ви не є менеджером жодного магазину")
-    else:
-        # Хтось інший (очікувано власник) міняє налаштування менеджера user_id.
-        supplier = await _get_supplier_for_telegram(db, telegram_id)
-        if not supplier:
-            raise HTTPException(status_code=404, detail="Магазин не знайдено")
-        # _get_supplier_for_telegram шукає і за contact_telegram_id —
-        # контакт може бути не власником, тому перевіряємо строго.
-        if supplier.user_id != me.id:
-            raise HTTPException(
-                status_code=403,
-                detail="Змінювати канал комунікації може лише сам менеджер або власник магазину.",
-            )
+        supplier.auto_payout_schedule = schedule
 
-    comm = payload.comm_settings
+    try:
+        await db.commit()
+        await db.refresh(supplier)
+    except Exception as e:
+        await db.rollback()
+        logger.error("PATCH /suppliers/%s/finance: %s", supplier_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-    # ПРЯМИЙ атомарний UPDATE таблиці-посередника — без ORM-колекцій.
-    stmt = (
-        update(supplier_managers)
-        .where(supplier_managers.c.supplier_id == supplier.id)
-        .where(supplier_managers.c.user_id == user_id)
-        .values(
-            chat_channel=comm.chat_channel,
-            receive_notifications=comm.receive_notifications,
-        )
-    )
-    result = await db.execute(stmt)
-    if not result.rowcount:
-        raise HTTPException(status_code=404, detail="Менеджера з таким user_id у вашому магазині немає")
-
-    await db.commit()
     logger.info(
-        "Оновлено комунікацію менеджера user_id=%s у supplier_id=%s (tg=%s, %s): "
-        "chat_channel=%s, receive_notifications=%s",
-        user_id, supplier.id, telegram_id,
-        "сам менеджер" if is_self else "власник",
-        comm.chat_channel, comm.receive_notifications,
+        "Оновлено фінансові налаштування магазину #%s (власник tg=%s): "
+        "auto_payout_enabled=%s, auto_payout_schedule=%s",
+        supplier.id,
+        _owner.telegram_id,
+        supplier.auto_payout_enabled,
+        supplier.auto_payout_schedule,
     )
-    return {"status": "ok", "comm_settings": comm.model_dump()}
+    return supplier
 
 
 def _telegram_id_from_authorization(authorization: Optional[str]) -> Optional[int]:

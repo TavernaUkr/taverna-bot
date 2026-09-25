@@ -798,8 +798,6 @@ export async function verifyTelegramChannel(
 
 export const SUPPLIERS_REQUEST_DELETION_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/request-deletion`;
 export const SUPPLIERS_IMPORT_PROGRESS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/import-progress`;
-export const SUPPLIERS_MANAGERS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/managers`;
-export const SUPPLIERS_INVITE_LINK_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/invite-link`;
 export const MY_SHOPS_ENDPOINT = `${API_BASE_URL}/api/v1/suppliers/me/shops`;
 export const MY_WALLET_ENDPOINT = `${API_BASE_URL}/api/v1/wallets/me`;
 export const MY_WALLET_TRANSACTIONS_ENDPOINT = `${API_BASE_URL}/api/v1/wallets/me/transactions`;
@@ -1019,6 +1017,8 @@ export interface BackendMyShop {
   completed_products: number;
   deletion_requested: boolean;
   created_at?: string | null;
+  /** RBAC: права поточного менеджера в цьому магазині (власник — null = можна все). */
+  permissions?: ManagerPermissions | null;
 }
 
 /** GET /api/v1/suppliers/me/shops — магазини, де я власник або менеджер. */
@@ -1071,76 +1071,96 @@ export interface BackendSupplierInviteLink {
   expires_at?: string | null;
 }
 
-/** GET /api/v1/suppliers/me/managers — список менеджерів поточного магазину. */
-export async function getManagers(): Promise<BackendSupplierManager[]> {
+/** Базовий префікс мультитенантних роутів менеджерів конкретного магазину. */
+const supplierManagersEndpoint = (supplierId: number) =>
+  `${SUPPLIER_DETAIL_ENDPOINT}/${supplierId}/managers`;
+
+/** GET /api/v1/suppliers/{supplierId}/managers — список менеджерів магазину (лише власник). */
+export async function getStoreManagers(
+  supplierId: number
+): Promise<BackendSupplierManager[]> {
   const data = await backendGet<BackendSupplierManager[]>(
-    SUPPLIERS_MANAGERS_ENDPOINT,
+    supplierManagersEndpoint(supplierId),
     adminTelegramHeaders()
   );
   return Array.isArray(data) ? data.filter(Boolean) : [];
 }
 
-/** POST /api/v1/suppliers/me/invite-link — згенерувати інвайт (токен живе 24 год). */
-export async function generateManagerInviteLink(): Promise<BackendSupplierInviteLink> {
+/**
+ * POST /api/v1/suppliers/{supplierId}/invite-link — згенерувати інвайт
+ * для конкретного магазину (токен живе 24 год). Лише власник.
+ */
+export async function generateInviteLink(
+  supplierId: number
+): Promise<BackendSupplierInviteLink> {
   return backendPost<BackendSupplierInviteLink>(
-    SUPPLIERS_INVITE_LINK_ENDPOINT,
+    `${SUPPLIER_DETAIL_ENDPOINT}/${supplierId}/invite-link`,
     {},
     "Не вдалося згенерувати посилання-запрошення",
     adminTelegramHeaders()
   );
 }
 
-/** DELETE /api/v1/suppliers/me/managers/{user_id} — видалити менеджера (тільки власник). */
-export async function removeManager(userId: number): Promise<{ status: string }> {
+/** DELETE /api/v1/suppliers/{supplierId}/managers/{user_id} — видалити менеджера (лише власник). */
+export async function removeManager(
+  supplierId: number,
+  userId: number
+): Promise<{ status: string }> {
   return backendDelete<{ status: string }>(
-    `${SUPPLIERS_MANAGERS_ENDPOINT}/${userId}`,
+    `${supplierManagersEndpoint(supplierId)}/${userId}`,
     "Не вдалося видалити менеджера",
     adminTelegramHeaders()
   );
 }
 
-/** PATCH /api/v1/suppliers/me/managers/{user_id}/permissions — оновити права менеджера (RBAC). */
-export async function updateManagerPermissions(
-  userId: number,
-  permissions: ManagerPermissions
-): Promise<{ status: string; permissions: ManagerPermissions }> {
-  return backendPatch<{ status: string; permissions: ManagerPermissions }>(
-    `${SUPPLIERS_MANAGERS_ENDPOINT}/${userId}/permissions`,
-    { permissions },
-    "Не вдалося оновити права менеджера",
-    adminTelegramHeaders()
-  );
-}
-
 /**
- * PATCH /api/v1/suppliers/me/managers/{user_id}/contract
- * Оновлює B2B-контракт менеджера: тарифи та/або права (лише власник).
+ * PATCH /api/v1/suppliers/{supplierId}/managers/{user_id}
+ * Оновлює контракт менеджера конкретного магазину: тарифи (rates),
+ * права (permissions) та/або комунікацію (comm_settings). Лише власник.
  * rates передаються В КОПІЙКАХ — конвертую гривні→копійки робить викликець.
  */
 export async function updateManagerContract(
+  supplierId: number,
   userId: number,
-  payload: { rates?: ManagerContractRates; permissions?: ManagerPermissions }
-): Promise<{ status: string; rates?: ManagerContractRates | null; permissions?: ManagerPermissions | null }> {
-  return backendPatch<{ status: string; rates?: ManagerContractRates | null; permissions?: ManagerPermissions | null }>(
-    `${SUPPLIERS_MANAGERS_ENDPOINT}/${userId}/contract`,
+  payload: {
+    rates?: ManagerContractRates;
+    permissions?: ManagerPermissions;
+    comm_settings?: ManagerCommSettings;
+  }
+): Promise<{
+  status: string;
+  rates?: ManagerContractRates | null;
+  permissions?: ManagerPermissions | null;
+  comm_settings?: ManagerCommSettings | null;
+}> {
+  return backendPatch<
+    | { status: string; rates?: ManagerContractRates | null; permissions?: ManagerPermissions | null; comm_settings?: ManagerCommSettings | null }
+  >(
+    `${supplierManagersEndpoint(supplierId)}/${userId}`,
     payload,
     "Не вдалося оновити контракт менеджера",
     adminTelegramHeaders()
   );
 }
 
+/** Власний контракт менеджера магазину (RBAC-права + тарифи + комунікація). */
+export interface BackendMyManagerContract {
+  supplier_id: number;
+  user_id: number;
+  permissions: ManagerPermissions;
+  rates: ManagerContractRates;
+  comm_settings: ManagerCommSettings;
+}
+
 /**
- * PATCH /api/v1/suppliers/me/managers/{user_id}/communication
- * Оновлює канал комунікації менеджера (сам менеджер або власник).
+ * GET /api/v1/suppliers/{supplierId}/managers/me — контракт поточного
+ * менеджера цього магазину. 403, якщо юзер не менеджер даного магазину.
  */
-export async function updateManagerCommunication(
-  userId: number,
-  commSettings: ManagerCommSettings
-): Promise<{ status: string; comm_settings: ManagerCommSettings }> {
-  return backendPatch<{ status: string; comm_settings: ManagerCommSettings }>(
-    `${SUPPLIERS_MANAGERS_ENDPOINT}/${userId}/communication`,
-    { comm_settings: commSettings },
-    "Не вдалося оновити комунікаційні налаштування",
+export async function getMyManagerContract(
+  supplierId: number
+): Promise<BackendMyManagerContract> {
+  return backendGet<BackendMyManagerContract>(
+    `${supplierManagersEndpoint(supplierId)}/me`,
     adminTelegramHeaders()
   );
 }
@@ -1704,4 +1724,88 @@ export async function closeTicket(ticketId: number): Promise<BackendTicket> {
     "Не вдалося закрити тікет",
     tgAuthHeaders()
   );
+}
+
+// --- Контекстний AI-чат підтримки (B2C): Категорії → AI → Тікет ----------------
+
+/** Категорії флоу «Підтримка» (екран 1). */
+export type SupportCategory = "supplier" | "tech" | "complaint" | "rating";
+
+/** Одне повідомлення історії AI-чату підтримки. */
+export interface SupportAiMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/** POST /api/v1/support/ai/chat — відповідь контекстного AI. */
+export interface SupportAiChatResult {
+  reply: string;
+  escalate: boolean;
+  ticket_topic?: string | null;
+  ticket_text?: string | null;
+}
+
+/**
+ * POST /api/v1/support/ai/chat
+ * Приймає категорію + історію повідомлень, повертає відповідь AI,
+ * прапорець ескалації до живої людини та зібраний текст тікета.
+ * Системний промт живе на бекенді і залежить від категорії.
+ */
+export async function supportAiChat(
+  category: SupportCategory,
+  messages: SupportAiMessage[],
+  context?: { supplier_id?: number; order_id?: number }
+): Promise<SupportAiChatResult> {
+  return backendPost<SupportAiChatResult>(
+    `${API_BASE_URL}/api/v1/support/ai/chat`,
+    {
+      category,
+      messages,
+      supplier_id: context?.supplier_id ?? null,
+      order_id: context?.order_id ?? null,
+    },
+    "AI-асистент недоступний",
+    tgAuthHeaders()
+  );
+}
+
+/** Тема тікета для POST /api/v1/tickets/ (topic). */
+export type CreateTicketTopic = "delivery" | "refund" | "question" | "other" | "complaint";
+
+/**
+ * POST /api/v1/tickets/ — клієнт створює тікет (ескалація до людини).
+ * Перше повідомлення створюється бекендом з payload.text.
+ * topic='complaint' + supplier_id службового магазину — скарги на персонал.
+ */
+export async function createBackendTicket(
+  payload: {
+    supplier_id: number;
+    order_id?: number | null;
+    topic: CreateTicketTopic;
+    text: string;
+  }
+): Promise<BackendTicket> {
+  return backendPost<BackendTicket>(
+    `${TICKETS_ENDPOINT}/`,
+    payload,
+    "Не вдалося створити звернення",
+    tgAuthHeaders()
+  );
+}
+
+/**
+ * GET /api/v1/support/ai/support-shop — ID службового магазину платформи
+ * «Taverna Support». До нього прив'язуємо тікети тех. підтримки та скарг
+ * на модератора/адміна (supplier_id NOT NULL у тікетах).
+ */
+export async function resolveSupportShopId(): Promise<number | null> {
+  try {
+    const data = await backendGet<{ supplier_id?: number }>(
+      `${API_BASE_URL}/api/v1/support/ai/support-shop`
+    );
+    const id = Number(data?.supplier_id);
+    return Number.isFinite(id) && id > 0 ? id : null;
+  } catch {
+    return null;
+  }
 }

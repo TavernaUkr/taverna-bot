@@ -225,6 +225,13 @@ class Supplier(Base):
     payout_method = Column(Enum(PayoutMethod), nullable=True, default=PayoutMethod.iban)
     payout_iban = Column(String(100), nullable=True)
     payout_card_token = Column(String(255), nullable=True)
+
+    # --- Фінансовий спліт: операційний баланс магазину (копійки) ---
+    balance = Column(Integer, nullable=False, default=0)  # Загальний заробіток магазину
+    platform_debt = Column(Integer, nullable=False, default=0)  # Борг перед платформою
+    managers_debt = Column(Integer, nullable=False, default=0)  # Борг перед менеджерами
+    auto_payout_enabled = Column(Boolean, nullable=False, default=False)  # Авто-вивід на глобальний гаманець
+    auto_payout_schedule = Column(String(20), nullable=True)  # 'daily' | 'weekly'
     
     legal_name = Column(String(255), nullable=True)
     ipn = Column(String(20), nullable=True)
@@ -515,7 +522,11 @@ class Transaction(Base):
     __tablename__ = "transactions"
 
     id = Column(Integer, primary_key=True)
-    wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=False, index=True)
+    # wallet_idnullable: транзакції ОПЕРАЦІЙНОГО БАЛАНСУ МАГАЗИНУ
+    # (фінансовий спліт) не належать гаманцю — їх прив'язуємо через
+    # supplier_id. Для звичайних рухів коштів гаманця supplier_id=NULL.
+    wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=True, index=True)
+    supplier_id = Column(Integer, ForeignKey("suppliers.id"), nullable=True, index=True)
 
     amount = Column(Integer, nullable=False)
     currency = Column(String(10), nullable=False, default="UAH")   # 'UAH' | 'BONUS'
@@ -526,6 +537,7 @@ class Transaction(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     wallet = relationship("Wallet", back_populates="transactions")
+    supplier = relationship("Supplier")
 
 
 # --- Омніканальний комунікаційний міст: Support Tickets + AI-роутинг ---

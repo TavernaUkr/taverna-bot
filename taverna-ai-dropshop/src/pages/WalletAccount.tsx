@@ -27,6 +27,7 @@ import { formatLocalTime } from "@/utils/dateFormatter";
 import { WalletOverview } from "@/components/wallet/WalletOverview";
 import { WalletActionBar } from "@/components/wallet/WalletActionBar";
 import { WalletRatingCard } from "@/components/wallet/WalletRatingCard";
+import { WalletOffers } from "@/components/wallet/WalletOffers";
 
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { hapticSelection } from "@/lib/haptics";

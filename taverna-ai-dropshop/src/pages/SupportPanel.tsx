@@ -112,22 +112,30 @@ export default function SupportPanel() {
 
   const activeTicket = tickets.find((t) => t.id === activeTicketId) ?? null;
   const isTicketClosed = activeTicket?.status === "closed";
-  // Тікет нічий — жоден менеджер його ще не узяв
-  const isTicketUnclaimed = activeTicket != null && activeTicket.assigned_manager_id == null;
+  // Тікет нічий — жоден менеджер його ще не узяв (лише для сторони магазину)
+  const isTicketUnclaimed =
+    isShopSide && activeTicket != null && activeTicket.assigned_manager_id == null;
   // Тікет узяв я (порівнюємо внутрішні ID користувачів FastAPI)
   const isTicketMine =
     activeTicket?.assigned_manager_id != null &&
     currentUserId != null &&
     activeTicket.assigned_manager_id === currentUserId;
+  // Клієнт завжди може писати у власний тікет (він автор);
+  // менеджер — лише після взяття тікета в роботу.
+  const canWrite = isShopSide ? isTicketMine : activeTicket != null;
 
-  // --- Завантаження списку тікетів (role='manager') ---
+  // --- Завантаження списку тікетів (manager: тікети своїх магазинів / customer: власні) ---
   const loadTickets = useCallback(async () => {
+    if (!isShopSide && !isAuthenticated) {
+      setIsLoadingTickets(false);
+      return;
+    }
     try {
-      const data = await getMyTickets("manager");
+      const data = await getMyTickets(isShopSide ? "manager" : "customer");
       setTickets(data);
       setLoadError(null);
     } catch (err) {
-      console.error("Error loading manager tickets:", err);
+      console.error("Error loading tickets:", err);
       setLoadError(
         err instanceof Error
           ? err.message
@@ -136,7 +144,7 @@ export default function SupportPanel() {
     } finally {
       setIsLoadingTickets(false);
     }
-  }, []);
+  }, [isShopSide, isAuthenticated]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -222,7 +230,12 @@ export default function SupportPanel() {
     hapticSelection();
     setIsSending(true);
     try {
-      const sent = await sendTicketMessage(activeTicketId, text, "manager");
+      // Клієнт пише від себе; представник магазину — як 'manager'.
+      const sent = await sendTicketMessage(
+        activeTicketId,
+        text,
+        isShopSide ? "manager" : "customer"
+      );
       setMessages((prev) => (prev.some((m) => m.id === sent.id) ? prev : [...prev, sent]));
       setNewMessageText("");
       // Оновлюємо last_message_at у списку
@@ -297,16 +310,16 @@ export default function SupportPanel() {
     }
   };
 
-  // --- Гейт: лише авторизовані представники магазину ---
+  // --- Гейт: лише авторизовані користувачі ---
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-background flex flex-col">
-        <PanelHeader title="Підтримка магазинів" />
+        <PanelHeader title={isShopSide ? "Підтримка магазинів" : "Мої звернення"} />
         <div className="flex-1 flex items-center justify-center p-6">
           <div className="text-center space-y-3">
             <MessageSquare className="h-12 w-12 mx-auto text-muted-foreground opacity-50" />
             <p className="text-sm text-muted-foreground">
-              Авторизуйтесь через Telegram, щоб відповідати клієнтам
+              Авторизуйтесь через Telegram, щоб{isShopSide ? " відповідати клієнтам" : " бачити свої звернення"}
             </p>
           </div>
         </div>
@@ -336,7 +349,9 @@ export default function SupportPanel() {
             <MessageSquare className="h-5 w-5 text-primary" />
           </div>
           <div className="flex-1 min-w-0">
-            <h1 className="font-semibold text-foreground truncate">Панель підтримки</h1>
+            <h1 className="font-semibold text-foreground truncate">
+              {isShopSide ? "Панель підтримки" : "Мої звернення"}
+            </h1>
             <p className="text-xs text-muted-foreground truncate">
               {activeTicket
                 ? `${TOPIC_LABELS[activeTicket.topic] ?? activeTicket.topic} • ${
@@ -349,7 +364,7 @@ export default function SupportPanel() {
                 : `Тікетів: ${tickets.length}`}
             </p>
           </div>
-          {activeTicket && (
+          {activeTicket && isShopSide && (
             <Button
               variant="outline"
               size="sm"
@@ -395,9 +410,14 @@ export default function SupportPanel() {
               <div className="text-center py-12 px-4 text-muted-foreground">
                 <MessageSquare className="h-10 w-10 mx-auto mb-3 opacity-50" />
                 <p className="text-sm">Звернень поки немає</p>
-                {isShopSide && (
+                {isShopSide ? (
                   <p className="text-xs mt-1 opacity-70">
                     Тут з'являться тікети клієнтів ваших магазинів
+                  </p>
+                ) : (
+                  <p className="text-xs mt-1 opacity-70">
+                    Створіть звернення на сторінці «Підтримка» — AI допоможе, а за потреби
+                    підключить менеджера
                   </p>
                 )}
               </div>
@@ -438,8 +458,9 @@ export default function SupportPanel() {
                       >
                         {badge.label}
                       </span>
-                      {/* Мій тікет: узяв у роботу поточний менеджер */}
-                      {ticket.assigned_manager_id != null &&
+                      {/* Мій тікет: узяв у роботу поточний менеджер (лише сторона магазину) */}
+                      {isShopSide &&
+                        ticket.assigned_manager_id != null &&
                         currentUserId != null &&
                         ticket.assigned_manager_id === currentUserId && (
                           <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-emerald-500/10 text-emerald-500 flex items-center gap-1">
@@ -447,8 +468,8 @@ export default function SupportPanel() {
                             Мій
                           </span>
                         )}
-                      {/* Нічийний тікет — можна взяти в роботу */}
-                      {ticket.assigned_manager_id == null && ticket.status !== "closed" && (
+                      {/* Нічийний тікет — можна взяти в роботу (лише сторона магазину) */}
+                      {isShopSide && ticket.assigned_manager_id == null && ticket.status !== "closed" && (
                         <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-teal-500/10 text-teal-500">
                           Нічийний
                         </span>
@@ -490,7 +511,9 @@ export default function SupportPanel() {
               <div className="text-center space-y-3">
                 <Store className="h-12 w-12 mx-auto text-muted-foreground opacity-50" />
                 <p className="text-sm text-muted-foreground">
-                  Оберіть тікет зі списку, щоб відповісти клієнту
+                  {isShopSide
+                    ? "Оберіть тікет зі списку, щоб відповісти клієнту"
+                    : "Оберіть звернення зі списку, щоб продовжити діалог"}
                 </p>
               </div>
             </div>
@@ -527,9 +550,14 @@ export default function SupportPanel() {
                   </p>
                 ) : (
                   messages.map((message) => {
-                    const isMine = message.sender_role === "manager" || message.sender_role === "supplier";
+                    // Сторона магазину: свої (manager/supplier) та AI-бот — праворуч.
+                    // Клієнт: свої (customer) — праворуч, менеджер та AI — ліворуч.
                     const isBot = message.sender_role === "ai_bot";
-                    const alignRight = isMine || isBot;
+                    const isMine = isShopSide
+                      ? message.sender_role === "manager" || message.sender_role === "supplier"
+                      : message.sender_role === "customer";
+                    const alignRight = isShopSide ? isMine || isBot : isMine;
+                    const peerLabel = isShopSide ? "Клієнт" : "Менеджер";
                     return (
                       <div
                         key={message.id}
@@ -546,11 +574,11 @@ export default function SupportPanel() {
                           >
                             {!alignRight && (
                               <p className="text-[11px] font-medium text-primary mb-1 flex items-center gap-1">
-                                <User className="h-3 w-3" />
-                                Клієнт
+                                {isBot ? <Bot className="h-3 w-3" /> : <User className="h-3 w-3" />}
+                                {isBot ? "AI-бот" : peerLabel}
                               </p>
                             )}
-                            {isBot && (
+                            {alignRight && isBot && (
                               <p className="text-[11px] font-medium text-primary-foreground/80 mb-1 flex items-center gap-1">
                                 <Bot className="h-3 w-3" />
                                 AI-бот
@@ -579,9 +607,11 @@ export default function SupportPanel() {
                 <div className="shrink-0 border-t border-border bg-muted/50 p-4 text-center">
                   <p className="text-sm text-muted-foreground flex items-center justify-center gap-2">
                     <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                    Тікет закрито. {activeTicket.ai_summary ? "AI-звіт згенеровано." : "AI-звіт генерується..."}
+                    {isShopSide
+                      ? `Тікет закрито. ${activeTicket.ai_summary ? "AI-звіт згенеровано." : "AI-звіт генерується..."}`
+                      : "Звернення вирішено. Дякуємо за терпіння!"}
                   </p>
-                  {!activeTicket.ai_summary && (
+                  {isShopSide && !activeTicket.ai_summary && (
                     <p className="text-xs text-muted-foreground mt-1">
                       Оновлюється автоматично — можете повернутись до списку
                     </p>
@@ -616,18 +646,20 @@ export default function SupportPanel() {
                       value={newMessageText}
                       onChange={(e) => setNewMessageText(e.target.value)}
                       placeholder={
-                        isTicketMine
-                          ? "Напишіть відповідь клієнту..."
-                          : "Тікет у іншого менеджера — читання доступне, писати може лише він"
+                        !canWrite
+                          ? "Тікет у іншого менеджера — читання доступне, писати може лише він"
+                          : isShopSide
+                            ? "Напишіть відповідь клієнту..."
+                            : "Напишіть повідомлення менеджеру..."
                       }
                       className="flex-1 bg-muted border-0"
-                      disabled={isSending || !isTicketMine}
+                      disabled={isSending || !canWrite}
                       maxLength={4000}
                     />
                     <Button
                       type="submit"
                       size="icon"
-                      disabled={!newMessageText.trim() || isSending || !isTicketMine}
+                      disabled={!newMessageText.trim() || isSending || !canWrite}
                       className="shrink-0"
                       aria-label="Відправити"
                     >
@@ -638,7 +670,7 @@ export default function SupportPanel() {
                       )}
                     </Button>
                   </form>
-                  {isTicketMine && (
+                  {isShopSide && isTicketMine && (
                     <p className="text-xs text-muted-foreground mt-1.5 flex items-center gap-1">
                       <UserCheck className="h-3 w-3 text-emerald-500" />
                       Тікет у вас в роботі

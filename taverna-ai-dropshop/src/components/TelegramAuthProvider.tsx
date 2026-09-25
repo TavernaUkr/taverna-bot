@@ -237,6 +237,7 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
     user_type: effectiveRole === 'supplier' ? 'supplier' : 'customer',
     telegram_username: `test_${effectiveRole}`,
     is_active: true,
+    avatar_url: null as string | null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   } : null;

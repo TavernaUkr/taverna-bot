@@ -414,7 +414,7 @@ class ManagerCommSettings(BaseModel):
 
 
 class SupplierManagerResponse(BaseModel):
-    """Менеджер магазину для GET /suppliers/me/managers."""
+    """Менеджер магазину для GET /suppliers/{supplier_id}/managers."""
     user_id: int
     telegram_id: Optional[int] = None
     username: Optional[str] = None
@@ -426,30 +426,28 @@ class SupplierManagerResponse(BaseModel):
     comm_settings: ManagerCommSettings = Field(default_factory=ManagerCommSettings)
 
 
-class ManagerPermissionsUpdateRequest(BaseModel):
-    """Тіло PATCH /suppliers/me/managers/{user_id}/permissions."""
-    permissions: ManagerPermissions
-
-
 class ManagerContractUpdateRequest(BaseModel):
     """
-    Тіло PATCH /suppliers/me/managers/{user_id}/contract.
-    Доступно ЛИШЕ власнику: тарифи + права (все опційне, крім хоча б одного поля).
+    Тіло PATCH /suppliers/{supplier_id}/managers/{user_id}.
+    Доступно ЛИШЕ власнику: тарифи + права + комунікація
+    (все опційне, крім хоча б одного поля).
     """
     rates: Optional[ManagerContractRates] = None
     permissions: Optional[ManagerPermissions] = None
+    comm_settings: Optional[ManagerCommSettings] = None
 
 
-class ManagerCommSettingsUpdateRequest(BaseModel):
-    """
-    Тіло PATCH /suppliers/me/managers/{user_id}/communication.
-    Доступно самому менеджеру (щоб обрати канал) або власнику.
-    """
-    comm_settings: ManagerCommSettings
+class ManagerContractMeResponse(BaseModel):
+    """Власний контракт менеджера: GET /suppliers/{supplier_id}/managers/me."""
+    supplier_id: int
+    user_id: int
+    permissions: ManagerPermissions = Field(default_factory=ManagerPermissions)
+    rates: ManagerContractRates = Field(default_factory=ManagerContractRates)
+    comm_settings: ManagerCommSettings = Field(default_factory=ManagerCommSettings)
 
 
 class SupplierInviteLinkResponse(BaseModel):
-    """Відповідь POST /suppliers/me/invite-link."""
+    """Відповідь POST /suppliers/{supplier_id}/invite-link."""
     ok: bool = True
     link: str
     token: str
@@ -471,6 +469,19 @@ class SupplierShopCardResponse(UtcJsonDates):
     completed_products: int = 0
     deletion_requested: bool = False
     created_at: Optional[datetime] = None
+    # RBAC: права поточного юзера-менеджера в цьому магазині
+    # (для власника — None, тобто можна все).
+    permissions: Optional[ManagerPermissions] = None
+
+
+class SupplierFinanceUpdateRequest(BaseModel):
+    """
+    Тіло PATCH /api/v1/suppliers/{supplier_id}/finance — налаштування
+    авто-виводу магазину. Доступ: лише власник.
+    """
+    auto_payout_enabled: Optional[bool] = None
+    # Регламент авто-виводу: 'daily' (щодня) | 'weekly' (щотижня)
+    auto_payout_schedule: Optional[Literal["daily", "weekly"]] = None
 
 
 class SupplierUpdateRequest(BaseModel):
@@ -978,6 +989,14 @@ class SupplierResponse(BaseModel):
     payout_method: Optional[PayoutMethod] = None
     payout_iban: Optional[str] = None
     payout_card_token: Optional[str] = None
+
+    # --- Фінансовий спліт магазину (суми в копійках) ---
+    balance: int = 0
+    platform_debt: int = 0
+    managers_debt: int = 0
+    auto_payout_enabled: bool = False
+    auto_payout_schedule: Optional[str] = None
+
     created_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
     restored_at: Optional[datetime] = None
@@ -1004,6 +1023,9 @@ class TransactionResponse(BaseModel):
 
     id: int
     wallet_id: int
+    # Фінансовий спліт: транзакції ОПЕРАЦІЙНОГО БАЛАНСУ МАГАЗИНУ
+    # прив'язані до supplier_id (гаманцеві — NULL).
+    supplier_id: Optional[int] = None
     amount: int
     currency: str = "UAH"
     type: str
@@ -1018,7 +1040,9 @@ class TicketCreate(BaseModel):
     """Створення тікета клієнтом (за замовчуванням status='ai_handling')."""
     supplier_id: int = Field(gt=0)
     order_id: Optional[int] = Field(default=None, gt=0)
-    topic: Literal["delivery", "refund", "question", "other"]
+    # 'complaint' — скарги на модератора/адміна/продавця (флоу «Підтримка»);
+    # решта — стандартні теми B2C-тикетів.
+    topic: Literal["delivery", "refund", "question", "other", "complaint"]
     text: str = Field(min_length=1, max_length=4000, description="Перше повідомлення в тікет")
 
 

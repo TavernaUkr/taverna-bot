@@ -1,0 +1,1 @@
+{"sessionId": "083e63", "id": "log_1790376045023", "timestamp": 1790376045023, "location": "db.py:insert-ok", "message": "support supplier inserted", "data": {"key": "taverna_support", "type": "independent", "hypothesisId": "A", "runId": "run1"}}

@@ -39,7 +39,7 @@ from services import (
     payout_service, publisher_service,
     omnichannel_service as ads_service # <-- ОНОВЛЕНО
 )
-from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession, ensure_supplier_status_timestamps, ensure_user_settings_columns, ensure_supplier_telegram_source_columns, ensure_supplier_parsing_status, ensure_ai_categorization_rules_table, ensure_supplier_history_log_table, ensure_supplier_showcase_columns, ensure_supplier_managers_permissions_columns, ensure_wallet_tables, ensure_ticket_tables, ensure_ticket_ai_columns
+from database.db import Base, engine, AsyncSessionLocal, get_db, AsyncSession, ensure_supplier_status_timestamps, ensure_user_settings_columns, ensure_supplier_telegram_source_columns, ensure_supplier_parsing_status, ensure_ai_categorization_rules_table, ensure_supplier_history_log_table, ensure_supplier_showcase_columns, ensure_supplier_managers_permissions_columns, ensure_supplier_finance_columns, ensure_wallet_tables, ensure_ticket_tables, ensure_ticket_ai_columns, ensure_platform_support_supplier
 from services.ai_queue_worker import start_ai_product_queue
 from database.models import * # (Імпортуємо все)
 from config_reader import config
@@ -56,6 +56,7 @@ from api.admin_suppliers import router as admin_suppliers_router
 from api.admin_rules import router as admin_rules_router
 from api.wallets import router as wallets_router  # GET /api/v1/wallets/me + /me/transactions
 from api.tickets import router as tickets_router  # CRUD /api/v1/tickets (омніканальний міст)
+from api.support_ai import router as support_ai_router  # POST /api/v1/support/ai/chat (контекстний AI-чат B2C)
 from services.auth_service import get_current_user
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,10 @@ async def startup_event():
     except Exception as e:
         logger.error("Не вдалося додати RBAC-колонки supplier_managers: %s", e, exc_info=True)
     try:
+        await ensure_supplier_finance_columns()
+    except Exception as e:
+        logger.error("Не вдалося додати фінансові колонки suppliers (balance/platform_debt/managers_debt/auto_payout): %s", e, exc_info=True)
+    try:
         await ensure_wallet_tables()
     except Exception as e:
         logger.error("Не вдалося створити таблиці wallets/transactions: %s", e, exc_info=True)
@@ -123,6 +128,10 @@ async def startup_event():
         await ensure_ticket_ai_columns()
     except Exception as e:
         logger.error("Не вдалося додати AI-колонки тікетів (ai_summary/media_url/is_transcribed): %s", e, exc_info=True)
+    try:
+        await ensure_platform_support_supplier()
+    except Exception as e:
+        logger.error("Не вдалося створити службовий магазин платформи (taverna_support): %s", e, exc_info=True)
     try:
         await start_ai_product_queue()
     except Exception as e:
@@ -522,6 +531,7 @@ app.include_router(orders_router)  # Checkout з Mini App (POST /api/v1/orders/)
 app.include_router(users_router)  # PATCH /api/v1/users/me/settings
 app.include_router(wallets_router)  # GET /api/v1/wallets/me, /api/v1/wallets/me/transactions
 app.include_router(tickets_router)  # POST/GET /api/v1/tickets (Support Tickets + AI-роутинг)
+app.include_router(support_ai_router)  # POST /api/v1/support/ai/chat (контекстний AI-чат B2C)
 
 # --- Віддача статичних файлів (Frontend) ---
 static_dir = Path(__file__).parent / "static"

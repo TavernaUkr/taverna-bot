@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft, Store, Plus, Package, Settings, Users, LifeBuoy, Wallet,
   TrendingUp, Megaphone, Send, Loader2, Trash2,
-  Eye, Gift, Trophy, ThumbsUp, MessageCircle,
+  Eye, Gift, Trophy, ThumbsUp, MessageCircle, User,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +42,13 @@ interface ShopInfo {
   status?: string;
   completed_products?: number;
   deletion_requested?: boolean;
+  /** RBAC: права менеджера в цьому магазині (для власника — null, тобто можна все). */
+  permissions?: {
+    can_edit_info: boolean;
+    can_manage_products: boolean;
+    can_view_balance: boolean;
+    can_resolve_disputes: boolean;
+  } | null;
 }
 
 function supplierStatusLabel(status?: string) {
@@ -102,6 +109,7 @@ const isLovableDevEnvironment = () => {
 function StoreCard({
   shop,
   canEdit,
+  canViewBalance,
   onView,
   onSettings,
   onManagers,
@@ -109,9 +117,11 @@ function StoreCard({
   onWallet,
   onPromo,
   onDelete,
+  onMiniIcon,
 }: {
   shop: ShopInfo;
   canEdit: boolean;
+  canViewBalance: boolean;
   onView: (shop: ShopInfo) => void;
   onSettings: (shop: ShopInfo) => void;
   onManagers: (shop: ShopInfo) => void;
@@ -119,6 +129,8 @@ function StoreCard({
   onWallet: (shop: ShopInfo) => void;
   onPromo: (shop: ShopInfo) => void;
   onDelete: (shop: ShopInfo) => void;
+  /** Міні-іконки хедера: bonuses / rating / reviews → свій маршрут на магазин. */
+  onMiniIcon: (target: "bonuses" | "rating" | "reviews", shop: ShopInfo) => void;
 }) {
   /** Міні-іконка без тексту (кнопки 7–10 у хедері картки). */
   const HeaderIconButton = ({
@@ -201,10 +213,10 @@ function StoreCard({
 
         {/* Міні-іконки справа зверху (кнопки 7, 8, 9, 10) */}
         <div className="absolute top-2 right-2 z-10 flex gap-1.5">
-          <HeaderIconButton icon={Gift} title="Бонуси" onClick={() => onView(shop)} />
-          <HeaderIconButton icon={Trophy} title="Рейтинг" onClick={() => onView(shop)} />
-          <HeaderIconButton icon={ThumbsUp} title="Оцінка" onClick={() => onView(shop)} />
-          <HeaderIconButton icon={MessageCircle} title="Відгуки" onClick={() => onView(shop)} />
+          <HeaderIconButton icon={Gift} title="Бонуси магазину" onClick={() => onMiniIcon("bonuses", shop)} />
+          <HeaderIconButton icon={Trophy} title="Рейтинг магазину" onClick={() => onMiniIcon("rating", shop)} />
+          <HeaderIconButton icon={ThumbsUp} title="Оцінка" onClick={() => onMiniIcon("rating", shop)} />
+          <HeaderIconButton icon={MessageCircle} title="Відгуки" onClick={() => onMiniIcon("reviews", shop)} />
         </div>
 
         {/* Кнопка 6: Eye (Перегляд магазину) — явна іконка перегляду */}
@@ -291,23 +303,23 @@ function StoreCard({
 
       {/* === 2. ТІЛО: grid-cols-2 з 4 кнопок (кнопки 1–4) === */}
       <div className="grid grid-cols-2 gap-2 p-3">
-        {/* Кнопка 1 (зліва зверху): Керування (Settings) */}
+        {/* Кнопка 1 (зліва зверху): Керування (Settings) — owner або manager з can_edit_info */}
         <GridAction
           icon={Settings}
           label="Керування"
           onClick={() => onSettings(shop)}
-          className={canEdit ? "" : "opacity-50"}
+          disabled={!canEdit}
         />
-        {/* Кнопка 3 (справа зверху): Баланс (Wallet) */}
-        <GridAction icon={Wallet} label="Баланс" onClick={() => onWallet(shop)} />
+        {/* Кнопка 3 (справа зверху): Баланс (Wallet) — owner або manager з can_view_balance */}
+        <GridAction icon={Wallet} label="Баланс" onClick={() => onWallet(shop)} disabled={!canViewBalance} />
         {/* Кнопка 2 (зліва знизу): Просування (TrendingUp) */}
         <GridAction icon={TrendingUp} label="Просування" onClick={() => onPromo(shop)} />
-        {/* Кнопка 4 (справа знизу): Менеджери (Users) — лише власник */}
+        {/* Кнопка 4 (справа знизу): Менеджери — власник; «Для мене» — менеджер
+            (дивиться власні права + інструкцію) */}
         <GridAction
-          icon={Users}
-          label="Менеджери"
+          icon={shop.role === "manager" ? User : Users}
+          label={shop.role === "manager" ? "Для мене" : "Менеджери"}
           onClick={() => onManagers(shop)}
-          disabled={shop.role !== "owner"}
         />
       </div>
 
@@ -374,6 +386,7 @@ export default function MyShops() {
           status: shop.status,
           completed_products: shop.completed_products,
           deletion_requested: shop.deletion_requested,
+          permissions: shop.permissions ?? null,
         }))
       );
     } catch (err) {
@@ -384,11 +397,17 @@ export default function MyShops() {
     }
   };
 
-  // Показувати кнопку «Керування» власнику або в dev-середовищі для ролі supplier
+  // RBAC: «Керування» — власнику або менеджеру з правом can_edit_info
   const canEditShop = (shop: ShopInfo) => {
     if (shop.role === "owner") return true;
     if (isLovableDevEnvironment() && isSupplier) return true;
-    return false;
+    return shop.role === "manager" && shop.permissions?.can_edit_info === true;
+  };
+
+  // RBAC: «Баланс» — власнику або менеджеру з правом can_view_balance
+  const canViewWallet = (shop: ShopInfo) => {
+    if (shop.role === "owner") return true;
+    return shop.role === "manager" && shop.permissions?.can_view_balance === true;
   };
 
   const openDeleteDialog = (shop: ShopInfo) => {
@@ -493,6 +512,7 @@ export default function MyShops() {
                 key={shop.id}
                 shop={shop}
                 canEdit={canEditShop(shop)}
+                canViewBalance={canViewWallet(shop)}
                 // Клік по хедеру картки → сторінка магазину /supplier/{id}
                 onView={(item) => {
                   hapticSelection();
@@ -503,7 +523,7 @@ export default function MyShops() {
                   hapticSelection();
                   navigate(`/store-management/${item.id}`);
                 }}
-                // Кнопка 4: Менеджери → інвайти + RBAC-контракти
+                // Кнопка 4: Менеджери (owner) / «Для мене» (manager)
                 onManagers={(item) => {
                   hapticSelection();
                   navigate(`/store-managers/${item.id}`);
@@ -522,6 +542,11 @@ export default function MyShops() {
                 onPromo={(item) => {
                   hapticSelection();
                   setPromoShopId(item.id);
+                }}
+                // Міні-іконки хедера → маршрути конкретного магазину
+                onMiniIcon={(target, item) => {
+                  hapticSelection();
+                  navigate(`/supplier/${item.id}/${target}`);
                 }}
                 onDelete={openDeleteDialog}
               />

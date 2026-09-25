@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { 
   ArrowLeft, Store, Star, Package, Verified, FileText, Loader2, 
   MessageCircle, ThumbsUp, User, Check 
@@ -48,7 +48,11 @@ interface Review {
 const SupplierProfile = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState("products");
+  const [searchParams] = useSearchParams();
+  // Deep-link з карток «Мої магазини»: /supplier/{id}?tab=reviews
+  const [activeTab, setActiveTab] = useState(
+    searchParams.get("tab") === "reviews" ? "reviews" : "products"
+  );
   const [supplier, setSupplier] = useState<BackendPublicSupplier | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);

@@ -3,6 +3,12 @@
 Live-перевірка фінансового ланцюга тікетів (без запиту до API):
 постачальник + менеджер + контракт + тікет → process_ticket_payout → баланси/ledger.
 Запуск: python test_billing_chain.py
+
+Фінансовий спліт: магазин платить зі СВОГО операційного балансу
+(suppliers.balance), а не з гаманця власника. Гаманець менеджера
+поповнюється як і раніше. Якщо балансу не вистачає — дефіцит
+фіксується як БОРГ перед менеджерами (managers_debt), баланс = 0
+(від'ємним бути не може).
 """
 import asyncio
 import os
@@ -60,8 +66,9 @@ async def main():
 
         owner_w = await ensure_user_wallet(owner.id, s)
         manager_w = await ensure_user_wallet(manager.id, s)
-        owner_w.main_balance = 100000  # 1000 грн
+        owner_w.main_balance = 100000  # 1000 грн (гаманець власника НЕ бере участі)
         manager_w.main_balance = 0
+        sup.balance = 100000  # 1000 грн операційного балансу магазину
         await s.commit()
 
         # --- Тест 1: нормальна виплата ---
@@ -69,16 +76,20 @@ async def main():
         await s.commit()
         print(f"[1] Виплачено: {paid} коп. (очікуємо 5000)")
         assert paid == 5000
-        print(f"[1] Баланс власника: {owner_w.main_balance} (очікуємо 95000)")
-        assert owner_w.main_balance == 95000
+        print(f"[1] Баланс магазину: {sup.balance} (очікуємо 95000)")
+        assert sup.balance == 95000
+        print(f"[1] Гаманець власника: {owner_w.main_balance} (очікуємо 100000 — не зачіпається)")
+        assert owner_w.main_balance == 100000
         print(f"[1] Баланс менеджера: {manager_w.main_balance} (очікуємо 5000)")
         assert manager_w.main_balance == 5000
 
         rows = (await s.execute(select(Transaction).order_by(Transaction.id))).scalars().all()
         print(f"[1] Ledger: {[(r.type, r.amount, r.reference_id) for r in rows]}")
+        # Після фінансового спліту — ДВІ сторони переказу:
+        # ticket_reward (менеджеру) + supplier_ticket_payout (списання з магазину)
         assert len(rows) == 2
-        assert rows[0].type == "ticket_fee" and rows[0].amount == -5000
-        assert rows[1].type == "ticket_reward" and rows[1].amount == 5000
+        assert rows[0].type == "ticket_reward" and rows[0].amount == 5000
+        assert rows[1].type == "supplier_ticket_payout" and rows[1].amount == -5000
 
         # --- Тест 2: подвійна виплата заблокована ---
         paid2 = await process_ticket_payout(t.id, s)
@@ -108,19 +119,29 @@ async def main():
         print(f"[4] Тариф 0: paid={paid4} (очікуємо 0)")
         assert paid4 == 0
 
-        # --- Тест 5: баланс власника йде в мінус — це дозволено ---
+        # --- Тест 5: балансу не вистачає → борг менеджерам, баланс = 0 ---
         t4 = SupportTicket(customer_id=customer.id, supplier_id=sup.id,
                            assigned_manager_id=manager.id, status="escalated", topic="other")
         s.add(t4)
         await s.commit()
-        owner_w.main_balance = 100  # лише 1 грн — піде в мінус
+        sup.balance = 100  # лише 1 грн — дефіцит піде в борг
+        sup.managers_debt = 0
         await s.commit()
         paid5 = await process_ticket_payout(t4.id, s)
         await s.commit()
-        print(f"[5] Мінусовий баланс: paid={paid5}, баланс власника={owner_w.main_balance} (очікуємо 5000, -4900)")
-        assert paid5 == 5000 and owner_w.main_balance == -4900
+        print(f"[5] Дефіцит: paid={paid5}, баланс={sup.balance} (очікуємо 5000, 0), борг менеджерам={sup.managers_debt} (очікуємо 4900)")
+        assert paid5 == 5000 and sup.balance == 0
+        assert sup.managers_debt == 4900
+        print(f"[5] Гаманець власника досі: {owner_w.main_balance} (очікуємо 100000)")
+        assert owner_w.main_balance == 100000
+        print(f"[5] Гаманець менеджера: {manager_w.main_balance} (очікуємо 10000 — дві повні виплати)")
+        assert manager_w.main_balance == 10000
 
         print("\n[OK] USI 5 TESTIV PROIDENO")
+
+    # aiosqlite тримає процес живим після завершення — закриваємо engine явно,
+    # інакше python-процес «зависає» після успішного фінішу.
+    await engine.dispose()
 
 
 asyncio.run(main())

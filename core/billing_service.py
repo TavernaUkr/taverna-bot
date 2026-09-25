@@ -4,7 +4,8 @@
 
 При закритті тікета платформа автоматично розраховується з менеджером
 за його тарифом rate_per_dispute (У КОПІЙКАХ) з таблиці контрактів
-supplier_managers: гаманець постачальника → гаманець менеджера.
+supplier_managers: ОПЕРАЦІЙНИЙ БАЛАНС МАГАЗИНА (suppliers.balance) →
+гаманець менеджера.
 
 Правила:
 - Немає assigned_manager_id (тікет закрив власник або AI) → нікому не платимо;
@@ -12,8 +13,11 @@ supplier_managers: гаманець постачальника → гамане�
 - rate_per_dispute = 0 / None → пропускаємо (безтарифний менеджер);
 - Подвійна виплата неможлива: перед переказом шукаємо в журналі (Ledger)
   вже наявну транзакцію 'ticket_reward' з цим reference_id;
-- Баланс постачальника МОЖЕ піти в мінус — це свідомо дозволено
-  (платформа пізніше виставить рахунок або спише з наложених платежів).
+- Баланс МАГАЗИНУ НЕ МОЖЕ стати від'ємним: якщо коштів не вистачає,
+  надлишок списання перетворюється на БОРГ перед менеджерами
+  (suppliers.managers_debt), баланс фіксується на 0. Менеджер у будь-якому
+  разі отримує свою винагороду повністю — борг платформи-магазину
+  погашається при наступних надходженнях на баланс магазину.
 
 Транзакційність: функція лише додає об'єкти в session (session.add),
 commit робить викликець (ендпоінт) — тож переказ атомарний із
@@ -69,6 +73,15 @@ async def process_ticket_payout(ticket_id: int, session: AsyncSession) -> int:
     Автовиплата менеджеру за закритий тікет за тарифом rate_per_dispute.
     Повертає суму виплати У КОПІЙКАХ (0 — виплати не було).
 
+    ФІНАНСОВИЙ СПЛІТ:
+    - менеджер отримує rate на свій персональний гаманець (як і раніше);
+    - платник — ОПЕРАЦІЙНИЙ БАЛАНС МАГАЗИНА (suppliers.balance), а не
+      гаманець власника;
+    - якщо balance < rate → частина покривається з балансу, залишок
+      йде в managers_debt, balance = 0 (мінус заборонений);
+    - у Ledger пишемо ДВІ транзакції: надходження менеджеру
+      (wallet_id) та списання з балансу магазину (supplier_id).
+
     Commit робить викликець: тут лише зміни балансів + записи в журнал
     (Ledger). Якщо щось впаде до коміту — ендпоінт відкотиться повністю,
     гроші не загубляться (тікет лишиться відкритим і його закриють знову).
@@ -105,33 +118,30 @@ async def process_ticket_payout(ticket_id: int, session: AsyncSession) -> int:
         )
         return 0
 
-    # Хто платить: власник магазину (гаманці в системі прив'язані до users)
+    # Хто платить: ОПЕРАЦІЙНИЙ БАЛАНС МАГАЗИНА (Supplier.balance),
+    # а не особистий гаманець власника.
     supplier = await session.get(Supplier, ticket.supplier_id)
-    if supplier is None or supplier.user_id is None:
+    if supplier is None:
         logger.warning(
-            "Білінг тікета #%s: у постачальника #%s немає user_id — платити нікому.",
+            "Білінг тікета #%s: постачальника #%s не знайдено — платити нікому.",
             ticket_id, ticket.supplier_id,
         )
         return 0
 
-    # 4. Гаманці (гарант-створення; всередині лише flush, без commit)
-    supplier_wallet = await ensure_user_wallet(supplier.user_id, session)
+    # 4. Гаманець менеджера (гарант-створення; всередині лише flush, без commit)
     manager_wallet = await ensure_user_wallet(ticket.assigned_manager_id, session)
 
-    # 5. Переказ балансів (мінус постачальнику допускається свідомо)
-    supplier_wallet.main_balance -= rate
+    # 5. СПЛІТ: списання з балансу магазину. Менеджер завжди отримує
+    #    винагороду ПОВНОЮ мірою; дефіцит коштів магазину → managers_debt.
+    covered_from_balance = min(int(supplier.balance or 0), rate)
+    debt_increase = rate - covered_from_balance
+    supplier.balance = int(supplier.balance or 0) - covered_from_balance
+    if debt_increase > 0:
+        supplier.managers_debt = int(supplier.managers_debt or 0) + debt_increase
     manager_wallet.main_balance += rate
 
-    # 6. Два записи в журнал транзакцій (Ledger)
-    session.add(
-        Transaction(
-            wallet_id=supplier_wallet.id,
-            amount=-rate,
-            type="ticket_fee",
-            description=f"Оплата менеджеру за тікет #{ticket.id}",
-            reference_id=str(ticket.id),
-        )
-    )
+    # 6. Запис у журнал (Ledger) — дві сторони переказу:
+    #    а) менеджер отримав винагороду (транзакція гаманця);
     session.add(
         Transaction(
             wallet_id=manager_wallet.id,
@@ -141,9 +151,31 @@ async def process_ticket_payout(ticket_id: int, session: AsyncSession) -> int:
             reference_id=str(ticket.id),
         )
     )
+    #    б) списання з операційного балансу магазину (транзакція магазина:
+    #       wallet_id=NULL, прив'язка через supplier_id; негативна сума = списання).
+    #       Дефіцит фіксується в описі як борг перед менеджерами (managers_debt).
+    session.add(
+        Transaction(
+            wallet_id=None,
+            supplier_id=supplier.id,
+            amount=-rate,
+            type="supplier_ticket_payout",
+            description=(
+                f"Списання за тікет #{ticket.id} з балансу магазину"
+                + (
+                    f" (+{debt_increase} коп. у борг перед менеджерами)"
+                    if debt_increase > 0
+                    else ""
+                )
+            ),
+            reference_id=str(ticket.id),
+        )
+    )
 
     logger.info(
-        "Білінг тікета #%s: нараховано %s коп. менеджеру user=%s (сплачує власник user=%s).",
-        ticket.id, rate, ticket.assigned_manager_id, supplier.user_id,
+        "Білінг тікета #%s: нараховано %s коп. менеджеру user=%s (магазин #%s: списано %s коп., борг менеджерам +%s коп., баланс: %s коп.).",
+        ticket.id, rate, ticket.assigned_manager_id, supplier.id,
+        covered_from_balance, debt_increase, supplier.balance,
     )
     return rate
+

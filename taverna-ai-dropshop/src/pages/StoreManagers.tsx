@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft, Loader2, UserCog, Settings2, Trash2, X,
   Link2, Share2, Copy, Shield, Wallet, MessageSquare,
+  BookOpen, CheckCircle2, XCircle, Info,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,26 +28,27 @@ import { toast } from "sonner";
 import { triggerHapticFeedback, hapticSelection } from "@/lib/haptics";
 import {
   getSupplierById,
-  getManagers,
-  generateManagerInviteLink,
+  getStoreManagers,
+  generateInviteLink,
   removeManager,
   updateManagerContract,
-  updateManagerCommunication,
+  getMyManagerContract,
   type BackendSupplierManager,
+  type BackendMyManagerContract,
   type ManagerPermissions,
   type ManagerContractRates,
   type ManagerCommSettings,
 } from "@/lib/backendApi";
 
 /**
- * Сторінка «Менеджери магазину» (B2B, лише власник).
- * Перенесено зі StoreManagement: список менеджерів, інвайт-посилання,
- * модалка контракту (права RBAC + тарифи + комунікація).
+ * Сторінка «Менеджери магазину» (мультитенантна, B2B).
+ * supplierId береться з URL: /store-managers/:supplierId.
  *
- * ОБМЕЖЕННЯ БЕКЕНДУ: ендпоінти /me/managers, /me/invite-link працюють з
- * «поточним» (першим) магазином власника і поки не приймають supplier_id.
- * Для мультитенантної підтримки кількох магазинів треба розширити API
- * параметром ?supplier_id= (наступний крок після цього UI-рефакторингу).
+ * РОЗДІЛЕННЯ UI ЗА РОЛЕЮ:
+ * - Власник (owner): список менеджерів, інвайт-посилання,
+ *   модалка контракту (права RBAC + тарифи + комунікація).
+ * - Менеджер (manager): через getMyManagerContract(supplierId)
+ *   бачить СВОЇ права (read-only), тариф і інструкцію роботи з тікетами.
  */
 export default function StoreManagers() {
   const navigate = useNavigate();
@@ -59,8 +61,10 @@ export default function StoreManagers() {
   const [shopManagers, setShopManagers] = useState<BackendSupplierManager[]>([]);
   const [isManagersLoading, setIsManagersLoading] = useState(false);
   const [isRemovingManager, setIsRemovingManager] = useState<number | null>(null);
-  // RBAC: власні права поточного менеджера (owner'у сервер повертає null)
-  // Модалка «Керування менеджером»
+  // RBAC: власний контракт поточного менеджера (read-only для manager)
+  const [myContract, setMyContract] = useState<BackendMyManagerContract | null>(null);
+  const [isContractLoading, setIsContractLoading] = useState(false);
+  // Модалка «Керування менеджером» (лише власник)
   const [permissionsDialogFor, setPermissionsDialogFor] = useState<BackendSupplierManager | null>(null);
   const [permissionsDraft, setPermissionsDraft] = useState<ManagerPermissions | null>(null);
   // B2B: тарифи (у гривнях для UI; копійки конвертуємо при load/save)
@@ -76,19 +80,22 @@ export default function StoreManagers() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supplierId]);
 
-  /** Завантажує назву магазину + роль поточного юзера, потім список менеджерів. */
+  /** Завантажує назву магазину + роль, потім дані за роллю. */
   const loadContext = async () => {
     if (!supplierId) {
       navigate("/my-shops", { replace: true });
       return;
     }
     setIsLoading(true);
+    setMyContract(null);
     try {
       const s = await getSupplierById(supplierId);
       setShopName(s.store_name || "");
       setMyRole(s.role === "manager" ? "manager" : "owner");
-      // Список менеджерів вантажимо ТІЛЬКИ власнику.
-      if (s.role !== "manager") {
+      // Розділення UI: власнику — список менеджерів, менеджеру — свій контракт.
+      if (s.role === "manager") {
+        await loadMyContract();
+      } else {
         await loadManagers();
       }
     } catch (err: any) {
@@ -104,10 +111,31 @@ export default function StoreManagers() {
     }
   };
 
+  /** Контракт поточного менеджера: права (read-only) + тарифи + комунікація. */
+  const loadMyContract = async () => {
+    if (!supplierId) return;
+    setIsContractLoading(true);
+    try {
+      const contract = await getMyManagerContract(Number(supplierId));
+      setMyContract(contract);
+    } catch (err: any) {
+      console.error("Error loading my manager contract:", err);
+      if (err?.status === 403) {
+        toast.error("Ви не є менеджером цього магазину");
+        navigate("/my-shops", { replace: true });
+        return;
+      }
+      toast.error(err?.message || "Не вдалося завантажити ваш контракт");
+    } finally {
+      setIsContractLoading(false);
+    }
+  };
+
   const loadManagers = async () => {
+    if (!supplierId) return;
     setIsManagersLoading(true);
     try {
-      const managers = await getManagers();
+      const managers = await getStoreManagers(Number(supplierId));
       setShopManagers(managers);
     } catch (err: any) {
       console.error("Error loading managers:", err);
@@ -119,10 +147,10 @@ export default function StoreManagers() {
 
   /** Генерує НОВЕ унікальне посилання-запрошення (кожен виклик = новий токен). */
   const handleGenerateInvite = async () => {
-    if (isGeneratingInvite) return;
+    if (isGeneratingInvite || !supplierId) return;
     setIsGeneratingInvite(true);
     try {
-      const response = await generateManagerInviteLink();
+      const response = await generateInviteLink(Number(supplierId));
       const url = response?.link || (response as any)?.invite_url;
       if (!url) {
         throw new Error("Бекенд не повернув посилання");
@@ -160,25 +188,23 @@ export default function StoreManagers() {
   };
 
   /**
-   * Зберігає весь «контракт» менеджера: права + тарифи (через /contract)
-   * та комунікацію (через /communication) — паралельно через Promise.all.
+   * Зберігає весь «контракт» менеджера: права + тарифи + комунікація —
+   * одним запитом PATCH /suppliers/{supplierId}/managers/{user_id}.
    * Гривні в UI → копійки для бекенду (Math.round(v * 100)).
    */
   const handleSavePermissions = async () => {
-    if (!permissionsDialogFor || !permissionsDraft || isSavingPermissions) return;
+    if (!supplierId || !permissionsDialogFor || !permissionsDraft || isSavingPermissions) return;
     setIsSavingPermissions(true);
     try {
       const rates: ManagerContractRates = {
         rate_per_order: Math.max(0, Math.round((parseFloat(ratesDraft.order) || 0) * 100)),
         rate_per_dispute: Math.max(0, Math.round((parseFloat(ratesDraft.dispute) || 0) * 100)),
       };
-      await Promise.all([
-        updateManagerContract(permissionsDialogFor.user_id, {
-          rates,
-          permissions: permissionsDraft,
-        }),
-        updateManagerCommunication(permissionsDialogFor.user_id, commDraft),
-      ]);
+      await updateManagerContract(Number(supplierId), permissionsDialogFor.user_id, {
+        rates,
+        permissions: permissionsDraft,
+        comm_settings: commDraft,
+      });
       triggerHapticFeedback("notification", "success");
       toast.success("Контракт менеджера оновлено");
       setPermissionsDialogFor(null);
@@ -195,10 +221,10 @@ export default function StoreManagers() {
 
   /** Видаляє менеджера (з модалки або зі списку). */
   const handleRemoveManager = async (userId: number) => {
-    if (isRemovingManager) return;
+    if (!supplierId || isRemovingManager) return;
     setIsRemovingManager(userId);
     try {
-      await removeManager(userId);
+      await removeManager(Number(supplierId), userId);
       triggerHapticFeedback("notification", "success");
       toast.success("Менеджера видалено");
       setPermissionsDialogFor(null);
@@ -220,18 +246,200 @@ export default function StoreManagers() {
     );
   }
 
-  // Захист: менеджер не керує іншими менеджерами
+  // === UI для МЕНЕДЖЕРА: власні права (read-only) + тариф + інструкція ===
   if (myRole === "manager") {
     return (
-      <div className="min-h-screen bg-background flex flex-col items-center justify-center gap-3 p-6 text-center">
-        <Shield className="h-8 w-8 text-muted-foreground" />
-        <p className="text-sm text-muted-foreground">
-          Керувати менеджерами може лише власник магазину
-        </p>
-        <Button variant="outline" onClick={() => navigate("/my-shops")}>Назад</Button>
+      <div className="min-h-screen bg-background pb-24">
+        {/* Header */}
+        <div className="sticky top-0 z-40 bg-card border-b border-border">
+          <div className="flex items-center gap-3 p-4">
+            <button
+              onClick={() => navigate(-1)}
+              className="w-10 h-10 rounded-xl flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+            >
+              <ArrowLeft className="h-5 w-5" />
+            </button>
+            <div className="flex-1">
+              <h1 className="text-lg font-bold text-foreground">Для мене</h1>
+              <p className="text-sm text-muted-foreground">{shopName || "Мій магазин"}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="p-4 space-y-5">
+          {isContractLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            </div>
+          ) : !myContract ? (
+            <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+              <Shield className="h-8 w-8 text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">
+                Контракт не завантажено
+              </p>
+              <Button variant="outline" onClick={() => navigate("/my-shops")}>Назад</Button>
+            </div>
+          ) : (
+            <>
+              {/* === Мої права (read-only) === */}
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Shield className="h-4 w-4 text-primary" />
+                    Мої права в магазині
+                  </CardTitle>
+                  <CardDescription>
+                    Права призначає власник магазину. Щоб їх змінити — зверніться до нього.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  {([
+                    { key: "can_edit_info", label: "Редагування інфо магазину" },
+                    { key: "can_manage_products", label: "Керування товарами" },
+                    { key: "can_view_balance", label: "Перегляд балансу" },
+                    { key: "can_resolve_disputes", label: "Вирішення спорів" },
+                  ] as const).map((perm) => (
+                    <div
+                      key={perm.key}
+                      className="flex items-center justify-between gap-3 p-3 rounded-xl border border-border bg-muted/30"
+                    >
+                      <p className="text-sm font-medium text-foreground">{perm.label}</p>
+                      {myContract.permissions?.[perm.key] ? (
+                        <Badge className="gap-1 text-[10px] shrink-0">
+                          <CheckCircle2 className="h-3 w-3" />
+                          Дозволено
+                        </Badge>
+                      ) : (
+                        <Badge variant="secondary" className="gap-1 text-[10px] shrink-0">
+                          <XCircle className="h-3 w-3" />
+                          Немає
+                        </Badge>
+                      )}
+                    </div>
+                  ))}
+                </CardContent>
+              </Card>
+
+              {/* === Мій тариф (B2B) === */}
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Wallet className="h-4 w-4 text-primary" />
+                    Мій тариф
+                  </CardTitle>
+                  <CardDescription>
+                    Винагорода нараховується за фактом обробленої дії (суми в гривнях).
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="grid grid-cols-2 gap-2">
+                  <div className="p-3 rounded-xl border border-border bg-muted/30">
+                    <p className="text-xs text-muted-foreground">За обробку замовлення</p>
+                    <p className="text-lg font-bold text-foreground">
+                      {((myContract.rates?.rate_per_order ?? 0) / 100).toFixed(2)} ₴
+                    </p>
+                  </div>
+                  <div className="p-3 rounded-xl border border-border bg-muted/30">
+                    <p className="text-xs text-muted-foreground">За вирішення спору</p>
+                    <p className="text-lg font-bold text-foreground">
+                      {((myContract.rates?.rate_per_dispute ?? 0) / 100).toFixed(2)} ₴
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* === Комунікація (read-only) === */}
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <MessageSquare className="h-4 w-4 text-primary" />
+                    Комунікація
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-2">
+                  <div className="flex items-center justify-between gap-3 p-3 rounded-xl border border-border bg-muted/30">
+                    <p className="text-sm font-medium text-foreground">Канал для чату з клієнтами</p>
+                    <Badge variant="secondary" className="text-[10px] shrink-0">
+                      {myContract.comm_settings?.chat_channel === "telegram"
+                        ? "Telegram Бот"
+                        : "Mini App"}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 p-3 rounded-xl border border-border bg-muted/30">
+                    <p className="text-sm font-medium text-foreground">Сповіщення про нові події</p>
+                    <Badge variant="secondary" className="gap-1 text-[10px] shrink-0">
+                      {myContract.comm_settings?.receive_notifications ? (
+                        <>
+                          <CheckCircle2 className="h-3 w-3" />
+                          Увімкнено
+                        </>
+                      ) : (
+                        <>
+                          <XCircle className="h-3 w-3" />
+                          Вимкнено
+                        </>
+                      )}
+                    </Badge>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* === Інструкція для менеджера === */}
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <BookOpen className="h-4 w-4 text-primary" />
+                    Інструкція для менеджера
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3 text-sm text-muted-foreground leading-relaxed">
+                    <p className="text-foreground font-medium">Як працювати з тікетами:</p>
+                    <p>
+                      1. Увійдіть у розділ «Замовлення / Комунікація» — там усі звернення
+                      клієнтів вашого магазину (тікети). Нові тікети позначені статусом
+                      «Обробляється ШІ» — бот уже зібрав контекст замовлення.
+                    </p>
+                    <p>
+                      2. Натисніть «Взяти тікет у роботу», щоб закріпити його за собою.
+                      Після цього клієнт бачить, що звернення прийнято, а винагорода
+                      за закриття нараховується саме вам.
+                    </p>
+                    <p>
+                      3. Відповідайте клієнту в тому ж тікеті. Якщо канал комунікації —
+                      Telegram, копія повідомлень приходить вам у бот.
+                    </p>
+                    <p>
+                      4. Коли питання вирішено — закрийте тікет кнопкою «Закрити».
+                      За кожне закрите звернення нараховується тариф, указаний у
+                      розділі «Мій тариф».
+                    </p>
+                    <p className="text-foreground font-medium pt-2">Правила платформи:</p>
+                    <p className="flex items-start gap-2">
+                      <Info className="h-4 w-4 shrink-0 mt-0.5 text-primary" />
+                      Не передавайте особисті дані клієнтів третім особам і не виводьте
+                      комунікацію за межі платформи.
+                    </p>
+                    <p className="flex items-start gap-2">
+                      <Info className="h-4 w-4 shrink-0 mt-0.5 text-primary" />
+                      Спори щодо повернення коштів вирішуйте лише через тікети —
+                      так фіксується історія рішень.
+                    </p>
+                    <p className="flex items-start gap-2">
+                      <Info className="h-4 w-4 shrink-0 mt-0.5 text-primary" />
+                      Винагорода виплачується на ваш внутрішній рахунок автоматично
+                      після закриття тікета. Вивід коштів — зі сторінки «Гаманець».
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+            </>
+          )}
+        </div>
       </div>
     );
   }
+
+  // === UI для ВЛАСНИКА ===
 
   return (
     <div className="min-h-screen bg-background pb-24">

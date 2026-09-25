@@ -25,6 +25,7 @@ from api_models import (
     TicketResponse,
 )
 from database.db import get_db, AsyncSession
+from database.db import PLATFORM_SUPPORT_SUPPLIER_KEY
 from database.models import (
     Order,
     Supplier,
@@ -82,6 +83,28 @@ async def _user_manages_supplier(db: AsyncSession, user_id: int, supplier_id: in
     return owner_or_manager is not None
 
 
+async def _user_can_access_supplier_tickets(db: AsyncSession, user: "User", supplier_id: int) -> bool:
+    """
+    Розширений доступ до тікетів магазину:
+    - власник/менеджер магазину — як раніше;
+    - АДМІН платформи — додатково до службового магазину «Taverna Support»
+      (тех. підтримка, скарги на модератора/адміна), бо в нього немає
+      власного магазину-власника, а розглядати ці звернення musить хтось
+      з керівництва платформи.
+    """
+    if await _user_manages_supplier(db, user.id, supplier_id):
+        return True
+    role = getattr(user, "role", None)
+    if str(role) == "UserRole.admin" or str(getattr(role, "value", "")) == "admin":
+        support_id = (
+            await db.execute(
+                select(Supplier.id).where(Supplier.key == PLATFORM_SUPPORT_SUPPLIER_KEY)
+            )
+        ).scalar_one_or_none()
+        return support_id is not None and supplier_id == support_id
+    return False
+
+
 async def _get_ticket_with_access(
     db: AsyncSession,
     ticket_id: int,
@@ -98,7 +121,7 @@ async def _get_ticket_with_access(
     if ticket.customer_id == user.id:
         return ticket, None
 
-    if await _user_manages_supplier(db, user.id, ticket.supplier_id):
+    if await _user_can_access_supplier_tickets(db, user, ticket.supplier_id):
         return ticket, None
 
     return None, "Немає доступу до цього тікета"
@@ -245,7 +268,22 @@ async def get_my_tickets(
                 )
             )
         )
-        conditions.append(SupportTicket.supplier_id.in_(managed_supplier_ids))
+        # Адміністратори платформи додатково бачать тікети службового
+        # магазину «Taverna Support» (тех. підтримка + скарги на персонал).
+        if str(getattr(user, "role", "")) == "UserRole.admin" or getattr(user, "role", None) == "admin":
+            support_supplier_id = (
+                select(Supplier.id).where(
+                    Supplier.key == PLATFORM_SUPPORT_SUPPLIER_KEY
+                )
+            )
+            conditions.append(
+                or_(
+                    SupportTicket.supplier_id.in_(managed_supplier_ids),
+                    SupportTicket.supplier_id.in_(support_supplier_id),
+                )
+            )
+        else:
+            conditions.append(SupportTicket.supplier_id.in_(managed_supplier_ids))
 
     stmt = (
         select(SupportTicket, msg_agg.c.message_count, msg_agg.c.last_message_at)
@@ -313,8 +351,9 @@ async def assign_ticket(
         raise HTTPException(status_code=code, detail=reason)
 
     # Лиш представник магазину (менеджер/власник) може забрати тікет.
+    # Адміні платформи — тікети службового магазину «Taverna Support».
     # Клієнт-автор сюди не доходить: гейт нижче його відсікає.
-    if not await _user_manages_supplier(db, user.id, ticket.supplier_id):
+    if not await _user_can_access_supplier_tickets(db, user, ticket.supplier_id):
         raise HTTPException(
             status_code=403,
             detail="Взяти тікет в роботу може лише менеджер магазину",
@@ -384,8 +423,8 @@ async def close_ticket(
 
     # Лиш клієнт-автор не може закривати тікет — тільки магазин:
     # менеджер або власник (supplier), що має доступ до цього магазину.
-    if ticket.customer_id == user.id and not await _user_manages_supplier(
-        db, user.id, ticket.supplier_id
+    if ticket.customer_id == user.id and not await _user_can_access_supplier_tickets(
+        db, user, ticket.supplier_id
     ):
         raise HTTPException(
             status_code=403,
@@ -467,7 +506,7 @@ async def add_ticket_message(
     # Анти-спуфінг ролі: клієнт пише як 'customer', представник магазину —
     # як 'manager' або 'supplier' (власник).
     is_customer = ticket.customer_id == user.id
-    is_shop_side = await _user_manages_supplier(db, user.id, ticket.supplier_id)
+    is_shop_side = await _user_can_access_supplier_tickets(db, user, ticket.supplier_id)
     if is_customer and payload.sender_role != "customer":
         raise HTTPException(
             status_code=403,

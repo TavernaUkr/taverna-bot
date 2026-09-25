@@ -17,7 +17,6 @@ import {
   Shield,
   Flag,
   MessageSquare,
-  LifeBuoy,
   Headphones,
   Scale,
   ClipboardList,
@@ -379,13 +378,9 @@ export const ProfileDashboard = () => {
               <MessageSquare className="h-4 w-4 text-orange-500 shrink-0" />
               <span className="text-sm font-medium text-foreground break-words">Чати</span>
             </Link>
-            <Link
-              to="/support/panel"
-              className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors min-w-0"
-            >
-              <LifeBuoy className="h-4 w-4 text-orange-500 shrink-0" />
-              <span className="text-sm font-medium text-foreground break-words">Підтримка</span>
-            </Link>
+            {/* Кнопка «Підтримка магазинів» (→ /support/panel) ВИДАЛЕНА:
+                тікети тепер живуть лише всередині карток магазинів
+                («Замовлення / Комунікація» на сторінці «Мої магазини»). */}
             <Link
               to="/support?contact=1"
               className="flex items-center gap-2 p-3 bg-card rounded-lg border border-border hover:border-orange-500/50 transition-colors min-w-0"

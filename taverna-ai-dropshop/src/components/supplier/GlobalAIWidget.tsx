@@ -70,9 +70,11 @@ function ShopQueueRows({ queueData }: { queueData: BackendWidgetQueueShop[] }) {
 /** Плаваючий віджет: лише магазини поточного користувача з /suppliers/me/import-progress. */
 export function GlobalAIWidget() {
   const { isAuthenticated, effectiveRole } = useTelegramAuthContext();
+  // 'owner' — роль всередині конкретного магазину (API-поле role у /me/shops),
+  // глобальної ролі 'owner' не існує: постачальник = власник своїх магазинів.
   const enabled =
     isAuthenticated &&
-    (effectiveRole === "supplier" || effectiveRole === "admin" || effectiveRole === "owner");
+    (effectiveRole === "supplier" || effectiveRole === "admin");
   const [queueData, setQueueData] = useState<BackendWidgetQueueShop[]>([]);
   const [isCollapsed, setIsCollapsed] = useState(false);
 

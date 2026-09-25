@@ -11,6 +11,34 @@ Base = declarative_base()
 engine = None
 AsyncSessionLocal = None
 
+# Службовий магазин платформи для тікетів тех. підтримки / скарг на персонал:
+# supplier_id NOT NULL у support_tickets, тож універсальні звернення
+# прив'язуємо до цього системного запису (він не належить жодному юзеру).
+PLATFORM_SUPPORT_SUPPLIER_KEY = "taverna_support"
+PLATFORM_SUPPORT_SUPPLIER_NAME = "Taverna Support"
+
+# --- Debug instrumentation (session 083e63) -----------------------------------
+_DEBUG_SESSION_ID = "083e63"
+_DEBUG_LOG_PATH = "debug-083e63.log"
+
+def _write_debug_log(location: str, message: str, data: dict) -> None:
+    """NDJSON-лог у файл сесії (append, одна строка на запис)."""
+    try:
+        import json as _json
+        import time as _time
+        entry = {
+            "sessionId": _DEBUG_SESSION_ID,
+            "id": f"log_{int(_time.time() * 1000)}",
+            "timestamp": int(_time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data,
+        }
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
 
 def is_postgres_url(url: str) -> bool:
     u = (url or "").lower()
@@ -406,6 +434,73 @@ async def ensure_wallet_tables() -> None:
         from database.models import Wallet, Transaction
         Wallet.__table__.create(bind=sync_conn, checkfirst=True)
         Transaction.__table__.create(bind=sync_conn, checkfirst=True)
+        # Фінансовий спліт: transactions.supplier_id — прив'язка руху
+        # коштів ОПЕРАЦІЙНОГО БАЛАНСУ МАГАЗИНУ (не гаманця власника).
+        insp = inspect(sync_conn)
+        cols = {col["name"]: col for col in insp.get_columns("transactions")}
+        if "supplier_id" not in cols:
+            sync_conn.execute(text(
+                "ALTER TABLE transactions ADD COLUMN supplier_id INTEGER"
+            ))
+            sync_conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_transactions_supplier_id "
+                "ON transactions (supplier_id)"
+            ))
+            logger.info("Додано колонку transactions.supplier_id (фінансовий спліт).")
+        # wallet_id став nullable: транзакції магазину йдуть без гаманця.
+        wallet_col = cols.get("wallet_id")
+        if wallet_col is not None and wallet_col.get("nullable", True) is False:
+            if sync_conn.dialect.name == "postgresql":
+                sync_conn.execute(text(
+                    "ALTER TABLE transactions ALTER COLUMN wallet_id DROP NOT NULL"
+                ))
+                logger.info("transactions.wallet_id → NULLABLE (PostgreSQL).")
+            else:
+                # SQLite не вміє DROP NOT NULL — перебудовуємо таблицю
+                # за стандартним 12-кроковим рецептом (дефолти збережені).
+                sync_conn.execute(text(
+                    "CREATE TABLE transactions_new ("
+                    "  id INTEGER NOT NULL PRIMARY KEY,"
+                    "  wallet_id INTEGER,"
+                    "  supplier_id INTEGER,"
+                    "  amount INTEGER NOT NULL,"
+                    "  currency VARCHAR(10) NOT NULL DEFAULT 'UAH',"
+                    "  type VARCHAR(50) NOT NULL,"
+                    "  description VARCHAR(255),"
+                    "  reference_id VARCHAR(100),"
+                    "  created_at DATETIME DEFAULT CURRENT_TIMESTAMP"
+                    ")"
+                ))
+                sync_conn.execute(text(
+                    "INSERT INTO transactions_new "
+                    "(id, wallet_id, supplier_id, amount, currency, type,"
+                    " description, reference_id, created_at) "
+                    "SELECT id, wallet_id, NULL, amount, currency, type,"
+                    " description, reference_id, created_at FROM transactions"
+                ))
+                sync_conn.execute(text("DROP TABLE transactions"))
+                sync_conn.execute(text("ALTER TABLE transactions_new RENAME TO transactions"))
+                sync_conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_transactions_wallet_id "
+                    "ON transactions (wallet_id)"
+                ))
+                sync_conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_transactions_supplier_id "
+                    "ON transactions (supplier_id)"
+                ))
+                sync_conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_transactions_type "
+                    "ON transactions (type)"
+                ))
+                sync_conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_transactions_reference_id "
+                    "ON transactions (reference_id)"
+                ))
+                sync_conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_transactions_created_at "
+                    "ON transactions (created_at)"
+                ))
+                logger.info("transactions перебудовано: wallet_id → NULLABLE, +supplier_id (SQLite).")
 
     async with engine.begin() as conn:
         await conn.run_sync(_ensure)
@@ -473,6 +568,114 @@ async def ensure_ticket_ai_columns() -> None:
         await conn.run_sync(_ensure)
 
 
+async def ensure_platform_support_supplier() -> None:
+    """
+    Live-режим: службовий магазин платформи «Taverna Support».
+    Потрібен, щоб тікети тех. підтримки та скарг на модератора/адміна
+    мали валідний supplier_id (NOT NULL у support_tickets), але НЕ
+    потрапляли в списки «Мої магазини» реальних постачальників:
+    user_id = NULL, статус pending_admin_approval.
+    """
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        row = sync_conn.execute(
+            text("SELECT id FROM suppliers WHERE key = :key"),
+            {"key": PLATFORM_SUPPORT_SUPPLIER_KEY},
+        ).scalar_one_or_none()
+        if row is not None:
+            # #region agent log
+            _write_debug_log(
+                "db.py:exists", "support supplier already exists",
+                {"supplier_id": row, "hypothesisId": "A", "runId": "run1"},
+            )
+            # #endregion
+            return
+        try:
+            sync_conn.execute(
+                text(
+                    "INSERT INTO suppliers (key, name, type, status, source_type, user_id) "
+                    "VALUES (:key, :name, :type, :status, :source, NULL)"
+                ),
+                {
+                    "key": PLATFORM_SUPPORT_SUPPLIER_KEY,
+                    "name": PLATFORM_SUPPORT_SUPPLIER_NAME,
+                    "type": "independent",
+                    "status": "pending_admin_approval",
+                    "source": "xml",
+                },
+            )
+            # #region agent log
+            _write_debug_log(
+                "db.py:insert-ok", "support supplier inserted",
+                {"key": PLATFORM_SUPPORT_SUPPLIER_KEY, "type": "independent", "hypothesisId": "A", "runId": "run1"},
+            )
+            # #endregion
+        except Exception as exc:
+            # #region agent log
+            _write_debug_log(
+                "db.py:insert-failed", "support supplier INSERT failed",
+                {"error": str(exc)[:300], "hypothesisId": "A", "runId": "run1"},
+            )
+            # #endregion
+            raise
+        logger.info(
+            "Створено службовий магазин платформи «%s» (key=%s).",
+            PLATFORM_SUPPORT_SUPPLIER_NAME,
+            PLATFORM_SUPPORT_SUPPLIER_KEY,
+        )
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
+async def ensure_supplier_finance_columns() -> None:
+    """
+    Live-режим: фінансовий спліт магазину.
+    - suppliers.balance (Integer, default 0) — операційний баланс магазину (копійки),
+      з нього списується білінг тікетів (може піти в мінус = борг);
+    - suppliers.platform_debt — борг перед платформою;
+    - suppliers.managers_debt — борг перед менеджерами;
+    - suppliers.auto_payout_enabled — авто-вивід на глобальний гаманець;
+    - suppliers.auto_payout_schedule — періодичність: 'daily' | 'weekly'.
+    """
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        insp = inspect(sync_conn)
+        if "suppliers" not in set(insp.get_table_names()):
+            return
+        cols = {col["name"] for col in insp.get_columns("suppliers")}
+        dialect = sync_conn.dialect.name
+        bool_default = "TRUE" if dialect == "postgresql" else "1"
+        added = 0
+        for col_name in ("balance", "platform_debt", "managers_debt"):
+            if col_name not in cols:
+                sync_conn.execute(text(
+                    f"ALTER TABLE suppliers ADD COLUMN {col_name} "
+                    f"INTEGER DEFAULT 0 NOT NULL"
+                ))
+                added += 1
+        if "auto_payout_enabled" not in cols:
+            sync_conn.execute(text(
+                f"ALTER TABLE suppliers ADD COLUMN auto_payout_enabled "
+                f"BOOLEAN DEFAULT FALSE NOT NULL"
+            ))
+            added += 1
+        if "auto_payout_schedule" not in cols:
+            sync_conn.execute(text(
+                "ALTER TABLE suppliers ADD COLUMN auto_payout_schedule VARCHAR(20)"
+            ))
+            added += 1
+        if added:
+            logger.info("Додано %s фінансових колонок suppliers.", added)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
 async def ensure_user_wallet(user_id: int, session: AsyncSession) -> "Wallet":
     """
     Гаманець-гаран: якщо у юзера немає гаманця — створює з нульовими
@@ -531,6 +734,7 @@ async def init_db() -> None:
     await ensure_supplier_history_log_table()
     await ensure_supplier_showcase_columns()
     await ensure_supplier_managers_permissions_columns()
+    await ensure_supplier_finance_columns()
     await ensure_wallet_tables()
     await ensure_ticket_tables()
     await ensure_ticket_ai_columns()
