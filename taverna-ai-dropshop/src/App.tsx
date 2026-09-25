@@ -26,6 +26,7 @@ import SupplierStoreOrders from "./pages/SupplierStoreOrders";
 import OrdersHistoryPage from "./pages/OrdersHistoryPage";
 import SupplierStoreOrdersHistory from "./pages/SupplierStoreOrdersHistory";
 import MyShops from "./pages/MyShops";
+import StoreManagers from "./pages/StoreManagers";
 import ManagerChats from "./pages/ManagerChats";
 import SupportPanel from "./pages/SupportPanel";
 import WalletAccount from "./pages/WalletAccount";
@@ -124,6 +125,8 @@ function AnimatedRoutes() {
             <Route path="/wallet/:supplierId" element={<WalletAccount />} />
             <Route path="/store-management" element={<StoreManagement />} />
             <Route path="/store-management/:supplierId" element={<StoreManagement />} />
+            {/* Менеджери магазину: інвайт-посилання + RBAC-контракти (лише власник) */}
+            <Route path="/store-managers/:supplierId" element={<StoreManagers />} />
             <Route path="/store-orders" element={<SupplierStoreOrders />} />
             <Route path="/store-orders/:supplierId" element={<SupplierStoreOrders />} />
             <Route path="/my-shops" element={<MyShops />} />

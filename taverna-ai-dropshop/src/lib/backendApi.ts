@@ -916,6 +916,8 @@ export interface BackendAdminStore {
   user_id?: number | null;
   telegram_id?: number | null;
   status: string;
+  logo_url?: string | null;
+  cover_image_url?: string | null;
 }
 
 export interface BackendPendingSupplierApplication {
@@ -1012,6 +1014,7 @@ export interface BackendMyShop {
   role: "owner" | "manager";
   shop_url?: string | null;
   logo_url?: string | null;
+  cover_image_url?: string | null;
   product_count: number;
   completed_products: number;
   deletion_requested: boolean;

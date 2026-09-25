@@ -466,27 +466,9 @@ export const ProfileDashboard = () => {
         </button>
       )}
 
-      {/* Support Panel Button - B2B тікети клієнтів (власник/менеджер магазину) */}
-      {isAuthenticated && (isOnlySupplier || isShopManager || hasShops) && (
-        <button
-          onClick={() => {
-            hapticSelection();
-            navigate("/support/panel");
-          }}
-          className="w-full flex items-center gap-4 p-4 rounded-xl border transition-all bg-gradient-to-r from-teal-500/10 to-cyan-500/10 border-teal-500/30 hover:border-teal-500"
-        >
-          <div className="w-12 h-12 rounded-full flex items-center justify-center bg-gradient-to-br from-teal-500/20 to-cyan-500/20">
-            <LifeBuoy className="h-6 w-6 text-teal-500" />
-          </div>
-          <div className="flex-1 text-left">
-            <h4 className="font-semibold text-foreground">Підтримка магазинів</h4>
-            <p className="text-xs text-muted-foreground">
-              Тікети клієнтів, відповіді, AI-звіти
-            </p>
-          </div>
-          <ChevronRight className="h-5 w-5 text-teal-500" />
-        </button>
-      )}
+      {/* Support Panel Button ВИДАЛЕНО: тікети тепер керуються
+          лише через кнопку «Замовлення / Комунікація» на картці
+          конкретного магазину (сторінка «Мої магазини»). */}
 
       {/* Store Management Button - For Suppliers, Shop Managers and anyone with shops (owner/manager) */}
       {isAuthenticated && (isOnlySupplier || isShopManager || hasShops) && !isAdmin && (

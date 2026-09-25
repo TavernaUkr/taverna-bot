@@ -466,6 +466,7 @@ class SupplierShopCardResponse(UtcJsonDates):
     role: str  # 'owner' | 'manager'
     shop_url: Optional[str] = None
     logo_url: Optional[str] = None
+    cover_image_url: Optional[str] = None
     product_count: int = 0
     completed_products: int = 0
     deletion_requested: bool = False
@@ -613,6 +614,8 @@ class AdminStoreListItem(BaseModel):
     user_id: Optional[int] = None
     telegram_id: Optional[int] = None
     status: str
+    logo_url: Optional[str] = None
+    cover_image_url: Optional[str] = None
 
 
 class AdminSupplierDeleteResponse(BaseModel):

@@ -1,15 +1,15 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, type ComponentType } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  ArrowLeft, Store, Plus, Package, Settings,
-  Loader2, Star, ShoppingCart, MessageSquare, Megaphone, Send, Wallet, Trash2, UserPlus,
+  ArrowLeft, Store, Plus, Package, Settings, Users, LifeBuoy, Wallet,
+  TrendingUp, Megaphone, Send, Loader2, Trash2,
+  Eye, Gift, Trophy, ThumbsUp, MessageCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Label } from "@/components/ui/label";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
@@ -21,19 +21,19 @@ import {
 } from "@/components/ui/dialog";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { toast } from "sonner";
-import { useToast } from "@/hooks/use-toast";
 import { hapticSelection } from "@/lib/haptics";
+import { cn } from "@/lib/utils";
 import {
   BackendApiError,
   getMyShops,
   requestSupplierDeletion,
-  transferSupplierOwnership,
 } from "@/lib/backendApi";
 
 interface ShopInfo {
   id: string;
   shop_name: string;
   logo_url: string | null;
+  cover_image_url: string | null;
   is_active: boolean;
   product_count: number;
   review_count: number;
@@ -76,7 +76,7 @@ function supplierTypeLabel(type?: string | null) {
 
 const isLovableDevEnvironment = () => {
   try {
-    return window.location.hostname.includes('lovable.app') || 
+    return window.location.hostname.includes('lovable.app') ||
            window.location.hostname.includes('lovableproject.com') ||
            window.location.hostname.includes('id-preview--');
   } catch {
@@ -84,211 +84,262 @@ const isLovableDevEnvironment = () => {
   }
 };
 
+/**
+ * Картка магазину за UX-макетом:
+ *
+ * ┌──────────────────────────────────┐
+ * │ ХЕДЕР: cover-банер + градієнт     │
+ * │ [Avatar] Назва [Роль]    7 8 9 10 │ ← міні-іконки (Gift/Trophy/ThumbsUp/MessageCircle)
+ * │ Статус, товари                    │
+ * ├──────────────────────────────────┤
+ * │ grid-cols-2:                      │
+ * │ [1 Керування]  [3 Баланс]         │
+ * │ [2 Просування] [4 Менеджери]     │
+ * ├──────────────────────────────────┤
+ * │ [5 Замовлення / Комунікація] w-full│
+ * └──────────────────────────────────┘
+ */
 function StoreCard({
   shop,
   canEdit,
-  isAdmin,
-  onOpen,
+  onView,
   onSettings,
+  onManagers,
+  onSupport,
   onWallet,
   onPromo,
-  onOrders,
-  onReviews,
-  onTransfer,
   onDelete,
 }: {
   shop: ShopInfo;
   canEdit: boolean;
-  isAdmin: boolean;
-  onOpen: (shop: ShopInfo) => void;
+  onView: (shop: ShopInfo) => void;
   onSettings: (shop: ShopInfo) => void;
+  onManagers: (shop: ShopInfo) => void;
+  onSupport: (shop: ShopInfo) => void;
   onWallet: (shop: ShopInfo) => void;
   onPromo: (shop: ShopInfo) => void;
-  onOrders: (shop: ShopInfo) => void;
-  onReviews: (shop: ShopInfo) => void;
-  onTransfer: (shop: ShopInfo) => void;
   onDelete: (shop: ShopInfo) => void;
 }) {
-  return (
-    <Card
-      className="overflow-hidden cursor-pointer transition-all hover:border-primary/40 active:scale-[0.99]"
-      onClick={() => onOpen(shop)}
+  /** Міні-іконка без тексту (кнопки 7–10 у хедері картки). */
+  const HeaderIconButton = ({
+    icon: Icon,
+    title,
+    onClick,
+  }: {
+    icon: ComponentType<{ className?: string }>;
+    title: string;
+    onClick: () => void;
+  }) => (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      onClick={(e) => {
+        e.stopPropagation();
+        hapticSelection();
+        onClick();
+      }}
+      className="h-8 w-8 shrink-0 rounded-full bg-black/40 backdrop-blur-sm text-white
+                 flex items-center justify-center hover:bg-black/60 transition-colors"
     >
-      <CardContent className="p-4">
-        <div className="flex items-start gap-3 mb-3">
-          <Avatar className="h-14 w-14 rounded-xl">
+      <Icon className="h-4 w-4" />
+    </button>
+  );
+
+  /** Кнопка тіла картки для grid-cols-2 (кнопки 1–4). */
+  const GridAction = ({
+    icon: Icon,
+    label,
+    onClick,
+    disabled = false,
+    className,
+  }: {
+    icon: ComponentType<{ className?: string }>;
+    label: string;
+    onClick: () => void;
+    disabled?: boolean;
+    className?: string;
+  }) => (
+    <Button
+      size="sm"
+      variant="outline"
+      disabled={disabled}
+      className={cn("h-9 justify-start gap-2 px-3 text-xs font-medium", className)}
+      onClick={(e) => {
+        e.stopPropagation();
+        hapticSelection();
+        onClick();
+      }}
+    >
+      <Icon className="h-4 w-4 shrink-0 text-primary" />
+      <span className="truncate">{label}</span>
+    </Button>
+  );
+
+  return (
+    <Card className="overflow-hidden">
+      {/* === 1. ХЕДЕР: cover-банер з градієнтом, клік → сторінка магазину === */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => onView(shop)}
+        onKeyDown={(e) => e.key === "Enter" && onView(shop)}
+        className="relative h-28 w-full overflow-hidden cursor-pointer group"
+      >
+        {shop.cover_image_url ? (
+          <img
+            src={shop.cover_image_url}
+            alt=""
+            className="absolute inset-0 w-full h-full object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <div className="absolute inset-0 bg-gradient-to-r from-primary/40 via-primary/20 to-accent/40" />
+        )}
+        {/* Темний градієнт для читабельності тексту */}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-black/30 pointer-events-none" />
+
+        {/* Міні-іконки справа зверху (кнопки 7, 8, 9, 10) */}
+        <div className="absolute top-2 right-2 z-10 flex gap-1.5">
+          <HeaderIconButton icon={Gift} title="Бонуси" onClick={() => onView(shop)} />
+          <HeaderIconButton icon={Trophy} title="Рейтинг" onClick={() => onView(shop)} />
+          <HeaderIconButton icon={ThumbsUp} title="Оцінка" onClick={() => onView(shop)} />
+          <HeaderIconButton icon={MessageCircle} title="Відгуки" onClick={() => onView(shop)} />
+        </div>
+
+        {/* Кнопка 6: Eye (Перегляд магазину) — явна іконка перегляду */}
+        <button
+          type="button"
+          title="Перегляд магазину"
+          aria-label="Перегляд магазину"
+          onClick={(e) => {
+            e.stopPropagation();
+            hapticSelection();
+            onView(shop);
+          }}
+          className="absolute bottom-2 right-12 z-10 h-8 w-8 rounded-full bg-white/20 backdrop-blur-sm text-white
+                     flex items-center justify-center hover:bg-white/40 transition-colors"
+        >
+          <Eye className="h-4 w-4" />
+        </button>
+
+        {/* Видалення магазину (заявка адміну) — лише власник, праворуч знизу хедера */}
+        {shop.role === "owner" && (
+          <button
+            type="button"
+            title={shop.deletion_requested ? "Заявку на видалення вже надіслано" : "Видалити магазин"}
+            disabled={shop.deletion_requested}
+            onClick={(e) => {
+              e.stopPropagation();
+              hapticSelection();
+              onDelete(shop);
+            }}
+            className="absolute bottom-2 right-2 z-10 h-8 w-8 rounded-full bg-black/40 backdrop-blur-sm text-white
+                       flex items-center justify-center hover:bg-destructive/80 transition-colors
+                       disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        )}
+
+        {/* Аватар + назва + роль (зліва внизу хедера) */}
+        <div className="absolute bottom-2 left-2 z-10 flex items-center gap-2.5 min-w-0 pr-2">
+          <Avatar className="h-11 w-11 rounded-xl border-2 border-white/70 shrink-0">
             <AvatarImage src={shop.logo_url || undefined} alt={shop.shop_name} />
-            <AvatarFallback className="rounded-xl bg-primary/10 text-primary font-bold text-lg">
+            <AvatarFallback className="rounded-xl bg-primary text-primary-foreground font-bold">
               {shop.shop_name.charAt(0).toUpperCase()}
             </AvatarFallback>
           </Avatar>
-
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-1">
-              <h3 className="font-semibold text-foreground truncate">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <h3 className="font-semibold text-white text-sm truncate drop-shadow">
                 {shop.shop_name}
               </h3>
               <Badge
-                variant={shop.role === "owner" ? "default" : "secondary"}
-                className="text-[10px] px-1.5 py-0 shrink-0"
+                variant="secondary"
+                className="text-[10px] px-1.5 py-0 shrink-0 bg-white/20 text-white border-0"
               >
                 {shop.role === "owner" ? "Власник" : "Менеджер"}
               </Badge>
             </div>
-
-            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <div className="flex items-center gap-2 text-[11px] text-white/80 mt-0.5">
               {supplierTypeLabel(shop.supplier_type) && (
                 <span>{supplierTypeLabel(shop.supplier_type)}</span>
               )}
-              <Badge
-                variant={shop.is_active ? "default" : "secondary"}
-                className="text-[10px]"
-              >
-                {supplierStatusLabel(shop.status) || (shop.is_active ? "Активний" : "Неактивний")}
-              </Badge>
-              {shop.deletion_requested && (
-                <Badge variant="destructive" className="text-[10px]">
-                  Заявка на видалення
-                </Badge>
-              )}
-            </div>
-            <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
               <span className="flex items-center gap-1">
                 <Package className="h-3 w-3" />
                 {typeof shop.completed_products === "number"
-                  ? `${shop.completed_products} з ${shop.product_count} товарів оброблено`
-                  : `${shop.product_count} товарів`}
+                  ? `${shop.completed_products}/${shop.product_count}`
+                  : `${shop.product_count} тов.`}
               </span>
-              {shop.review_count > 0 && (
-                <span className="flex items-center gap-1">
-                  <Star className="h-3 w-3" />
-                  {shop.review_count} відгуків
-                </span>
-              )}
             </div>
           </div>
-
-          {/* Шестерня = технічні налаштування. Лише для власника:
-              менеджер працює з замовленнями/відгуками, але не налаштовує магазин. */}
-          {shop.role === "owner" && (
-            <Button
-              size="icon"
-              variant="ghost"
-              className="shrink-0 h-10 w-10 rounded-full hover:bg-primary/10"
-              onClick={(e) => {
-                // Ловимо клік, щоб він НЕ спрацював по всій картці (onOpen)
-                e.stopPropagation();
-                onSettings(shop);
-              }}
-              title="Налаштування магазину"
-            >
-              <Settings className="h-5 w-5 text-primary" />
-            </Button>
-          )}
         </div>
+      </div>
 
-        <Button
-          size="sm"
-          variant="outline"
-          className="w-full h-9 mb-2 border-amber-500/40 text-amber-600 hover:bg-amber-500/10 hover:text-amber-600"
-          onClick={(e) => {
-            e.stopPropagation();
-            onWallet(shop);
-          }}
-        >
-          <Wallet className="h-3.5 w-3.5 mr-1.5" />
-          Баланс магазину
-        </Button>
-
-        <Button
-          size="sm"
-          variant="premium"
-          className="w-full h-9 mb-2"
-          onClick={(e) => {
-            e.stopPropagation();
-            onPromo(shop);
-          }}
-        >
-          <Megaphone className="h-3.5 w-3.5 mr-1.5" />
-          Просування
-        </Button>
-
-        <div className="flex gap-2">
-          <Button
-            size="sm"
-            variant="outline"
-            className="flex-1 h-9"
-            onClick={(e) => {
-              e.stopPropagation();
-              onOrders(shop);
-            }}
-          >
-            <ShoppingCart className="h-3.5 w-3.5 mr-1.5" />
-            Замовлення
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="flex-1 h-9"
-            onClick={(e) => {
-              e.stopPropagation();
-              onReviews(shop);
-            }}
-          >
-            <MessageSquare className="h-3.5 w-3.5 mr-1.5" />
-            Відгуки
-          </Button>
-        </div>
-
-        {shop.role === "owner" && (
-          <div className="flex gap-2 mt-2">
-            {isAdmin && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="flex-1 h-9 border-indigo-300 text-indigo-600 hover:bg-indigo-50 hover:text-indigo-700 dark:border-indigo-700 dark:text-indigo-400 dark:hover:bg-indigo-900/30"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onTransfer(shop);
-                }}
-              >
-                <UserPlus className="h-3.5 w-3.5 mr-1.5" />
-                Передати права
-              </Button>
-            )}
-            <Button
-              size="sm"
-              variant="outline"
-              className={`${isAdmin ? "flex-1" : "w-full"} h-9 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700 dark:bg-red-900/20 dark:text-red-400 dark:hover:bg-red-900/30 border border-red-200 dark:border-red-800`}
-              disabled={shop.deletion_requested}
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete(shop);
-              }}
-            >
-              <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-              {shop.deletion_requested ? "Заявку надіслано" : "Видалити магазин"}
-            </Button>
-          </div>
+      {/* Статус магазину (стрічка під хедером) */}
+      <div className="px-3 pt-2 flex flex-wrap items-center gap-2">
+        <Badge variant={shop.is_active ? "default" : "secondary"} className="text-[10px]">
+          {supplierStatusLabel(shop.status) || (shop.is_active ? "Активний" : "Неактивний")}
+        </Badge>
+        {shop.deletion_requested && (
+          <Badge variant="destructive" className="text-[10px]">
+            Заявка на видалення
+          </Badge>
         )}
-      </CardContent>
+      </div>
+
+      {/* === 2. ТІЛО: grid-cols-2 з 4 кнопок (кнопки 1–4) === */}
+      <div className="grid grid-cols-2 gap-2 p-3">
+        {/* Кнопка 1 (зліва зверху): Керування (Settings) */}
+        <GridAction
+          icon={Settings}
+          label="Керування"
+          onClick={() => onSettings(shop)}
+          className={canEdit ? "" : "opacity-50"}
+        />
+        {/* Кнопка 3 (справа зверху): Баланс (Wallet) */}
+        <GridAction icon={Wallet} label="Баланс" onClick={() => onWallet(shop)} />
+        {/* Кнопка 2 (зліва знизу): Просування (TrendingUp) */}
+        <GridAction icon={TrendingUp} label="Просування" onClick={() => onPromo(shop)} />
+        {/* Кнопка 4 (справа знизу): Менеджери (Users) — лише власник */}
+        <GridAction
+          icon={Users}
+          label="Менеджери"
+          onClick={() => onManagers(shop)}
+          disabled={shop.role !== "owner"}
+        />
+      </div>
+
+      {/* === 3. ФУТЕР: Замовлення / Комунікація на всю ширину (кнопка 5) === */}
+      <div className="px-3 pb-3">
+        <Button
+          size="sm"
+          className="w-full h-9 justify-start gap-2 px-3 text-xs font-medium"
+          onClick={(e) => {
+            e.stopPropagation();
+            hapticSelection();
+            onSupport(shop);
+          }}
+        >
+          <LifeBuoy className="h-4 w-4 shrink-0" />
+          <span>Замовлення / Комунікація</span>
+        </Button>
+      </div>
     </Card>
   );
 }
 
 export default function MyShops() {
   const navigate = useNavigate();
-  const { toast: uiToast } = useToast();
   const { effectiveRole, profile } = useTelegramAuthContext();
   const [shops, setShops] = useState<ShopInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [promoShopId, setPromoShopId] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteShop, setDeleteShop] = useState<ShopInfo | null>(null);
   const [deleteReason, setDeleteReason] = useState("");
   const [isSubmittingDeletion, setIsSubmittingDeletion] = useState(false);
-  const [transferShop, setTransferShop] = useState<ShopInfo | null>(null);
-  const [transferUsername, setTransferUsername] = useState("");
-  const [isTransferring, setIsTransferring] = useState(false);
 
   const isSupplier = effectiveRole === "supplier";
   const isShopManager = effectiveRole === "shop_manager";
@@ -314,6 +365,7 @@ export default function MyShops() {
           id: String(shop.id),
           shop_name: shop.store_name,
           logo_url: shop.logo_url || null,
+          cover_image_url: shop.cover_image_url || null,
           is_active: shop.is_active,
           product_count: shop.product_count || 0,
           review_count: 0,
@@ -332,74 +384,17 @@ export default function MyShops() {
     }
   };
 
-  // Show gear icon for owners, or in dev environment for supplier test role
+  // Показувати кнопку «Керування» власнику або в dev-середовищі для ролі supplier
   const canEditShop = (shop: ShopInfo) => {
     if (shop.role === "owner") return true;
     if (isLovableDevEnvironment() && isSupplier) return true;
     return false;
   };
 
-  const openDeleteDialog = (shop?: ShopInfo) => {
-    hapticSelection();
+  const openDeleteDialog = (shop: ShopInfo) => {
+    setDeleteShop(shop);
     setDeleteReason("");
     setDeleteOpen(true);
-  };
-
-  const openTransferDialog = (shop: ShopInfo) => {
-    hapticSelection();
-    setTransferShop(shop);
-    setTransferUsername("");
-  };
-
-  const submitTransfer = async () => {
-    if (!transferShop) return;
-    const username = transferUsername.trim();
-    if (!username) {
-      uiToast({
-        variant: "destructive",
-        title: "Вкажіть @username користувача Telegram",
-      });
-      return;
-    }
-
-    const telegramId =
-      (profile as { telegram_id?: number | null } | null)?.telegram_id ||
-      (typeof window !== "undefined"
-        ? (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id
-        : null);
-
-    setIsTransferring(true);
-    try {
-      await transferSupplierOwnership(
-        Number(transferShop.id),
-        username,
-        telegramId ? Number(telegramId) : undefined
-      );
-      uiToast({
-        title: "Права передано",
-        className: "bg-green-600 text-white border-green-700",
-      });
-      setTransferShop(null);
-      setTransferUsername("");
-      setShops((prev) => prev.filter((shop) => shop.id !== transferShop.id));
-      await fetchShops({ silent: true });
-    } catch (error) {
-      if (error instanceof BackendApiError && error.status === 404) {
-        uiToast({
-          variant: "destructive",
-          title: "Користувача не знайдено",
-        });
-        return;
-      }
-      const message =
-        error instanceof BackendApiError ? error.message : "Не вдалося передати права";
-      uiToast({
-        variant: "destructive",
-        title: message,
-      });
-    } finally {
-      setIsTransferring(false);
-    }
   };
 
   const submitDeletion = async () => {
@@ -415,6 +410,7 @@ export default function MyShops() {
       toast.success("Заявка на видалення надіслана адміністратору");
       setDeleteOpen(false);
       setDeleteReason("");
+      setDeleteShop(null);
       await fetchShops();
     } catch (error) {
       const message =
@@ -429,8 +425,8 @@ export default function MyShops() {
     <div className="min-h-screen bg-background">
       {/* Header */}
       <div className="sticky top-0 z-40 bg-background/95 backdrop-blur-md border-b border-border px-4 py-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <Button
               variant="ghost"
               size="icon"
@@ -441,24 +437,25 @@ export default function MyShops() {
             >
               <ArrowLeft className="h-5 w-5" />
             </Button>
-            <div>
+            <div className="min-w-0">
               <h1 className="font-bold text-lg text-slate-900 dark:text-white">Керування магазинами</h1>
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 {isShopManager ? "Магазини, якими ви керуєте" : "Ваші магазини та партнерства"}
               </p>
             </div>
           </div>
+          {/* Primary кнопка: створення/реєстрація нового магазину */}
           {(isSupplier || isAdmin) && (
             <Button
               size="sm"
-              variant="outline"
+              className="shrink-0"
               onClick={() => {
                 hapticSelection();
-                navigate("/partner?mode=additional");
+                navigate("/partner");
               }}
             >
               <Plus className="h-4 w-4 mr-1" />
-              Додати
+              Додати магазин
             </Button>
           )}
         </div>
@@ -496,33 +493,36 @@ export default function MyShops() {
                 key={shop.id}
                 shop={shop}
                 canEdit={canEditShop(shop)}
-                isAdmin={isAdmin}
-                // Головний клік по картці → РОБОЧА панель (замовлення магазину)
-                onOpen={(item) => {
+                // Клік по хедеру картки → сторінка магазину /supplier/{id}
+                onView={(item) => {
                   hapticSelection();
-                  navigate(`/store-orders/${item.id}`);
+                  navigate(`/supplier/${item.id}`);
                 }}
+                // Кнопка 1: Керування → форма редагування магазину
                 onSettings={(item) => {
                   hapticSelection();
                   navigate(`/store-management/${item.id}`);
                 }}
+                // Кнопка 4: Менеджери → інвайти + RBAC-контракти
+                onManagers={(item) => {
+                  hapticSelection();
+                  navigate(`/store-managers/${item.id}`);
+                }}
+                // Кнопка 5: Замовлення / Комунікація
+                onSupport={() => {
+                  hapticSelection();
+                  navigate("/support/panel");
+                }}
+                // Кнопка 3: Баланс магазину
                 onWallet={(item) => {
                   hapticSelection();
                   navigate(`/wallet/${item.id}`);
                 }}
+                // Кнопка 2: Просування — вибір каналу
                 onPromo={(item) => {
                   hapticSelection();
                   setPromoShopId(item.id);
                 }}
-                onOrders={(item) => {
-                  hapticSelection();
-                  navigate(`/store-orders/${item.id}`);
-                }}
-                onReviews={(item) => {
-                  hapticSelection();
-                  navigate(`/store-management/${item.id}${item.role === "manager" ? "?mode=manager" : ""}`);
-                }}
-                onTransfer={openTransferDialog}
                 onDelete={openDeleteDialog}
               />
             ))}
@@ -571,12 +571,16 @@ export default function MyShops() {
         </DialogContent>
       </Dialog>
 
+      {/* Delete request dialog */}
       <Dialog
         open={deleteOpen}
         onOpenChange={(open) => {
           if (!isSubmittingDeletion) {
             setDeleteOpen(open);
-            if (!open) setDeleteReason("");
+            if (!open) {
+              setDeleteReason("");
+              setDeleteShop(null);
+            }
           }
         }}
       >
@@ -616,63 +620,6 @@ export default function MyShops() {
                 <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
               ) : null}
               Надіслати запит на видалення
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={!!transferShop}
-        onOpenChange={(open) => {
-          if (!isTransferring && !open) {
-            setTransferShop(null);
-            setTransferUsername("");
-          }
-        }}
-      >
-        <DialogContent className="sm:max-w-[400px] mx-4">
-          <DialogHeader>
-            <DialogTitle className="text-slate-900 dark:text-white">
-              Передача прав на магазин
-            </DialogTitle>
-            <DialogDescription className="text-slate-500 dark:text-slate-400">
-              Введіть @username користувача Telegram, якому хочете передати цей магазин. Користувач повинен мати аккаунт у боті.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2">
-            <Label htmlFor="transfer-username" className="text-slate-800 dark:text-slate-200">
-              Telegram username
-            </Label>
-            <Input
-              id="transfer-username"
-              value={transferUsername}
-              onChange={(event) => setTransferUsername(event.target.value)}
-              placeholder="@username"
-              autoComplete="off"
-            />
-          </div>
-          <DialogFooter className="gap-2">
-            <Button
-              variant="outline"
-              onClick={() => {
-                setTransferShop(null);
-                setTransferUsername("");
-              }}
-              disabled={isTransferring}
-            >
-              Скасувати
-            </Button>
-            <Button
-              className="bg-indigo-600 hover:bg-indigo-700 text-white"
-              onClick={submitTransfer}
-              disabled={isTransferring || !transferUsername.trim()}
-            >
-              {isTransferring ? (
-                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
-              ) : (
-                <UserPlus className="h-4 w-4 mr-1.5" />
-              )}
-              Передати
             </Button>
           </DialogFooter>
         </DialogContent>

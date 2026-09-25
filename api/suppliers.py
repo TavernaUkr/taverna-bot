@@ -934,7 +934,8 @@ async def get_my_shops(
                 is_active=_enum_value(supplier.status) == SupplierStatus.active.value,
                 role="owner" if is_owner else "manager",
                 shop_url=supplier.shop_url,
-                logo_url=None,  # логотипи поки живуть у Supabase Storage
+                logo_url=supplier.logo_url,
+                cover_image_url=supplier.cover_image_url,
                 product_count=product_count,
                 completed_products=completed_products,
                 deletion_requested=_deletion_requested(supplier),
