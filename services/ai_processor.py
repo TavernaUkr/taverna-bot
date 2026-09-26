@@ -108,7 +108,7 @@ def _extract_gemini_rest_text(data: Dict[str, Any]) -> str:
     return text
 
 GEMINI_MODEL = "gemini-2.0-flash"
-GEMINI_FALLBACK_MODEL = "gemini-1.5-flash-latest"
+GEMINI_FALLBACK_MODEL = "gemini-3.6-flash"
 
 _HTML_RE = re.compile(r"<[^>]+>")
 _NUMERIC_RE = re.compile(r"^\d+$")

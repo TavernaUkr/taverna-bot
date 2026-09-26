@@ -43,7 +43,7 @@ from api_models import (
 )
 from bot_instance import get_bot_instance
 from config_reader import config
-from database.db import AsyncSessionLocal, get_db, AsyncSession
+from database.db import AsyncSessionLocal, get_db, AsyncSession, PLATFORM_SUPPORT_SUPPLIER_KEY
 from database.models import (
     Product,
     ProductAIStatus,
@@ -576,7 +576,15 @@ async def list_public_suppliers(
     )
     stmt = (
         select(Supplier)
-        .where(Supplier.status.in_(live_statuses))
+        .where(
+            Supplier.status.in_(live_statuses),
+            # Службовий магазин платформи (Taverna Support) не показуємо
+            # у публічному каталозі постачальників:
+            or_(
+                Supplier.key.is_(None),
+                Supplier.key != PLATFORM_SUPPORT_SUPPLIER_KEY,
+            ),
+        )
     )
     search_value = (search or "").strip()
     if search_value:

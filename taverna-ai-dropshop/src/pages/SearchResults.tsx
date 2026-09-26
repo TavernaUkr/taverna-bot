@@ -7,7 +7,7 @@ import {
 import { ProductCard } from "@/components/ProductCard";
 import { ProductFeedView } from "@/components/catalog/ProductFeedView";
 import { useFavoritesContext } from "@/components/FavoritesContext";
-import { useCartContext } from "@/contexts/CartContext";
+import { useCartStore } from "@/store/cartStore";
 import { fetchBackendProductsPaged, fetchBackendCategories, fetchBackendFilters, BackendApiError, type BackendProductVariant, type BackendProductOption, type BackendFilterAttribute, type BackendCategorySub } from "@/lib/backendApi";
 import { mapBackendProductToUi, buildCategoriesFromProducts } from "@/hooks/useProducts";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
@@ -223,7 +223,7 @@ export default function SearchResults() {
   const [priceRange, setPriceRange] = useState({ min: 0, max: 50000 });
   
   const { isFavorite, toggleFavorite } = useFavoritesContext();
-  const { addItem } = useCartContext();
+  const addItem = useCartStore((s) => s.addItem);
 
   // Завантажуємо каталог з FastAPI-бекенду. Текстовий пошук і вітрина
   // магазину виконуються НА СЕРВЕРІ (?search= та ?supplier_id=), решта
@@ -492,24 +492,19 @@ export default function SearchResults() {
     });
   };
 
-  const handleAddToCart = async (
+  const handleAddToCart = (
     product: Product,
     size?: string,
     color?: string,
     variantId?: string,
     quantity: number = 1
   ) => {
-    const success = await addItem(
-      product.id,
-      product.name,
-      product.price,
-      product.images?.[0],
-      size,
-      color,
-      quantity,
-      variantId
-    );
-    if (success) toast.success(`${product.name} додано до кошика`);
+    // Глобальний Zustand-кошик: сторінка /cart, бейдж та чекаут — звідти.
+    const selectedOptions: Record<string, string> = {};
+    if (size) selectedOptions["Розмір"] = size;
+    if (color) selectedOptions["Колір"] = color;
+    addItem(product, quantity, selectedOptions, variantId);
+    toast.success(`${product.name} додано до кошика`);
   };
 
   const handleToggleFavorite = async (product: Product) => {

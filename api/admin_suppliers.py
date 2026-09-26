@@ -8,7 +8,7 @@ from uuid import uuid4
 import math
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
-from sqlalchemy import delete, func, inspect, select, text, update
+from sqlalchemy import delete, func, inspect, or_, select, text, update
 
 from api.auth import validate_init_data
 from api_models import (
@@ -28,7 +28,7 @@ from api_models import (
     TelegramChannelVerifyResponse,
 )
 from config_reader import config
-from database.db import get_db, AsyncSession
+from database.db import get_db, AsyncSession, PLATFORM_SUPPORT_SUPPLIER_KEY
 from database.models import (
     Order,
     OrderItem,
@@ -519,7 +519,15 @@ async def list_pending_supplier_applications(
 
     stmt = (
         select(Supplier)
-        .where(Supplier.status.in_(PENDING_STATUSES))
+        .where(
+            Supplier.status.in_(PENDING_STATUSES),
+            # Службовий магазин платформи (Taverna Support) не показуємо
+            # серед заявок реальних постачальників:
+            or_(
+                Supplier.key.is_(None),
+                Supplier.key != PLATFORM_SUPPORT_SUPPLIER_KEY,
+            ),
+        )
         .order_by(Supplier.created_at.desc())
     )
     rows = (await db.execute(stmt)).scalars().all()
@@ -555,7 +563,15 @@ async def list_supplier_history(
 
     stmt = (
         select(Supplier)
-        .where(Supplier.status.in_(HISTORY_STATUSES))
+        .where(
+            Supplier.status.in_(HISTORY_STATUSES),
+            # Службовий магазин платформи (Taverna Support) не показуємо
+            # в історії магазинів:
+            or_(
+                Supplier.key.is_(None),
+                Supplier.key != PLATFORM_SUPPORT_SUPPLIER_KEY,
+            ),
+        )
         .order_by(Supplier.created_at.desc())
     )
     rows = (await db.execute(stmt)).scalars().all()
@@ -578,6 +594,12 @@ async def list_all_active_stores(
         select(Supplier)
         .where(
             Supplier.status.in_((SupplierStatus.active, SupplierStatus.disabled)),
+            # Службовий магазин платформи (Taverna Support) не показуємо
+            # серед магазинів користувачів:
+            or_(
+                Supplier.key.is_(None),
+                Supplier.key != PLATFORM_SUPPORT_SUPPLIER_KEY,
+            ),
         )
         .order_by(Supplier.created_at.desc())
     )

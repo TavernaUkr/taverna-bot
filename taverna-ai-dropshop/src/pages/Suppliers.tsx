@@ -4,11 +4,10 @@ import { Store, Star, Package, ChevronRight, Loader2, Tag, Search, X } from "luc
 import { Header } from "@/components/Header";
 import { BottomNavigation } from "@/components/BottomNavigation";
 import { SupplierBadge, getSupplierBadge, type SupplierBadgeInfo } from "@/components/ui/supplier-badge";
-import { useCartContext } from "@/contexts/CartContext";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 import { SearchModal } from "@/components/SearchModal";
-import { CartModal } from "@/components/CartModal";
 import { WishlistModal } from "@/components/WishlistModal";
+import { useCartStore } from "@/store/cartStore";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { getPublicSuppliers } from "@/lib/backendApi";
 import { cn } from "@/lib/utils";
@@ -39,7 +38,6 @@ const Suppliers = () => {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState("suppliers");
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [isCartOpen, setIsCartOpen] = useState(false);
   const [isWishlistOpen, setIsWishlistOpen] = useState(false);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -49,7 +47,7 @@ const Suppliers = () => {
   const [searchInput, setSearchInput] = useState("");
   const debouncedSearch = useDebouncedValue(searchInput.trim(), 500);
   
-  const { items: cartItems, totalItems, updateQuantity, removeItem } = useCartContext();
+  const totalItems = useCartStore((s) => s.getTotalItems());
   const { totalFavorites } = useFavoritesContext();
 
   const fetchSuppliers = useCallback(async (search: string) => {
@@ -114,6 +112,8 @@ const Suppliers = () => {
       setActiveTab(tab);
     } else if (tab === "support") {
       navigate("/support");
+    } else if (tab === "cart") {
+      navigate("/cart");
     } else if (tab === "account") {
       navigate("/?tab=account");
     } else if (tab === "live") {
@@ -133,7 +133,7 @@ const Suppliers = () => {
       <Header 
         cartCount={totalItems}
         favoritesCount={totalFavorites}
-        onCartClick={() => setIsCartOpen(true)}
+        onCartClick={() => navigate("/cart")}
         onSearchClick={() => setIsSearchOpen(true)}
         onNotificationsClick={() => toast.info("Сповіщення")}
         onFavoritesClick={() => setIsWishlistOpen(true)}
@@ -301,18 +301,6 @@ const Suppliers = () => {
         isOpen={isSearchOpen}
         onClose={() => setIsSearchOpen(false)}
         onSearch={handleSearch}
-      />
-
-      <CartModal
-        isOpen={isCartOpen}
-        onClose={() => setIsCartOpen(false)}
-        items={cartItems}
-        onUpdateQuantity={updateQuantity}
-        onRemoveItem={removeItem}
-        onCheckout={() => {
-          setIsCartOpen(false);
-          navigate("/");
-        }}
       />
 
       <WishlistModal

@@ -36,11 +36,10 @@ import {
   AccordionItem,
   AccordionTrigger,
 } from "@/components/ui/accordion";
-import { useCartContext } from "@/contexts/CartContext";
 import { useFavoritesContext } from "@/components/FavoritesContext";
+import { useCartStore } from "@/store/cartStore";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
 import { SearchModal } from "@/components/SearchModal";
-import { CartModal } from "@/components/CartModal";
 import { WishlistModal } from "@/components/WishlistModal";
 import { AppRatingModal } from "@/components/AppRatingModal";
 import { CustomerGuideModal } from "@/components/CustomerGuideModal";
@@ -147,13 +146,6 @@ const SUPPORT_CATEGORIES: SupportCategoryDef[] = [
     icon: AlertTriangle,
     iconClassName: "bg-warning/20 text-warning",
   },
-  {
-    id: "rating",
-    title: "Оцінки",
-    subtitle: "Оцінити магазин або додаток",
-    icon: Star,
-    iconClassName: "bg-amber-500/10 text-amber-500",
-  },
 ];
 
 type FlowScreen = "categories" | "shop_select" | "chat";
@@ -183,7 +175,6 @@ const Support = () => {
   const { isAuthenticated, roles } = useTelegramAuthContext();
   const [activeTab, setActiveTab] = useState("support");
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [isCartOpen, setIsCartOpen] = useState(false);
   const [isWishlistOpen, setIsWishlistOpen] = useState(false);
   const [isAppRatingOpen, setIsAppRatingOpen] = useState(false);
   const [showCustomerGuide, setShowCustomerGuide] = useState(false);
@@ -219,8 +210,6 @@ const Support = () => {
   const [createdTicketId, setCreatedTicketId] = useState<number | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const { items: cartItems, updateQuantity, removeItem } = useCartContext();
-  const { totalItems } = useCartContext();
   const { totalFavorites } = useFavoritesContext();
 
   // Deep-link /support?contact=1 → одразу відкриваємо екран категорій
@@ -241,6 +230,7 @@ const Support = () => {
     if (tab === "catalog") navigate("/");
     else if (tab === "suppliers") navigate("/suppliers");
     else if (tab === "support") setActiveTab(tab);
+    else if (tab === "cart") navigate("/cart");
     else if (tab === "account") navigate("/?tab=account");
     else if (tab === "live") navigate("/?tab=live");
     else navigate("/");
@@ -433,6 +423,9 @@ const Support = () => {
     setIsAppRatingOpen(true);
   };
 
+  // Лічильник кошика для бейджа в Header — з глобального Zustand-стора
+  const totalItems = useCartStore((s) => s.getTotalItems());
+
   const categoryDef = category ? SUPPORT_CATEGORIES.find((c) => c.id === category) : null;
 
   return (
@@ -440,7 +433,7 @@ const Support = () => {
       <Header
         cartCount={totalItems}
         favoritesCount={totalFavorites}
-        onCartClick={() => setIsCartOpen(true)}
+        onCartClick={() => navigate("/cart")}
         onSearchClick={() => setIsSearchOpen(true)}
         onNotificationsClick={() => toast.info("Сповіщення")}
         onFavoritesClick={() => setIsWishlistOpen(true)}
@@ -1032,15 +1025,6 @@ const Support = () => {
       <BottomNavigation activeTab={activeTab} onTabChange={handleTabChange} />
 
       <SearchModal isOpen={isSearchOpen} onClose={() => setIsSearchOpen(false)} onSearch={handleSearch} />
-
-      <CartModal
-        isOpen={isCartOpen}
-        onClose={() => setIsCartOpen(false)}
-        items={cartItems}
-        onUpdateQuantity={updateQuantity}
-        onRemoveItem={removeItem}
-        onCheckout={() => { setIsCartOpen(false); navigate("/"); }}
-      />
 
       <WishlistModal
         isOpen={isWishlistOpen}

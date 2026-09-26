@@ -4,7 +4,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, useLocation, Navigate, useParams, useNavigate } from "react-router-dom";
 import { TelegramAuthProvider } from "@/components/TelegramAuthProvider";
-import { CartProvider } from "@/contexts/CartContext";
 import { FavoritesProvider } from "@/components/FavoritesContext";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect } from "react";
@@ -27,6 +26,7 @@ import OrdersHistoryPage from "./pages/OrdersHistoryPage";
 import SupplierStoreOrdersHistory from "./pages/SupplierStoreOrdersHistory";
 import MyShops from "./pages/MyShops";
 import StoreManagers from "./pages/StoreManagers";
+import Cart from "./pages/Cart";
 import ShopBonuses from "./pages/ShopBonuses";
 import ShopRating from "./pages/ShopRating";
 import ManagerChats from "./pages/ManagerChats";
@@ -112,6 +112,7 @@ function AnimatedRoutes() {
         >
           <Routes location={location}>
             <Route path="/" element={<Index />} />
+            <Route path="/cart" element={<Cart />} />
             <Route path="/ratings" element={<Ratings />} />
             <Route path="/partner" element={<SupplierRegistration />} />
             <Route path="/supplier" element={<SupplierDashboard />} />
@@ -184,19 +185,16 @@ const App = () => (
   <QueryClientProvider client={queryClient}>
     <TooltipProvider>
       <TelegramAuthProvider>
-        <CartProvider>
-          <FavoritesProvider>
-            <Toaster />
-            <Sonner />
-            <BrowserRouter>
-              <FloatingToolsProvider>
-                <AnimatedRoutes />
-                <GlobalFloatingWidgets />
-              </FloatingToolsProvider>
-            </BrowserRouter>
-
-          </FavoritesProvider>
-        </CartProvider>
+        <FavoritesProvider>
+          <Toaster />
+          <Sonner />
+          <BrowserRouter>
+            <FloatingToolsProvider>
+              <AnimatedRoutes />
+              <GlobalFloatingWidgets />
+            </FloatingToolsProvider>
+          </BrowserRouter>
+        </FavoritesProvider>
       </TelegramAuthProvider>
     </TooltipProvider>
   </QueryClientProvider>

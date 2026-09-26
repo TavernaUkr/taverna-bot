@@ -1,6 +1,6 @@
 import { Package, Truck, Banknote, Tag, Wallet, Sparkles, Info } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
-import { CartItem } from "@/components/CartModal";
+import type { CartItem } from "@/store/cartStore";
 import { PaymentType } from "./PaymentMethodSelect";
 
 interface OrderSummaryProps {
@@ -41,28 +41,32 @@ export const OrderSummary = ({
 
       {/* Items */}
       <div className="space-y-3 max-h-40 overflow-y-auto">
-        {items.map((item) => (
-          <div key={item.id} className="flex gap-3">
-            <img
-              src={item.image}
-              alt={item.name}
-              className="w-12 h-12 rounded-lg object-cover bg-muted"
-            />
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-foreground line-clamp-1">
-                {item.name}
-              </p>
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <span>{item.quantity} шт.</span>
-                {item.size && <span>• {item.size}</span>}
-                {item.color && <span>• {item.color}</span>}
+        {items.map((item) => {
+          const options = Object.entries(item.selectedOptions ?? {});
+          return (
+            <div key={`${item.product.id}-${item.variantId ?? ""}-${options.map(([n, v]) => `${n}:${v}`).join("|")}`} className="flex gap-3">
+              <img
+                src={item.product.images?.[0] || "/placeholder.svg"}
+                alt={item.product.name}
+                className="w-12 h-12 rounded-lg object-cover bg-muted"
+              />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-foreground line-clamp-1">
+                  {item.product.name}
+                </p>
+                <div className="flex items-center flex-wrap gap-2 text-xs text-muted-foreground">
+                  <span>{item.quantity} шт.</span>
+                  {options.map(([optName, optValue]) => (
+                    <span key={optName}>• {optName}: {optValue}</span>
+                  ))}
+                </div>
               </div>
+              <p className="text-sm font-medium text-foreground whitespace-nowrap">
+                {(item.product.price * item.quantity).toLocaleString()} ₴
+              </p>
             </div>
-            <p className="text-sm font-medium text-foreground whitespace-nowrap">
-              {(item.price * item.quantity).toLocaleString()} ₴
-            </p>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       <Separator />

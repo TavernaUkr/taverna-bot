@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { X, Heart, ShoppingCart, Trash2, Package, ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useFavoritesContext } from './FavoritesContext';
-import { useCartContext } from '@/contexts/CartContext';
+import { useCartStore } from '@/store/cartStore';
 import { Button } from './ui/button';
 import { toast } from 'sonner';
 import { supabase } from '@/integrations/supabase/client';
@@ -29,7 +29,7 @@ interface WishlistModalProps {
 
 export function WishlistModal({ isOpen, onClose, onProductClick }: WishlistModalProps) {
   const { favorites, removeFavorite } = useFavoritesContext();
-  const { addItem } = useCartContext();
+  const addItem = useCartStore((s) => s.addItem);
   const [selectedVariants, setSelectedVariants] = useState<Record<string, { size?: string; color?: string }>>({});
   const [productVariants, setProductVariants] = useState<Record<string, ProductVariants>>({});
 
@@ -68,7 +68,7 @@ export function WishlistModal({ isOpen, onClose, onProductClick }: WishlistModal
 
   if (!isOpen) return null;
 
-  const handleAddToCart = async (item: typeof favorites[0]) => {
+  const handleAddToCart = (item: typeof favorites[0]) => {
     const selected = selectedVariants[item.productId] || {};
     const variants = productVariants[item.productId] || { sizes: [], colors: [] };
     
@@ -84,19 +84,18 @@ export function WishlistModal({ isOpen, onClose, onProductClick }: WishlistModal
       return;
     }
     
-    const success = await addItem(
-      item.productId, 
-      item.name, 
-      item.price, 
-      item.image,
-      selected.size,
-      selected.color
+    // Глобальний Zustand-кошик (сторінка /cart + бейдж + чекаут — звідти)
+    const selectedOptions: Record<string, string> = {};
+    if (selected.size) selectedOptions['Розмір'] = selected.size;
+    if (selected.color) selectedOptions['Колір'] = selected.color;
+    addItem(
+      { id: item.productId, name: item.name, price: item.price, images: item.image ? [item.image] : [] },
+      1,
+      selectedOptions
     );
     
-    if (success) {
-      hapticNotification('success');
-      toast.success(`${item.name} додано до кошика`);
-    }
+    hapticNotification('success');
+    toast.success(`${item.name} додано до кошика`);
   };
 
   const handleRemove = async (productId: string) => {

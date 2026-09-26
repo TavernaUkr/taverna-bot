@@ -1,5 +1,6 @@
-import { Store, Users, Radio, HelpCircle, User } from "lucide-react";
+import { Store, Users, Radio, HelpCircle, User, ShoppingCart } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useCartStore } from "@/store/cartStore";
 
 interface NavItem {
   id: string;
@@ -7,6 +8,7 @@ interface NavItem {
   icon: React.ReactNode;
   isCenter?: boolean;
   isLive?: boolean;
+  isCart?: boolean;
 }
 
 interface BottomNavigationProps {
@@ -18,11 +20,15 @@ const navItems: NavItem[] = [
   { id: "catalog", label: "Каталог", icon: <Store className="h-5 w-5" /> },
   { id: "suppliers", label: "Продавці", icon: <Users className="h-5 w-5" /> },
   { id: "live", label: "Live", icon: <Radio className="h-5 w-5" />, isCenter: true, isLive: true },
+  { id: "cart", label: "Кошик", icon: <ShoppingCart className="h-5 w-5" />, isCart: true },
   { id: "support", label: "Підтримка", icon: <HelpCircle className="h-5 w-5" /> },
   { id: "account", label: "Профіль", icon: <User className="h-5 w-5" /> },
 ];
 
 export const BottomNavigation = ({ activeTab, onTabChange }: BottomNavigationProps) => {
+  // Бейдж кошика — глобальний стан (Zustand), доступний на кожній сторінці
+  const totalItems = useCartStore((s) => s.getTotalItems());
+
   return (
     <nav className="fixed bottom-0 left-0 right-0 w-full max-w-md mx-auto z-50 bg-card/80 backdrop-blur-sm border-t border-border">
       <div className="flex items-center justify-around h-16 pb-safe w-full min-w-0 px-1">
@@ -72,7 +78,15 @@ export const BottomNavigation = ({ activeTab, onTabChange }: BottomNavigationPro
                   : "text-muted-foreground"
               )}
             >
-              {item.icon}
+              <span className="relative flex items-center justify-center">
+                {item.icon}
+                {/* Бейдж кошика: скільки одиниць товару лежить у кошику */}
+                {item.isCart && totalItems > 0 && (
+                  <span className="absolute -top-1.5 -right-2.5 min-w-[16px] h-4 px-1 flex items-center justify-center bg-live text-live-foreground text-[9px] font-bold rounded-full z-10">
+                    {totalItems > 99 ? "99+" : totalItems}
+                  </span>
+                )}
+              </span>
               <span className="text-[10px] font-medium truncate max-w-full">{item.label}</span>
             </button>
           );

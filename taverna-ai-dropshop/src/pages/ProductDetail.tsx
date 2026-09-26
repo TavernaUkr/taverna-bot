@@ -20,7 +20,7 @@ import {
 import { formatProductDescription } from "@/lib/formatDescription";
 import { isVideoUrl, firstPhotoUrl } from "@/lib/media";
 import { getColorHex } from "@/lib/colorMap";
-import { useCartContext } from "@/contexts/CartContext";
+import { useCartStore } from "@/store/cartStore";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -182,7 +182,7 @@ interface Review {
 const ProductDetail = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { addItem } = useCartContext();
+  const addItem = useCartStore((s) => s.addItem);
   const { isFavorite, toggleFavorite } = useFavoritesContext();
   
   const [product, setProduct] = useState<Product | null>(null);
@@ -359,14 +359,16 @@ const ProductDetail = () => {
       return;
     }
 
+    // Глобальний Zustand-кошик: сторінка /cart, бейдж та чекаут — звідти.
+    // effectivePrice враховує обраний варіант (final_price варіанта) —
+    // підміняємо price в копії товару, щоб кошиок рахував суму коректно.
+    const selectedOptions: Record<string, string> = {};
+    if (selectedSize) selectedOptions["Розмір"] = selectedSize;
+    if (selectedColor) selectedOptions["Колір"] = selectedColor;
     addItem(
-      product.id,
-      product.name,
-      effectivePrice,
-      product.images?.[0] || "/placeholder.svg",
-      selectedSize || undefined,
-      selectedColor || undefined,
+      { ...product, price: effectivePrice },
       quantity,
+      selectedOptions,
       selectedVariant ? String(selectedVariant.id) : undefined
     );
 

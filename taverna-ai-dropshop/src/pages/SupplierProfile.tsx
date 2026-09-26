@@ -12,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Progress } from "@/components/ui/progress";
 import { ProductCard } from "@/components/ProductCard";
 import { BottomNavigation } from "@/components/BottomNavigation";
-import { useCartContext } from "@/contexts/CartContext";
+import { useCartStore } from "@/store/cartStore";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 // ВАЖЛИВО: supabase тут лишається ЛИШЕ для відгуків (reviews) — їх мігруємо
 // на FastAPI окремим етапом. Профіль магазину та товари йдуть через бекенд.
@@ -65,7 +65,7 @@ const SupplierProfile = () => {
   const [canReview, setCanReview] = useState(false);
   const [isRatingOpen, setIsRatingOpen] = useState(false);
   
-  const { addItem } = useCartContext();
+  const addItem = useCartStore((s) => s.addItem);
   const { isFavorite, toggleFavorite } = useFavoritesContext();
 
   useEffect(() => {
@@ -199,26 +199,19 @@ const SupplierProfile = () => {
     }
   };
 
-  const handleAddToCart = async (
+  const handleAddToCart = (
     product: Product,
     size?: string,
     color?: string,
     variantId?: string,
     quantity: number = 1
   ) => {
-    const success = await addItem(
-      product.id,
-      product.name,
-      product.price,
-      product.images?.[0] || "/placeholder.svg",
-      size,
-      color,
-      quantity,
-      variantId
-    );
-    if (success) {
-      toast.success(`${product.name} додано до кошика`);
-    }
+    // Глобальний Zustand-кошик: сторінка /cart, бейдж та чекаут — звідти.
+    const selectedOptions: Record<string, string> = {};
+    if (size) selectedOptions["Розмір"] = size;
+    if (color) selectedOptions["Колір"] = color;
+    addItem(product, quantity, selectedOptions, variantId);
+    toast.success(`${product.name} додано до кошика`);
   };
 
   const handleToggleFavorite = async (product: Product) => {
@@ -630,6 +623,7 @@ const SupplierProfile = () => {
           if (tab === "catalog") navigate("/");
           else if (tab === "suppliers") navigate("/suppliers");
           else if (tab === "support") navigate("/support");
+          else if (tab === "cart") navigate("/cart");
           else navigate("/");
         }} 
       />

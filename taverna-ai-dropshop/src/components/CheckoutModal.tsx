@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useTelegramAuthContext } from './TelegramAuthProvider';
-import { CartItem } from '@/hooks/useCart';
+import type { CartItem } from '@/store/cartStore';
 import { supabase } from '@/integrations/supabase/client';
 import { createBackendOrder, BackendApiError, type BackendOrderPayload } from '@/lib/backendApi';
 import { toast } from 'sonner';
@@ -122,7 +122,7 @@ export function CheckoutModal({ isOpen, onClose, items, onOrderComplete }: Check
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   // Calculate totals with discounts
-  const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  const subtotal = items.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
   const deliveryCost = 70;
   const personalBonusDiscount = selectedPersonalBonus?.discountPercent
     ? Math.round(subtotal * selectedPersonalBonus.discountPercent / 100)
@@ -276,7 +276,9 @@ export function CheckoutModal({ isOpen, onClose, items, onOrderComplete }: Check
   }, [isAuthenticated, profile]);
 
   // Count unique suppliers
-  const uniqueSuppliers = new Set(items.map(i => i.supplierId).filter(Boolean));
+  const uniqueSuppliers = new Set(
+    items.map((i) => (i.product as { supplier_name?: string }).supplier_name).filter(Boolean)
+  );
   const isMultiSupplier = uniqueSuppliers.size > 1;
 
   // Auto-fill from saved address
@@ -523,15 +525,22 @@ export function CheckoutModal({ isOpen, onClose, items, onOrderComplete }: Check
         delivery_service: deliveryData.service,
         payment_type: paymentType,
         note: orderNotes || undefined,
-        items: items.map((item) => ({
+        items: items.map((item) => {
           // `variantId` заповнюється в ProductDetail.tsx при виборі розміру/кольору.
-          variant_id: item.variantId ? Number(item.variantId) : null,
-          product_id: /^\d+$/.test(item.productId) ? Number(item.productId) : null,
-          product_name: item.name,
-          quantity: item.quantity,
-          price: item.price,
-          options_text: [item.size, item.color].filter(Boolean).join(', ') || null,
-        })),
+          const productId = item.product.id;
+          const optionsText =
+            Object.entries(item.selectedOptions ?? {})
+              .map(([name, value]) => `${name}: ${value}`)
+              .join(', ') || null;
+          return {
+            variant_id: item.variantId ? Number(item.variantId) : null,
+            product_id: /^\d+$/.test(productId) ? Number(productId) : null,
+            product_name: item.product.name,
+            quantity: item.quantity,
+            price: item.product.price,
+            options_text: optionsText,
+          };
+        }),
       };
 
       // POST /api/v1/orders/ — замовлення пишеться напряму в БД нашого

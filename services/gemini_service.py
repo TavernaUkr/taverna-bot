@@ -21,7 +21,7 @@ except ImportError:
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 _GEMINI_JSON_RE = re.compile(r"(\{.*\}|\[.*\])", re.DOTALL)
-DEFAULT_GEMINI_MODEL = "gemini-1.5-flash-latest"
+DEFAULT_GEMINI_MODEL = "gemini-3.6-flash"
 
 
 def extract_gemini_json(text: str):

@@ -10,7 +10,6 @@ import { PartnerBanner } from "@/components/PartnerBanner";
 import { PromoCard } from "@/components/PromoCard";
 import { PromoHeroBanner } from "@/components/PromoHeroBanner";
 import { SearchModal } from "@/components/SearchModal";
-import { CartModal } from "@/components/CartModal";
 import { CheckoutModal } from "@/components/CheckoutModal";
 import { AllCategoriesModal } from "@/components/AllCategoriesModal";
 import { WishlistModal } from "@/components/WishlistModal";
@@ -18,10 +17,10 @@ import { OrdersHistory } from "@/components/OrdersHistory";
 import { ProfileDashboard } from "@/components/profile/ProfileDashboard";
 import { LiveActivityFeed } from "@/components/LiveActivityFeed";
 import { useTelegramAuthContext } from "@/components/TelegramAuthProvider";
-import { useCartContext } from "@/contexts/CartContext";
 import { useFavoritesContext } from "@/components/FavoritesContext";
 import { useProducts } from "@/hooks/useProducts";
 import { useRegisterBack } from "@/hooks/useAppBack";
+import { useCartStore } from "@/store/cartStore";
 import { toast } from "sonner";
 import { getCategoryGradient } from "@/lib/categoryColors";
 import { ProductGridSkeleton } from "@/components/ui/product-skeleton";
@@ -263,13 +262,14 @@ const Index = () => {
 
   const [activeTab, setActiveTab] = useState(() => getTabFromSearch(location.search));
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [isCartOpen, setIsCartOpen] = useState(false);
   const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
   const [isAllCategoriesOpen, setIsAllCategoriesOpen] = useState(false);
   const [isWishlistOpen, setIsWishlistOpen] = useState(false);
   
-  // Use cart context for synchronized cart
-  const { items: cartItems, totalItems, addItem, updateQuantity, removeItem, clearCart, fetchCart } = useCartContext();
+  // Глобальний кошик (Zustand + persist у localStorage)
+  const cartItems = useCartStore((s) => s.items);
+  const totalItems = useCartStore((s) => s.getTotalItems());
+  const addItem = useCartStore((s) => s.addItem);
   
   // Use favorites context
   const { isFavorite, toggleFavorite, totalFavorites } = useFavoritesContext();
@@ -304,7 +304,6 @@ const Index = () => {
 
   useRegisterBack(isAllCategoriesOpen, () => setIsAllCategoriesOpen(false));
   useRegisterBack(isCheckoutOpen, () => setIsCheckoutOpen(false));
-  useRegisterBack(isCartOpen, () => setIsCartOpen(false));
   useRegisterBack(isWishlistOpen, () => setIsWishlistOpen(false));
   useRegisterBack(isSearchOpen, () => setIsSearchOpen(false));
 
@@ -321,54 +320,35 @@ const Index = () => {
     navigate(`/catalog?q=${encodeURIComponent(query)}`);
   };
 
-  const handleUpdateQuantity = async (id: string, quantity: number) => {
-    await updateQuantity(id, quantity);
-  };
-
-  const handleRemoveItem = async (id: string) => {
-    const success = await removeItem(id);
-    if (success) {
-      toast.success("Товар видалено з кошика");
-    }
-  };
-
   const handleCheckout = () => {
     if (cartItems.length === 0) {
       toast.error("Кошик порожній");
       return;
     }
-    setIsCartOpen(false);
-    setIsCheckoutOpen(true);
+    navigate("/cart");
   };
 
   const handleOrderComplete = async (orderId: string) => {
     setIsCheckoutOpen(false);
-    await clearCart();
-    await fetchCart();
+    useCartStore.getState().clearCart();
     setMainTab("account");
     toast.success("Дякуємо за замовлення!");
   };
 
-  const handleAddToCart = async (
+  const handleAddToCart = (
     product: any,
     size?: string,
     color?: string,
     variantId?: string,
     quantity: number = 1
   ) => {
-    const success = await addItem(
-      product.id,
-      product.name,
-      product.price,
-      product.images?.[0] || product.image,
-      size,
-      color,
-      quantity,
-      variantId
-    );
-    if (success) {
-      toast.success(`${product.name} додано до кошика`);
-    }
+    // Глобальний Zustand-кошик: сторінка /cart, бейдж у нижній навігації
+    // та чекаут читають дані звідти.
+    const selectedOptions: Record<string, string> = {};
+    if (size) selectedOptions["Розмір"] = size;
+    if (color) selectedOptions["Колір"] = color;
+    addItem(product, quantity, selectedOptions, variantId);
+    toast.success(`${product.name} додано до кошика`);
   };
 
   const handleToggleFavorite = async (product: any) => {
@@ -404,6 +384,8 @@ const Index = () => {
       navigate("/suppliers");
     } else if (tab === "support") {
       navigate("/support");
+    } else if (tab === "cart") {
+      navigate("/cart");
     } else {
       setMainTab(tab);
     }
@@ -455,7 +437,7 @@ const Index = () => {
       <Header 
         cartCount={totalItems}
         favoritesCount={totalFavorites}
-        onCartClick={() => setIsCartOpen(true)}
+        onCartClick={() => navigate("/cart")}
         onSearchClick={() => setIsSearchOpen(true)}
         onNotificationsClick={() => toast.info("Сповіщення")}
         onFavoritesClick={() => setIsWishlistOpen(true)}
@@ -477,15 +459,6 @@ const Index = () => {
         isOpen={isSearchOpen}
         onClose={() => setIsSearchOpen(false)}
         onSearch={handleSearch}
-      />
-
-      <CartModal
-        isOpen={isCartOpen}
-        onClose={() => setIsCartOpen(false)}
-        items={cartItems}
-        onUpdateQuantity={handleUpdateQuantity}
-        onRemoveItem={handleRemoveItem}
-        onCheckout={handleCheckout}
       />
 
       <AllCategoriesModal

@@ -39,6 +39,7 @@ export default function ManagerChats() {
           if (tab === "catalog") navigate("/");
           else if (tab === "suppliers") navigate("/suppliers");
           else if (tab === "support") navigate("/support");
+          else if (tab === "cart") navigate("/cart");
           else if (tab === "account") navigate("/?tab=account");
           else if (tab === "live") navigate("/?tab=live");
           else navigate("/");
