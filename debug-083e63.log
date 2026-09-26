@@ -1,1 +1,6 @@
 {"sessionId": "083e63", "id": "log_1790376045023", "timestamp": 1790376045023, "location": "db.py:insert-ok", "message": "support supplier inserted", "data": {"key": "taverna_support", "type": "independent", "hypothesisId": "A", "runId": "run1"}}
+{"sessionId": "083e63", "id": "log_1790427572939", "timestamp": 1790427572939, "location": "db.py:exists", "message": "support supplier already exists", "data": {"supplier_id": 2, "hypothesisId": "A", "runId": "run1"}}
+{"sessionId": "083e63", "id": "log_1790427660317", "timestamp": 1790427660317, "location": "db.py:exists", "message": "support supplier already exists", "data": {"supplier_id": 2, "hypothesisId": "A", "runId": "run1"}}
+{"sessionId": "083e63", "id": "log_1790429218612", "timestamp": 1790429218612, "location": "db.py:exists", "message": "support supplier already exists", "data": {"supplier_id": 2, "hypothesisId": "A", "runId": "run1"}}
+{"sessionId": "083e63", "id": "log_1790430216173", "timestamp": 1790430216173, "location": "db.py:exists", "message": "support supplier already exists", "data": {"supplier_id": 2, "hypothesisId": "A", "runId": "run1"}}
+{"sessionId": "083e63", "id": "log_1790430292947", "timestamp": 1790430292947, "location": "db.py:exists", "message": "support supplier already exists", "data": {"supplier_id": 2, "hypothesisId": "A", "runId": "run1"}}

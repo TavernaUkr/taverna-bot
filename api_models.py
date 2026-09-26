@@ -474,6 +474,85 @@ class SupplierShopCardResponse(UtcJsonDates):
     permissions: Optional[ManagerPermissions] = None
 
 
+class SupplierProductItemResponse(UtcJsonDates):
+    """
+    Товар у B2B-дашборді «Мої Товари» (GET /suppliers/{id}/products).
+    Уніфікований статус для вкладок: active | inactive | archived | deleted |
+    pending_ai | processing_ai | failed_ai.
+    """
+    id: int
+    sku: str                      # supplier_sku (артикул постачальника)
+    name: str
+    category: Optional[str] = None
+    sub_category: Optional[str] = None
+    picture: Optional[str] = None  # перше фото (без відео)
+    price: Optional[int] = None    # final_price першого доступного варіанта, ГРН
+    stock: int = 0                # сума quantity усіх доступних варіантів
+    status: str                   # уніфікований статус (див. вище)
+    created_at: Optional[datetime] = None
+
+
+class SupplierProductListResponse(BaseModel):
+    """Відповідь GET /suppliers/{id}/products: total + items."""
+    total: int
+    items: List[SupplierProductItemResponse] = []
+
+
+class ProductCreateRequest(BaseModel):
+    """
+    Тіло POST /api/v1/suppliers/{supplier_id}/products — створення товару
+    вручну з B2B-дашборду «Мої Товари».
+
+    supplier_id ЖОСТКО береться з URL (не з тіла!) — товар не може бути
+    створений «у чужий магазин».
+    """
+    name: str = Field(min_length=2, max_length=512)
+    description: Optional[str] = None
+    price: int = Field(ge=0, description="Ціна у ГРН (ціле число, без копійок)")
+    stock: int = Field(default=0, ge=0, description="Залишок на складі")
+    category: Optional[str] = None
+    # Картинки: список URL (завантаження файлів — наступний етап)
+    pictures: Optional[List[str]] = None
+    # Статус: 'active' (одразу у каталог) або 'inactive' (чернетка).
+    # Новий ручний товар НЕ проходить AI-черзу (is_ai_processed=True),
+    # тож pending_ai тут немає сенсу.
+    status: Optional[Literal["active", "inactive"]] = "inactive"
+
+
+class ProductUpdateRequest(BaseModel):
+    """
+    Тіло PATCH /api/v1/suppliers/{supplier_id}/products/{product_id} —
+    редагування товару з B2B-дашборду. Усі поля опціональні (partial update).
+    """
+    name: Optional[str] = Field(default=None, min_length=2, max_length=512)
+    description: Optional[str] = None
+    price: Optional[int] = Field(default=None, ge=0, description="Ціна у ГРН")
+    stock: Optional[int] = Field(default=None, ge=0, description="Залишок")
+    category: Optional[str] = None
+    sub_category: Optional[str] = None
+    pictures: Optional[List[str]] = None
+    status: Optional[Literal["active", "inactive"]] = None
+
+
+class SupplierProductDetailResponse(UtcJsonDates):
+    """
+    Повна картка товару для форми редагування
+    (GET /suppliers/{id}/products/{product_id}).
+    """
+    id: int
+    sku: str
+    name: str
+    description: Optional[str] = None
+    category: Optional[str] = None
+    sub_category: Optional[str] = None
+    pictures: List[str] = []
+    price: Optional[int] = None   # перший доступний варіант, ГРН
+    stock: int = 0
+    status: str                  # 'active' | 'inactive' | ... (уніфікований)
+    variant_id: Optional[int] = None  # перший доступний варіант (для PATCH)
+    created_at: Optional[datetime] = None
+
+
 class SupplierFinanceUpdateRequest(BaseModel):
     """
     Тіло PATCH /api/v1/suppliers/{supplier_id}/finance — налаштування
@@ -542,6 +621,15 @@ class SupplierDetailResponse(UtcJsonDates):
     # (owner отримує None — він не менеджер). Заповнюється лише в GET /suppliers/{id}.
     my_rates: Optional[ManagerContractRates] = None
     my_comm_settings: Optional[ManagerCommSettings] = None
+    # --- Фінансовий спліт магазину (суми в копійках) ---
+    # Заповнюємо лише власнику або менеджеру з правом can_view_balance;
+    # інакше лишаються дефолтними (0) — фінанси приховані.
+    balance: int = 0
+    platform_debt: int = 0
+    managers_debt: int = 0
+    # Налаштування авто-виводу (лише власник; менеджер бачить None)
+    auto_payout_enabled: Optional[bool] = None
+    auto_payout_schedule: Optional[str] = None
     created_at: Optional[datetime] = None
     approved_at: Optional[datetime] = None
 
@@ -955,6 +1043,41 @@ class OrderCreateResponse(BaseModel):
     order_uid: str
     total_price: int
     status: OrderStatus
+
+
+class OrderStatusUpdate(BaseModel):
+    """Новий статус замовлення від менеджера магазину (PATCH /orders/{id}/status)."""
+    status: OrderStatus
+
+
+class SupplierOrderItemResponse(BaseModel):
+    """Позиція замовлення у B2B-хабі магазину (без внутрішніх полів MyDrop)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    product_name: str
+    quantity: int
+    price_per_item: int
+    options_text: Optional[str] = None
+
+
+class SupplierOrderResponse(BaseModel):
+    """Замовлення магазину у B2B-хабі (Orders Hub, вкладка «Замовлення»)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    order_uid: str
+    status: OrderStatus
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    delivery_service: Optional[str] = None
+    delivery_address: Optional[str] = None
+    payment_type: Optional[str] = None
+    note: Optional[str] = None
+    total_price: int
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    items: List[SupplierOrderItemResponse] = []
 
 
 class SupplierCreate(BaseModel):

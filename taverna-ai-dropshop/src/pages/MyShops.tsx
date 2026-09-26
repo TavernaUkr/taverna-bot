@@ -1,8 +1,8 @@
 import { useState, useEffect, type ComponentType } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  ArrowLeft, Store, Plus, Package, Settings, Users, LifeBuoy, Wallet,
-  TrendingUp, Megaphone, Send, Loader2, Trash2,
+  ArrowLeft, Store, Plus, Package, PackageSearch, Settings, Users, LifeBuoy, Wallet,
+  Loader2, Trash2,
   Eye, Gift, Trophy, ThumbsUp, MessageCircle, User,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -101,7 +101,7 @@ const isLovableDevEnvironment = () => {
  * ├──────────────────────────────────┤
  * │ grid-cols-2:                      │
  * │ [1 Керування]  [3 Баланс]         │
- * │ [2 Просування] [4 Менеджери]     │
+ * │ [2 Мої Товари] [4 Менеджери]     │
  * ├──────────────────────────────────┤
  * │ [5 Замовлення / Комунікація] w-full│
  * └──────────────────────────────────┘
@@ -115,7 +115,7 @@ function StoreCard({
   onManagers,
   onSupport,
   onWallet,
-  onPromo,
+  onProducts,
   onDelete,
   onMiniIcon,
 }: {
@@ -127,7 +127,7 @@ function StoreCard({
   onManagers: (shop: ShopInfo) => void;
   onSupport: (shop: ShopInfo) => void;
   onWallet: (shop: ShopInfo) => void;
-  onPromo: (shop: ShopInfo) => void;
+  onProducts: (shop: ShopInfo) => void;
   onDelete: (shop: ShopInfo) => void;
   /** Міні-іконки хедера: bonuses / rating / reviews → свій маршрут на магазин. */
   onMiniIcon: (target: "bonuses" | "rating" | "reviews", shop: ShopInfo) => void;
@@ -312,8 +312,8 @@ function StoreCard({
         />
         {/* Кнопка 3 (справа зверху): Баланс (Wallet) — owner або manager з can_view_balance */}
         <GridAction icon={Wallet} label="Баланс" onClick={() => onWallet(shop)} disabled={!canViewBalance} />
-        {/* Кнопка 2 (зліва знизу): Просування (TrendingUp) */}
-        <GridAction icon={TrendingUp} label="Просування" onClick={() => onPromo(shop)} />
+        {/* Кнопка 2 (зліва знизу): Мої Товари (PackageSearch) — дашборд асортименту */}
+        <GridAction icon={PackageSearch} label="Мої Товари" onClick={() => onProducts(shop)} />
         {/* Кнопка 4 (справа знизу): Менеджери — власник; «Для мене» — менеджер
             (дивиться власні права + інструкцію) */}
         <GridAction
@@ -347,7 +347,6 @@ export default function MyShops() {
   const { effectiveRole, profile } = useTelegramAuthContext();
   const [shops, setShops] = useState<ShopInfo[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [promoShopId, setPromoShopId] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteShop, setDeleteShop] = useState<ShopInfo | null>(null);
   const [deleteReason, setDeleteReason] = useState("");
@@ -356,13 +355,6 @@ export default function MyShops() {
   const isSupplier = effectiveRole === "supplier";
   const isShopManager = effectiveRole === "shop_manager";
   const isAdmin = effectiveRole === "admin";
-
-  const openPromotion = (tab: "posting" | "advertising") => {
-    if (!promoShopId) return;
-    hapticSelection();
-    navigate(`/manager?shop=${promoShopId}&tab=${tab}&step=2`);
-    setPromoShopId(null);
-  };
 
   useEffect(() => {
     fetchShops();
@@ -528,20 +520,20 @@ export default function MyShops() {
                   hapticSelection();
                   navigate(`/store-managers/${item.id}`);
                 }}
-                // Кнопка 5: Замовлення / Комунікація
-                onSupport={() => {
+                // Кнопка 5: Замовлення / Комунікація → B2B Orders Hub
+                onSupport={(item) => {
                   hapticSelection();
-                  navigate("/support/panel");
+                  navigate(`/supplier/${item.id}/orders`);
                 }}
                 // Кнопка 3: Баланс магазину
                 onWallet={(item) => {
                   hapticSelection();
                   navigate(`/wallet/${item.id}`);
                 }}
-                // Кнопка 2: Просування — вибір каналу
-                onPromo={(item) => {
+                // Кнопка 2: Мої Товари → дашборд асортименту магазину
+                onProducts={(item) => {
                   hapticSelection();
-                  setPromoShopId(item.id);
+                  navigate(`/supplier/${item.id}/products`);
                 }}
                 // Міні-іконки хедера → маршрути конкретного магазину
                 onMiniIcon={(target, item) => {
@@ -554,47 +546,6 @@ export default function MyShops() {
           </div>
         )}
       </div>
-
-      {/* Promotion channel chooser */}
-      <Dialog open={!!promoShopId} onOpenChange={(open) => !open && setPromoShopId(null)}>
-        <DialogContent className="sm:max-w-[380px] mx-4">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Megaphone className="h-5 w-5 text-primary" />
-              Оберіть напрямок
-            </DialogTitle>
-            <DialogDescription>
-              Магазин уже вибрано — далі оберіть товари для просування.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid grid-cols-2 gap-3 pt-2">
-            <button
-              onClick={() => openPromotion("posting")}
-              className="flex flex-col items-center gap-2 rounded-xl border border-border bg-card p-4 hover:border-primary hover:bg-primary/5 transition-all"
-            >
-              <div className="w-12 h-12 rounded-full bg-primary/10 flex items-center justify-center">
-                <Send className="h-6 w-6 text-primary" />
-              </div>
-              <span className="font-semibold text-sm text-foreground">Постинг</span>
-              <span className="text-[11px] text-muted-foreground text-center leading-tight">
-                Публікація на платформах
-              </span>
-            </button>
-            <button
-              onClick={() => openPromotion("advertising")}
-              className="flex flex-col items-center gap-2 rounded-xl border border-border bg-card p-4 hover:border-primary hover:bg-primary/5 transition-all"
-            >
-              <div className="w-12 h-12 rounded-full bg-warning/10 flex items-center justify-center">
-                <Megaphone className="h-6 w-6 text-warning" />
-              </div>
-              <span className="font-semibold text-sm text-foreground">Реклама</span>
-              <span className="text-[11px] text-muted-foreground text-center leading-tight">
-                Платні кампанії з бюджетом
-              </span>
-            </button>
-          </div>
-        </DialogContent>
-      </Dialog>
 
       {/* Delete request dialog */}
       <Dialog

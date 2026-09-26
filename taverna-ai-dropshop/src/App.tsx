@@ -24,6 +24,9 @@ import StoreManagement from "./pages/StoreManagement";
 import SupplierStoreOrders from "./pages/SupplierStoreOrders";
 import OrdersHistoryPage from "./pages/OrdersHistoryPage";
 import SupplierStoreOrdersHistory from "./pages/SupplierStoreOrdersHistory";
+import StoreOrdersHub from "./pages/StoreOrdersHub";
+import StoreProducts from "./pages/StoreProducts";
+import StoreProductEdit from "./pages/StoreProductEdit";
 import MyShops from "./pages/MyShops";
 import StoreManagers from "./pages/StoreManagers";
 import Cart from "./pages/Cart";
@@ -32,6 +35,7 @@ import ShopRating from "./pages/ShopRating";
 import ManagerChats from "./pages/ManagerChats";
 import SupportPanel from "./pages/SupportPanel";
 import WalletAccount from "./pages/WalletAccount";
+import StoreWallet from "./pages/StoreWallet";
 import SupportChat from "./components/SupportChat";
 import NotFound from "./pages/NotFound";
 import OAuthConsent from "./pages/OAuthConsent";
@@ -76,7 +80,7 @@ function TelegramStartParamRouter() {
   const location = useLocation();
 
   useEffect(() => {
-    const tg = (window as any).Telegram?.WebApp;
+    const tg = window.Telegram?.WebApp;
     const fromTg = tg?.initDataUnsafe?.start_param as string | undefined;
     const params = new URLSearchParams(location.search);
     const fromQuery = params.get("startapp") || params.get("supplier");
@@ -123,6 +127,12 @@ function AnimatedRoutes() {
             <Route path="/admin-dashboard" element={<AdminDashboard />} />
             <Route path="/suppliers" element={<Suppliers />} />
             <Route path="/supplier/:id" element={<SupplierProfile />} />
+            {/* B2B Хаб Замовлень: список замовлень магазину + чат з клієнтами */}
+            <Route path="/supplier/:id/orders" element={<StoreOrdersHub />} />
+            {/* B2B Дашборд «Мої Товари»: асортимент магазину зі статусами */}
+            <Route path="/supplier/:id/products" element={<StoreProducts />} />
+            {/* Редагування товару (заглушка до наступного етапу) */}
+            <Route path="/supplier/:id/products/:productId/edit" element={<StoreProductEdit />} />
             {/* Міні-іконки картки магазину: бонуси / рейтинг / відгуки */}
             <Route path="/supplier/:id/bonuses" element={<ShopBonuses />} />
             {/* Рейтинг конкретного магазину (іконки Trophy / ThumbsUp) */}
@@ -136,7 +146,8 @@ function AnimatedRoutes() {
             <Route path="/personal-bonuses" element={<Navigate to="/wallet" replace />} />
             <Route path="/bonus-account" element={<Navigate to="/wallet" replace />} />
             <Route path="/wallet" element={<WalletAccount />} />
-            <Route path="/wallet/:supplierId" element={<WalletAccount />} />
+            {/* Фінанси магазину (операційний баланс, фінансовий спліт) */}
+            <Route path="/wallet/:supplierId" element={<StoreWallet />} />
             <Route path="/store-management" element={<StoreManagement />} />
             <Route path="/store-management/:supplierId" element={<StoreManagement />} />
             {/* Менеджери магазину: інвайт-посилання + RBAC-контракти (лише власник) */}

@@ -216,6 +216,7 @@ async def create_ticket(
 async def get_my_tickets(
     role: str = Query(default="customer", pattern="^(customer|manager)$"),
     status: Optional[str] = Query(default=None),
+    supplier_id: Optional[int] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -226,6 +227,8 @@ async def get_my_tickets(
     role='customer' — тікети, які він створив (customer_id == user.id).
     role='manager' — тікети магазинів, де він власник/менеджер.
     Фільтр status: 'ai_handling' | 'escalated' | 'closed'.
+    Фільтр supplier_id — тікети саме цього магазину (Orders Hub, вкладка
+    «Чат з клієнтами»: SupportPanel supplierId={shop.id}).
     """
     telegram_id = _telegram_id_from_authorization(authorization)
     if not telegram_id:
@@ -242,6 +245,11 @@ async def get_my_tickets(
         raise HTTPException(
             status_code=400,
             detail=f"Невірний status. Дозволені: {', '.join(sorted(VALID_TICKET_STATUSES))}",
+        )
+    if supplier_id is not None and not await _user_manages_supplier(db, user.id, supplier_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Немає доступу до тікетів цього магазину",
         )
 
     # Базовий підзапит агрегатів: кількість повідомлень + час останнього.
@@ -292,6 +300,9 @@ async def get_my_tickets(
     )
     if status is not None:
         stmt = stmt.where(SupportTicket.status == status)
+    # Orders Hub: тікети саме цього магазину (SupportPanel supplierId)
+    if supplier_id is not None:
+        stmt = stmt.where(SupportTicket.supplier_id == supplier_id)
     stmt = (
         stmt
         .order_by(SupportTicket.updated_at.desc().nullslast(), SupportTicket.id.desc())

@@ -464,6 +464,43 @@ export interface BackendOrderResponse {
   status: string;
 }
 
+/** Статус замовлення в B2B-хабі (database.models.OrderStatus). */
+export type BackendOrderStatus =
+  | "new"
+  | "pending"
+  | "confirmed"
+  | "processing"
+  | "shipped"
+  | "delivered"
+  | "cancelled"
+  | "returned";
+
+/** Позиція замовлення магазину у B2B-хабі (SupplierOrderItemResponse). */
+export interface BackendSupplierOrderItem {
+  id: number;
+  product_name: string;
+  quantity: number;
+  price_per_item: number;
+  options_text?: string | null;
+}
+
+/** Замовлення магазину у B2B-хабі (SupplierOrderResponse). */
+export interface BackendSupplierOrder {
+  id: number;
+  order_uid: string;
+  status: BackendOrderStatus | string;
+  customer_name?: string | null;
+  customer_phone?: string | null;
+  delivery_service?: string | null;
+  delivery_address?: string | null;
+  payment_type?: string | null;
+  note?: string | null;
+  total_price: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  items: BackendSupplierOrderItem[];
+}
+
 /**
  * Створює замовлення на нашому FastAPI-бекенді (POST /api/v1/orders/).
  * Використовується в чекауті (`CheckoutModal.tsx`) замість Supabase Edge
@@ -505,6 +542,37 @@ export async function createBackendOrder(orderData: BackendOrderPayload): Promis
   }
 
   return (await response.json()) as BackendOrderResponse;
+}
+
+// --- B2B Хаб Замовлень: список замовлень магазину + зміна статусу -------------
+
+/**
+ * GET /api/v1/orders/supplier/{supplierId} — замовлення магазину для
+ * Orders Hub (сторінка «Замовлення магазину», вкладка «Замовлення»).
+ * Доступ: лише власник/менеджер магазину (Bearer initData).
+ */
+export async function getSupplierOrders(supplierId: number): Promise<BackendSupplierOrder[]> {
+  const url = `${API_BASE_URL}/api/v1/orders/supplier/${encodeURIComponent(String(supplierId))}`;
+  const data = await backendGet<BackendSupplierOrder[] | BackendSupplierOrder>(url, tgAuthHeaders());
+  if (Array.isArray(data)) return data.filter(Boolean);
+  if (data && typeof data === "object" && "id" in data) return [data];
+  return [];
+}
+
+/**
+ * PATCH /api/v1/orders/{orderId}/status — зміна статусу замовлення
+ * менеджером магазину (Orders Hub). Доступ: лише власник/менеджер.
+ */
+export async function updateOrderStatus(
+  orderId: number,
+  status: BackendOrderStatus
+): Promise<BackendSupplierOrder> {
+  return backendPatch<BackendSupplierOrder>(
+    `${API_BASE_URL}/api/v1/orders/${encodeURIComponent(String(orderId))}/status`,
+    { status },
+    "Не вдалося змінити статус замовлення",
+    tgAuthHeaders()
+  );
 }
 
 // --- Авторизація Mini App + заявка партнера ---------------------------------
@@ -718,8 +786,8 @@ export async function updateMyUserSettings(
   const initData =
     typeof window !== "undefined"
       ? String(
-          (window as any).Telegram?.WebApp?.initData ||
-            (window as any).__TAVERNA_INIT_DATA__ ||
+          window.Telegram?.WebApp?.initData ||
+            window.__TAVERNA_INIT_DATA__ ||
             sessionStorage.getItem("taverna_tg_init_data") ||
             ""
         )
@@ -953,7 +1021,7 @@ export interface BackendPendingSupplierApplication {
 function adminTelegramHeaders(): Record<string, string> {
   const initData =
     typeof window !== "undefined"
-      ? String((window as any).Telegram?.WebApp?.initData || "")
+      ? String(window.Telegram?.WebApp?.initData || "")
       : "";
   const headers: Record<string, string> = {};
   if (initData) {
@@ -999,6 +1067,186 @@ export async function requestSupplierDeletion(reason: string): Promise<{ ok: boo
     adminTelegramHeaders()
   );
 }
+
+// --- B2B Дашборд «Мої Товари» (Products Dashboard) ----------------------------
+
+/** Уніфікований статус товару у B2B-дашборді (api/suppliers.py). */
+export type BackendSupplierProductStatus =
+  | "active"
+  | "inactive"
+  | "archived"
+  | "deleted"
+  | "pending_ai"
+  | "processing_ai"
+  | "failed_ai";
+
+/** Товар у B2B-дашборді «Мої Товари» (SupplierProductItemResponse). */
+export interface BackendSupplierProduct {
+  id: number;
+  sku: string;
+  name: string;
+  category?: string | null;
+  sub_category?: string | null;
+  picture?: string | null;
+  /** Ціна першого доступного варіанта, ГРН (ціле число, без копійок). */
+  price?: number | null;
+  /** Сумарний залишок доступних варіантів. */
+  stock: number;
+  status: BackendSupplierProductStatus | string;
+  created_at?: string | null;
+}
+
+export interface BackendSupplierProductList {
+  total: number;
+  items: BackendSupplierProduct[];
+}
+
+/** Вкладки фільтра «Мої Товари». */
+export type SupplierProductsTab =
+  | "all"
+  | "active"
+  | "moderation"
+  | "drafts";
+
+/**
+ * GET /api/v1/suppliers/{supplierId}/products — товари магазину з усіма
+ * статусами для дашборду «Мої Товари» (публічний каталог ховає
+ * inactive/archived, цей ендпоінт — ні).
+ * Доступ: лише власник/менеджер (Bearer initData).
+ */
+export async function getSupplierProducts(
+  supplierId: number,
+  options: {
+    tab?: SupplierProductsTab;
+    search?: string;
+    limit?: number;
+    offset?: number;
+  } = {}
+): Promise<BackendSupplierProductList> {
+  const params = new URLSearchParams();
+  const tab = options.tab ?? "all";
+  if (tab === "active") params.set("tab", "active");
+  else if (tab === "moderation") params.set("tab", "pending_ai");
+  else if (tab === "drafts") params.set("tab", "inactive");
+  const search = (options.search ?? "").trim();
+  if (search) params.set("search", search);
+  const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
+  const offset = Math.max(options.offset ?? 0, 0);
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  const qs = params.toString();
+  const url = `${API_BASE_URL}/api/v1/suppliers/${encodeURIComponent(
+    String(supplierId)
+  )}/products${qs ? `?${qs}` : ""}`;
+  const data = await backendGet<BackendSupplierProductList | BackendSupplierProduct[]>(
+    url,
+    tgAuthHeaders()
+  );
+  if (Array.isArray(data)) return { items: data, total: data.length };
+  if (data && Array.isArray(data.items)) {
+    return { items: data.items, total: typeof data.total === "number" ? data.total : data.items.length };
+  }
+  return { items: [], total: 0 };
+}
+
+
+// --- B2B CRUD товару: картка / створення / редагування -----------------------
+
+/** Повна картка товару для форми (SupplierProductDetailResponse). */
+export interface BackendSupplierProductDetail {
+  id: number;
+  sku: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  sub_category?: string | null;
+  pictures: string[];
+  /** Ціна першого доступного варіанта, ГРН. */
+  price?: number | null;
+  stock: number;
+  /** 'active' | 'inactive' | ... (уніфікований статус). */
+  status: BackendSupplierProductStatus | string;
+  variant_id?: number | null;
+  created_at?: string | null;
+}
+
+/** Дані для створення товару (POST /suppliers/{id}/products). */
+export interface SupplierProductCreateData {
+  name: string;
+  /** Порожній рядок = очистити (бекенд конвертує в NULL). */
+  description?: string | null;
+  /** Ціна у ГРН (ціле число, без копійок). */
+  price: number;
+  stock?: number;
+  category?: string | null;
+  pictures?: string[];
+  /** 'active' — одразу у каталог, 'inactive' — чернетка (за замовчуванням). */
+  status?: "active" | "inactive";
+}
+
+/** Partial-дані для редагування (PATCH /suppliers/{id}/products/{pid}). */
+export interface SupplierProductUpdateData {
+  name?: string;
+  /** Порожній рядок = очистити опис. */
+  description?: string | null;
+  price?: number;
+  stock?: number;
+  /** Порожній рядок = очистити категорію. */
+  category?: string | null;
+  sub_category?: string | null;
+  pictures?: string[];
+  status?: "active" | "inactive";
+}
+
+/**
+ * GET /api/v1/suppliers/{supplierId}/products/{productId} — повна картка
+ * товару для форми редагування. Доступ: власник/менеджер (Bearer initData).
+ */
+export async function getSupplierProduct(
+  supplierId: number,
+  productId: number
+): Promise<BackendSupplierProductDetail> {
+  const url = `${API_BASE_URL}/api/v1/suppliers/${encodeURIComponent(
+    String(supplierId)
+  )}/products/${encodeURIComponent(String(productId))}`;
+  return backendGet<BackendSupplierProductDetail>(url, tgAuthHeaders());
+}
+
+/**
+ * POST /api/v1/suppliers/{supplierId}/products — створити товар вручну.
+ * supplier_id береться з URL (не з тіла) — безпека мультитенантності.
+ */
+export async function createSupplierProduct(
+  supplierId: number,
+  data: SupplierProductCreateData
+): Promise<BackendSupplierProductDetail> {
+  return backendPost<BackendSupplierProductDetail>(
+    `${API_BASE_URL}/api/v1/suppliers/${encodeURIComponent(String(supplierId))}/products`,
+    data,
+    "Не вдалося створити товар",
+    tgAuthHeaders()
+  );
+}
+
+/**
+ * PATCH /api/v1/suppliers/{supplierId}/products/{productId} — оновити
+ * товар (назва/опис/ціна/залишок/категорія/фото/статус).
+ */
+export async function updateSupplierProduct(
+  supplierId: number,
+  productId: number,
+  data: SupplierProductUpdateData
+): Promise<BackendSupplierProductDetail> {
+  return backendPatch<BackendSupplierProductDetail>(
+    `${API_BASE_URL}/api/v1/suppliers/${encodeURIComponent(
+      String(supplierId)
+    )}/products/${encodeURIComponent(String(productId))}`,
+    data,
+    "Не вдалося зберегти товар",
+    tgAuthHeaders()
+  );
+}
+
 
 // --- Менеджери магазину + інвайт-посилання ----------------------------------
 
@@ -1209,6 +1457,27 @@ export async function getMyTransactions(limit = 50): Promise<BackendTransaction[
   return Array.isArray(data) ? data.filter(Boolean) : [];
 }
 
+/**
+ * GET /api/v1/wallets/supplier/{supplierId}/transactions — історія транзакцій
+ * ОПЕРАЦІЙНОГО БАЛАНСУ магазину (фінансовий спліт). Доступ: власник або
+ * менеджер з правом can_view_balance. amount — В КОПІЙКАХ.
+ */
+export async function getSupplierTransactions(
+  supplierId: number,
+  limit = 50,
+  offset = 0
+): Promise<BackendTransaction[]> {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(Math.max(0, offset)),
+  });
+  const data = await backendGet<BackendTransaction[]>(
+    `${API_BASE_URL}/api/v1/wallets/supplier/${encodeURIComponent(String(supplierId))}/transactions?${params.toString()}`,
+    adminTelegramHeaders()
+  );
+  return Array.isArray(data) ? data.filter(Boolean) : [];
+}
+
 // --- Картка магазину: GET/PATCH /suppliers/{id} ------------------------------
 
 export interface BackendSupplierDetail {
@@ -1243,6 +1512,27 @@ export interface BackendSupplierDetail {
   my_permissions?: ManagerPermissions | null;
   created_at?: string | null;
   approved_at?: string | null;
+  /**
+   * Фінансовий спліт магазину (У КОПІЙКАХ). Бекенд заповнює лише
+   * власнику або менеджеру з правом can_view_balance; інакше 0.
+   */
+  balance?: number;
+  platform_debt?: number;
+  managers_debt?: number;
+  /** Налаштування авто-виводу (лише власник; менеджер бачить null). */
+  auto_payout_enabled?: boolean | null;
+  auto_payout_schedule?: "daily" | "weekly" | null;
+}
+
+/** Фінансові налаштування магазину з PATCH /suppliers/{id}/finance (SupplierResponse). */
+export interface BackendSupplierFinanceSettings {
+  id: number;
+  balance: number;
+  platform_debt: number;
+  managers_debt: number;
+  auto_payout_enabled: boolean;
+  auto_payout_schedule?: "daily" | "weekly" | null;
+  [key: string]: unknown;
 }
 
 export interface BackendSupplierUpdate {
@@ -1281,6 +1571,26 @@ export async function updateSupplier(
     `${SUPPLIER_DETAIL_ENDPOINT}/${id}`,
     data,
     "Не вдалося зберегти магазин",
+    adminTelegramHeaders()
+  );
+}
+
+/**
+ * PATCH /api/v1/suppliers/{id}/finance — налаштування авто-виводу магазину
+ * (auto_payout_enabled, auto_payout_schedule 'daily'|'weekly').
+ * Доступ: лише власник. Функція потрібна сторінці «Фінанси магазину».
+ */
+export async function updateSupplierFinance(
+  id: string | number,
+  data: {
+    auto_payout_enabled?: boolean;
+    auto_payout_schedule?: "daily" | "weekly" | null;
+  }
+): Promise<BackendSupplierFinanceSettings> {
+  return backendPatch<BackendSupplierFinanceSettings>(
+    `${SUPPLIER_DETAIL_ENDPOINT}/${id}/finance`,
+    data,
+    "Не вдалося зберегти налаштування виплат",
     adminTelegramHeaders()
   );
 }
@@ -1659,8 +1969,8 @@ function tgAuthHeaders(): Record<string, string> {
   const initData =
     typeof window !== "undefined"
       ? String(
-          (window as any).Telegram?.WebApp?.initData ||
-            (window as any).__TAVERNA_INIT_DATA__ ||
+          window.Telegram?.WebApp?.initData ||
+            window.__TAVERNA_INIT_DATA__ ||
             sessionStorage.getItem("taverna_tg_init_data") ||
             ""
         )
@@ -1673,9 +1983,18 @@ function tgAuthHeaders(): Record<string, string> {
 }
 
 /** GET /api/v1/tickets/me?role=manager|customer — тікети поточного юзера. */
-export async function getMyTickets(role: "manager" | "customer"): Promise<BackendTicket[]> {
+export async function getMyTickets(
+  role: "manager" | "customer",
+  supplierId?: number
+): Promise<BackendTicket[]> {
+  const params = new URLSearchParams();
+  params.set("role", role);
+  // Orders Hub: тікети саме цього магазину (опціональний фільтр)
+  if (typeof supplierId === "number" && Number.isFinite(supplierId)) {
+    params.set("supplier_id", String(supplierId));
+  }
   const data = await backendGet<BackendTicket[] | BackendTicket>(
-    `${TICKETS_ENDPOINT}/me?role=${encodeURIComponent(role)}`,
+    `${TICKETS_ENDPOINT}/me?${params.toString()}`,
     tgAuthHeaders()
   );
   if (Array.isArray(data)) return data.filter(Boolean);

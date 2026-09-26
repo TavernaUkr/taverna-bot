@@ -83,7 +83,7 @@ function formatRelative(iso?: string | null): string {
   }
 }
 
-export default function SupportPanel() {
+export default function SupportPanel({ supplierId }: { supplierId?: number }) {
   const navigate = useNavigate();
   const { isAuthenticated, roles, profile } = useTelegramAuthContext();
 
@@ -131,7 +131,7 @@ export default function SupportPanel() {
       return;
     }
     try {
-      const data = await getMyTickets(isShopSide ? "manager" : "customer");
+      const data = await getMyTickets(isShopSide ? "manager" : "customer", supplierId);
       setTickets(data);
       setLoadError(null);
     } catch (err) {
@@ -144,7 +144,7 @@ export default function SupportPanel() {
     } finally {
       setIsLoadingTickets(false);
     }
-  }, [isShopSide, isAuthenticated]);
+  }, [isShopSide, isAuthenticated, supplierId]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -329,9 +329,18 @@ export default function SupportPanel() {
 
   const statusBadge = activeTicket ? STATUS_BADGES[activeTicket.status] : null;
 
+  // У вкладеному режимі (Orders Hub) хаб має власну шапку — внутрішню ховаємо
+  const isEmbedded = supplierId != null;
+
   return (
-    <div className="h-screen bg-background flex flex-col overflow-hidden">
-      {/* Шапка панелі */}
+    <div
+      className={cn(
+        "bg-background flex flex-col overflow-hidden",
+        isEmbedded ? "h-[calc(100vh-160px)] min-h-[420px]" : "h-screen"
+      )}
+    >
+      {/* Шапка панелі (лише у повноекранному режимі /support/panel) */}
+      {!isEmbedded && (
       <header className="shrink-0 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/75">
         <div className="flex items-center gap-2 px-3 py-2.5">
           {mobileView === "chat" && (
@@ -382,6 +391,37 @@ export default function SupportPanel() {
           )}
         </div>
       </header>
+      )}
+
+      {/* Вкладений режим (Orders Hub): компактна панель дій замість шапки */}
+      {isEmbedded && activeTicket && isShopSide && (
+        <div className="shrink-0 border-b border-border px-3 py-2 flex items-center justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs text-muted-foreground truncate">
+              {TOPIC_LABELS[activeTicket.topic] ?? activeTicket.topic} •{" "}
+              {activeTicket.assigned_manager_id == null
+                ? "Нічийний"
+                : isTicketMine
+                  ? "У вас в роботі"
+                  : `Менеджер #${activeTicket.assigned_manager_id}`}
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleCloseTicket}
+            disabled={isClosing || isTicketClosed}
+            className="gap-1.5 text-xs shrink-0"
+          >
+            {isClosing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+            )}
+            {isTicketClosed ? "Вирішено" : "Закрити тікет"}
+          </Button>
+        </div>
+      )}
 
       {/* Двопанельний лейаут */}
       <div className="flex-1 flex min-h-0">

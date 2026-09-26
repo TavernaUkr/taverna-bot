@@ -10,6 +10,7 @@ import logging
 import math
 import secrets
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -26,6 +27,8 @@ from api_models import (
     ManagerPermissions,
     PartnerRegisterRequest,
     PartnerRegisterResponse,
+    ProductCreateRequest,
+    ProductUpdateRequest,
     PublicSupplierResponse,
     SupplierDeletionRequest,
     SupplierDeletionResponse,
@@ -34,6 +37,9 @@ from api_models import (
     SupplierInviteLinkResponse,
     SupplierManagerResponse,
     SupplierMeResponse,
+    SupplierProductDetailResponse,
+    SupplierProductItemResponse,
+    SupplierProductListResponse,
     SupplierQueueShopProgress,
     SupplierResponse,
     SupplierShopCardResponse,
@@ -48,6 +54,7 @@ from database.models import (
     Product,
     ProductAIStatus,
     ProductStatus,
+    ProductVariant,
     PayoutMethod,
     Supplier,
     SupplierLegalType,
@@ -1102,6 +1109,7 @@ def _to_detail_response(
     my_permissions: Optional[ManagerPermissions] = None,
     my_rates: Optional[ManagerContractRates] = None,
     my_comm_settings: Optional[ManagerCommSettings] = None,
+    include_finance: bool = False,
 ) -> SupplierDetailResponse:
     return SupplierDetailResponse(
         id=supplier.id,
@@ -1139,6 +1147,21 @@ def _to_detail_response(
         my_permissions=my_permissions,
         my_rates=my_rates,
         my_comm_settings=my_comm_settings,
+        # Фінансовий спліт: віддаємо лише власнику або менеджеру
+        # з правом can_view_balance (інакше — дефолтні нулі).
+        balance=int(supplier.balance or 0) if include_finance else 0,
+        platform_debt=int(supplier.platform_debt or 0) if include_finance else 0,
+        managers_debt=int(supplier.managers_debt or 0) if include_finance else 0,
+        auto_payout_enabled=(
+            bool(supplier.auto_payout_enabled)
+            if (include_finance and role == "owner")
+            else None
+        ),
+        auto_payout_schedule=(
+            supplier.auto_payout_schedule
+            if (include_finance and role == "owner")
+            else None
+        ),
         created_at=getattr(supplier, "created_at", None),
         approved_at=getattr(supplier, "approved_at", None),
     )
@@ -1167,6 +1190,8 @@ async def get_supplier_by_id(
     # B2B-контракт менеджера: тарифи + комунікація (owner — None).
     my_rates: Optional[ManagerContractRates] = None
     my_comm_settings: Optional[ManagerCommSettings] = None
+    # Фінансовий спліт: видимий власнику або менеджеру з can_view_balance.
+    include_finance = role == "owner"
     if role == "manager":
         row = (
             await db.execute(
@@ -1194,11 +1219,13 @@ async def get_supplier_by_id(
             )
             my_rates = _rates_from_row(row[4], row[5])
             my_comm_settings = _comm_from_row(row[6], row[7])
+            include_finance = include_finance or bool(row[2])
 
     product_count, completed_products = await _product_stats(db, supplier.id)
     return _to_detail_response(
         supplier, role, product_count, completed_products,
         my_permissions, my_rates, my_comm_settings,
+        include_finance=include_finance,
     )
 
 
@@ -1713,3 +1740,459 @@ async def register_partner(
         trial_ends_at=new_supplier.trial_ends_at,
         created_at=new_supplier.created_at,
     )
+
+
+# --- B2B Дашборд «Мої Товари» (Products Dashboard) ---------------------------
+
+VALID_PRODUCT_TAB_STATUSES = {
+    "active", "inactive", "archived", "deleted",
+    "pending_ai", "processing_ai", "completed_ai", "failed_ai",
+}
+
+
+def _unified_product_status(product: Product) -> str:
+    """
+    Уніфікований статус товару для вкладок «Мої Товари»:
+    - AI ще не обробив → pending_ai / processing_ai / failed_ai / completed_ai;
+    - інакше — життєвий цикл ProductStatus (active / inactive / archived / deleted).
+    """
+    if not product.is_ai_processed:
+        if product.ai_status == ProductAIStatus.pending:
+            return "pending_ai"
+        if product.ai_status == ProductAIStatus.processing:
+            return "processing_ai"
+        if product.ai_status == ProductAIStatus.failed:
+            return "failed_ai"
+    return (product.status.value if product.status else "active")
+
+
+def _product_first_photo(product: Product) -> Optional[str]:
+    """Перше ФОТО товару (без відео/гіфок): pictures, потім media_urls."""
+    candidates: List[str] = []
+    if isinstance(product.pictures, list):
+        candidates.extend(str(u or "").strip() for u in product.pictures)
+    attrs = product.attributes if isinstance(product.attributes, dict) else {}
+    if isinstance(attrs.get("media_urls"), list):
+        candidates.extend(str(u or "").strip() for u in attrs["media_urls"])
+    for url in candidates:
+        if not url:
+            continue
+        lowered = url.lower().split("?")[0]
+        if lowered.endswith((".mp4", ".mov", ".webm", ".avi", ".gif")):
+            continue
+        return url
+    return None
+
+
+def _product_price_and_stock(product: Product) -> tuple[Optional[int], int]:
+    """(final_price першого доступного варіанта у ГРН, сумарний залишок)."""
+    price: Optional[int] = None
+    stock = 0
+    for variant in (product.variants or []):
+        if getattr(variant, "is_available", False):
+            stock += int(getattr(variant, "quantity", 0) or 0)
+            if price is None:
+                price = getattr(variant, "final_price", None)
+    return price, stock
+
+
+async def _user_manages_supplier(db: AsyncSession, user_id: int, supplier_id: int) -> bool:
+    """Чи є юзер власником або менеджером магазину (supplier_id)."""
+    owner_or_manager = (
+        await db.execute(
+            select(Supplier.id).where(
+                Supplier.id == supplier_id,
+                or_(
+                    Supplier.user_id == user_id,
+                    Supplier.managers.any(id=user_id),
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    return owner_or_manager is not None
+
+
+@router.get(
+    "/{supplier_id}/products",
+    response_model=SupplierProductListResponse,
+)
+async def get_supplier_products(
+    supplier_id: int,
+    tab: Optional[str] = Query(
+        default=None,
+        description="Фільтр вкладки: active | inactive | archived | deleted | pending_ai | processing_ai | failed_ai",
+    ),
+    search: Optional[str] = Query(default=None, max_length=200),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    B2B Дашборд «Мої Товари»: товари конкретного магазину з усіма статусами
+    (на відміну від публічного каталогу, який ховає inactive/archived).
+
+    Доступ: лише власник або менеджер магазину (Bearer initData).
+    Фільтр вкладки `tab` мапиться на уніфікований статус товару.
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    if not await _user_manages_supplier(db, user.id, supplier_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Немає доступу до товарів цього магазину",
+        )
+
+    if tab is not None and tab not in VALID_PRODUCT_TAB_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Невірний tab. Дозволені: {', '.join(sorted(VALID_PRODUCT_TAB_STATUSES))}",
+        )
+
+    from sqlalchemy.orm import selectinload
+
+    conditions = [Product.supplier_id == supplier_id]
+    if tab == "active":
+        conditions.append(Product.status == ProductStatus.active)
+    elif tab == "inactive":
+        conditions.append(Product.status == ProductStatus.inactive)
+    elif tab == "archived":
+        conditions.append(Product.status == ProductStatus.archived)
+    elif tab == "deleted":
+        conditions.append(Product.status == ProductStatus.deleted)
+    elif tab == "pending_ai":
+        conditions.append(
+            Product.is_ai_processed.is_(False) & (Product.ai_status == ProductAIStatus.pending)
+        )
+    elif tab == "processing_ai":
+        conditions.append(
+            Product.is_ai_processed.is_(False) & (Product.ai_status == ProductAIStatus.processing)
+        )
+    elif tab == "failed_ai":
+        conditions.append(
+            Product.is_ai_processed.is_(False) & (Product.ai_status == ProductAIStatus.failed)
+        )
+
+    search_text = (search or "").strip()
+    if search_text:
+        pattern = f"%{search_text}%"
+        conditions.append(
+            or_(
+                Product.name.ilike(pattern),
+                Product.supplier_sku.ilike(pattern),
+            )
+        )
+
+    total = int(
+        (await db.execute(select(func.count(Product.id)).where(*conditions))).scalar_one() or 0
+    )
+
+    stmt = (
+        select(Product)
+        .where(*conditions)
+        .options(selectinload(Product.variants))
+        .order_by(Product.id.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    products = (await db.execute(stmt)).scalars().unique().all()
+
+    items: List[SupplierProductItemResponse] = []
+    for product in products:
+        price, stock = _product_price_and_stock(product)
+        items.append(
+            SupplierProductItemResponse(
+                id=product.id,
+                sku=product.supplier_sku,
+                name=product.name,
+                category=product.category,
+                sub_category=product.sub_category,
+                picture=_product_first_photo(product),
+                price=price,
+                stock=stock,
+                status=_unified_product_status(product),
+                created_at=product.created_at,
+            )
+        )
+
+    return SupplierProductListResponse(total=total, items=items)
+
+
+# --- B2B CRUD товару: створення / картка / редагування ------------------------
+
+def _manual_product_sku() -> str:
+    """Унікальний артикул для ручного товару (unique per supplier у БД)."""
+    return f"MANUAL-{uuid.uuid4().hex[:10].upper()}"
+
+
+def _manual_variant_offer_id() -> str:
+    """supplier_offer_id має UNIQUE-обмеження у БД — генеруємо глобально унікальний."""
+    return f"manual-{uuid.uuid4().hex}"
+
+
+async def _get_owned_product_or_403(
+    db: AsyncSession,
+    user_id: int,
+    supplier_id: int,
+    product_id: int,
+) -> Product:
+    """
+    Товар, який належить цьому магазину, + перевірка RBAC
+    (власник або менеджер магазину). 404/403 при помилках.
+    """
+    product = (
+        await db.execute(
+            select(Product)
+            .where(
+                Product.id == product_id,
+                Product.supplier_id == supplier_id,
+            )
+            .options(selectinload(Product.variants))
+        )
+    ).scalar_one_or_none()
+
+    if not product:
+        raise HTTPException(status_code=404, detail="Товар не знайдено")
+
+    if not await _user_manages_supplier(db, user_id, supplier_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Немає доступу до товарів цього магазину",
+        )
+    return product
+
+
+def _first_available_variant(product: Product) -> Optional[ProductVariant]:
+    """Перший варіант товару (перший доступний, інакше просто перший)."""
+    variants = product.variants or []
+    for v in variants:
+        if v.is_available:
+            return v
+    return variants[0] if variants else None
+
+
+def _product_detail_response(product: Product) -> SupplierProductDetailResponse:
+    """ORM → SupplierProductDetailResponse (ціна/залишок/варіант)."""
+    variant = _first_available_variant(product)
+    price: Optional[int] = variant.final_price if variant else None
+    stock = sum(
+        int(v.quantity or 0) for v in (product.variants or []) if v.is_available
+    )
+    return SupplierProductDetailResponse(
+        id=product.id,
+        sku=product.supplier_sku,
+        name=product.name,
+        description=product.description,
+        category=product.category,
+        sub_category=product.sub_category,
+        pictures=[
+            str(u).strip() for u in (product.pictures or []) if str(u).strip()
+        ],
+        price=price,
+        stock=stock,
+        status=_unified_product_status(product),
+        variant_id=variant.id if variant else None,
+        created_at=product.created_at,
+    )
+
+
+@router.post(
+    "/{supplier_id}/products",
+    response_model=SupplierProductDetailResponse,
+    status_code=201,
+)
+async def create_supplier_product(
+    supplier_id: int,
+    payload: ProductCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Створення товару вручну з B2B-дашборду «Мої Товари».
+
+    - supplier_id — ЖОСТКО з URL (товар не потрапить у чужий магазин);
+    - артикул (supplier_sku) генеруємо автоматично: MANUAL-XXXXXXXXXX;
+    - створюється ОДИН варіант з ціною/залишком (товар без розмірів);
+    - is_ai_processed=True + ai_status=completed: AI-черга НЕ чіпає
+      ручні товари (інакше worker переписав би name/description/категорію);
+    - статус за замовчуванням — 'inactive' (чернетка), публікує
+      постачальник перемикачем у формі.
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    if not await _user_manages_supplier(db, user.id, supplier_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Немає доступу до товарів цього магазину",
+        )
+
+    status_value = payload.status or "inactive"
+    product = Product(
+        supplier_id=supplier_id,
+        supplier_sku=_manual_product_sku(),
+        name=payload.name.strip(),
+        description=(payload.description or "").strip() or None,
+        category=(payload.category or "").strip() or None,
+        # Ручний товар не проходить AI-категоризацію
+        is_ai_processed=True,
+        ai_status=ProductAIStatus.completed,
+        status=ProductStatus.active if status_value == "active" else ProductStatus.inactive,
+        pictures=[str(u).strip() for u in (payload.pictures or []) if str(u).strip()] or None,
+    )
+    db.add(product)
+    await db.flush()  # отримуємо product.id для варіанта
+
+    variant = ProductVariant(
+        product_id=product.id,
+        supplier_offer_id=_manual_variant_offer_id(),
+        base_price=float(payload.price),
+        final_price=payload.price,
+        quantity=payload.stock,
+        is_available=payload.stock > 0,
+    )
+    db.add(variant)
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.error(
+            "Помилка створення ручного товару (supplier=%s): %s", supplier_id, e, exc_info=True
+        )
+        raise HTTPException(status_code=500, detail="Не вдалося створити товар")
+
+    await db.refresh(product)
+    await db.refresh(variant)
+
+    logger.info(
+        "Створено ручний товар #%s «%s» (supplier=%s, price=%s грн, stock=%s, status=%s)",
+        product.id, product.name, supplier_id, payload.price, payload.stock, status_value,
+    )
+    return _product_detail_response(product)
+
+
+@router.get(
+    "/{supplier_id}/products/{product_id}",
+    response_model=SupplierProductDetailResponse,
+)
+async def get_supplier_product_detail(
+    supplier_id: int,
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Повна картка одного товару для форми редагування (B2B, RBAC)."""
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    product = await _get_owned_product_or_403(db, user.id, supplier_id, product_id)
+    return _product_detail_response(product)
+
+
+@router.patch(
+    "/{supplier_id}/products/{product_id}",
+    response_model=SupplierProductDetailResponse,
+)
+async def update_supplier_product(
+    supplier_id: int,
+    product_id: int,
+    payload: ProductUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Редагування товару з B2B-дашборду (partial update):
+    назва / опис / ціна / залишок / категорія / фото / статус Active-Inactive.
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    product = await _get_owned_product_or_403(db, user.id, supplier_id, product_id)
+
+    if payload.name is not None:
+        product.name = payload.name.strip()
+    if payload.description is not None:
+        # Порожній рядок = користувач очистив опис → NULL у БД
+        product.description = payload.description.strip() or None
+    if payload.category is not None:
+        product.category = payload.category.strip() or None
+    if payload.sub_category is not None:
+        product.sub_category = payload.sub_category.strip() or None
+    if payload.pictures is not None:
+        cleaned = [str(u).strip() for u in payload.pictures if str(u).strip()]
+        product.pictures = cleaned or None
+
+    # Статус: перемикач Активний / Чернетка
+    if payload.status is not None:
+        product.status = (
+            ProductStatus.active if payload.status == "active" else ProductStatus.inactive
+        )
+
+    # Ціна / залишок — у перший доступний варіант (створюємо, якщо нема)
+    variant = _first_available_variant(product)
+    if payload.price is not None or payload.stock is not None:
+        if variant is None:
+            variant = ProductVariant(
+                product_id=product.id,
+                supplier_offer_id=_manual_variant_offer_id(),
+                base_price=float(payload.price or 0),
+                final_price=payload.price or 0,
+                quantity=payload.stock or 0,
+                is_available=(payload.stock or 0) > 0,
+            )
+            db.add(variant)
+        else:
+            if payload.price is not None:
+                variant.final_price = payload.price
+                variant.base_price = float(payload.price)
+            if payload.stock is not None:
+                variant.quantity = payload.stock
+                variant.is_available = payload.stock > 0
+
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.error(
+            "Помилка оновлення товару #%s (supplier=%s): %s", product_id, supplier_id, e, exc_info=True
+        )
+        raise HTTPException(status_code=500, detail="Не вдалося зберегти товар")
+
+    # Після commit перевантажуємо зв'язки (expire_on_commit=False, та для
+    # надійності беремо свіжий стан варіантів)
+    await db.refresh(product)
+    return _product_detail_response(product)

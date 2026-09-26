@@ -1,8 +1,11 @@
+import { useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { ShoppingBag, Minus, Plus, Trash2, Package } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Header } from "@/components/Header";
+import { CheckoutModal } from "@/components/CheckoutModal";
+import { useRegisterBack } from "@/hooks/useAppBack";
 import { toast } from "sonner";
 import { useCartStore, cartItemKey, type CartItem } from "@/store/cartStore";
 
@@ -112,14 +115,26 @@ const Cart = () => {
   const items = useCartStore((s) => s.items);
   const getTotalPrice = useCartStore((s) => s.getTotalPrice);
   const getTotalItems = useCartStore((s) => s.getTotalItems);
+  const clearCart = useCartStore((s) => s.clearCart);
+
+  const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
+
+  // Кнопка «Назад» у Telegram закриває модалку чекауту, а не виходить з MiniApp
+  useRegisterBack(isCheckoutOpen, () => setIsCheckoutOpen(false));
 
   const totalPrice = getTotalPrice();
   const totalItems = getTotalItems();
 
   const handleCheckout = () => {
-    // Тимчасова заглушка: наступний крок — чекаут через POST /api/v1/orders/
-    console.log("Checkout", items);
-    toast.info("Оформлення замовлення — у розробці (Крок 4)");
+    setIsCheckoutOpen(true);
+  };
+
+  const handleOrderComplete = (orderId: string) => {
+    // Замовлення створено на бекенді → очищаємо кошик і закриваємо модалку
+    setIsCheckoutOpen(false);
+    clearCart();
+    toast.success("Замовлення успішно оформлено!");
+    navigate("/?tab=account");
   };
 
   return (
@@ -172,12 +187,20 @@ const Cart = () => {
                 {totalPrice.toLocaleString()} ₴
               </span>
             </div>
-            <Button onClick={handleCheckout} className="w-full" size="lg">
+            <Button onClick={handleCheckout} disabled={items.length === 0} className="w-full" size="lg">
               Оформити замовлення
             </Button>
           </div>
         </div>
       )}
+
+      {/* Чекаут: контактні дані → доставка → оплата → підтвердження */}
+      <CheckoutModal
+        isOpen={isCheckoutOpen}
+        onClose={() => setIsCheckoutOpen(false)}
+        items={items}
+        onOrderComplete={handleOrderComplete}
+      />
     </div>
   );
 };

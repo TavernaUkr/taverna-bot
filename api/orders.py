@@ -1,24 +1,44 @@
 # api/orders.py
 """
-Ендпоінт для створення замовлень напряму з Mini App (Checkout).
+Ендпоінти для роботи з замовленнями Mini App:
+
+- POST /api/v1/orders/            — чекаут з Mini App (створення замовлення);
+- GET  /api/v1/orders/supplier/{id} — список замовлень магазину (B2B Orders Hub);
+- PATCH /api/v1/orders/{id}/status  — зміна статусу замовлення менеджером.
 
 Відмінність від `/api/v1/order/create` у `web_app.py` (там кошик у Redis
-+ JWT-сесія користувача, головний флоу бота): цей роут приймає кошик і
++ JWT-сесія користувача, головний флоу бота): ці роути приймають кошик і
 дані клієнта прямо в тілі запиту, без сесії — саме для швидкого
 чекауту в Mini App (`CheckoutModal.tsx` -> `createBackendOrder`).
 """
 import logging
 import uuid
-from typing import Dict, List
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from api.auth import validate_init_data
+from api_models import (
+    OrderCreate,
+    OrderCreateResponse,
+    OrderStatusUpdate,
+    SupplierOrderResponse,
+)
 from database.db import get_db
-from database.models import Order, OrderItem, OrderStatus, PaymentStatus, ProductVariant, Supplier, SupplierType
-from api_models import OrderCreate, OrderCreateResponse
+from database.models import (
+    Order,
+    OrderItem,
+    OrderStatus,
+    PaymentStatus,
+    ProductVariant,
+    Supplier,
+    SupplierType,
+    User,
+)
 from services.mydrop_api import create_order_in_mydrop, denamespace_supplier_code, MyDropAPIError
 from config_reader import config
 
@@ -134,6 +154,241 @@ async def create_order(payload: OrderCreate, db: AsyncSession = Depends(get_db))
         order_uid=order.order_uid,
         total_price=order.total_price,
         status=order.status,
+    )
+
+
+# --- B2B Хаб Замовлень: список замовлень магазину + зміна статусу -------------
+#
+# Використовується сторінкою «Замовлення магазину» (Orders Hub, Mini App):
+# `StoreOrdersHub.tsx` -> `StoreOrdersList.tsx` -> getSupplierOrders()/updateOrderStatus().
+#
+# [ЗАПИТАННЯ] Замовлення в БД НЕ мають прямого поля supplier_id у чекауті:
+# магазин прив'язаний через позиції (`OrderItem.supplier_id`). Тому список
+# замовлень магазину = замовлення, у яких ХОЧА Б ОДНА позиція має supplier_id
+# цього магазину (включно з замовленнями головного флоу бота, де
+# `Order.supplier_id` заповнений напряму).
+
+VALID_MANAGER_STATUSES = {s.value for s in OrderStatus}
+
+
+def _telegram_id_from_authorization(authorization: Optional[str]) -> Optional[int]:
+    """Bearer initData Telegram Mini App -> telegram_id (401, якщо невалідний)."""
+    if not authorization:
+        return None
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        return None
+    user_data = validate_init_data(token.strip())
+    if user_data is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid initData: Hash mismatch or expired",
+        )
+    raw_id = user_data.get("id")
+    if not raw_id:
+        raise HTTPException(status_code=401, detail="Invalid initData: user is missing")
+    return int(raw_id)
+
+
+async def _get_user_by_telegram_id(db: AsyncSession, telegram_id: int) -> Optional[User]:
+    return (
+        await db.execute(select(User).where(User.telegram_id == telegram_id))
+    ).scalar_one_or_none()
+
+
+async def _user_manages_supplier(db: AsyncSession, user_id: int, supplier_id: int) -> bool:
+    """Чи є юзер власником або менеджером магазину (supplier_id)."""
+    owner_or_manager = (
+        await db.execute(
+            select(Supplier.id).where(
+                Supplier.id == supplier_id,
+                or_(
+                    Supplier.user_id == user_id,
+                    Supplier.managers.any(id=user_id),
+                ),
+            )
+        )
+    ).scalar_one_or_none()
+    return owner_or_manager is not None
+
+
+def _items_for_supplier(order: Order, supplier_id: int) -> List[OrderItem]:
+    """Позиції замовлення цього магазину (якщо є — лише його, інакше всі)."""
+    items = [item for item in (order.items or []) if item.supplier_id == supplier_id]
+    if items:
+        return items
+    return list(order.items or [])
+
+
+@router.get("/supplier/{supplier_id}", response_model=List[SupplierOrderResponse])
+async def get_supplier_orders(
+    supplier_id: int,
+    status: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Замовлення магазину для B2B-хабу (Orders Hub).
+
+    Доступ: лише власник або менеджер цього магазину (RBAC як у тікетах).
+    Фільтр `status` — значення OrderStatus (new/processing/shipped/...).
+    Сортування: новіші спершу.
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    if not await _user_manages_supplier(db, user.id, supplier_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Немає доступу до замовлень цього магазину",
+        )
+
+    if status is not None and status not in VALID_MANAGER_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Невірний status. Дозволені: {', '.join(sorted(VALID_MANAGER_STATUSES))}",
+        )
+
+    # Підзапит: ID замовлень, де є хоча б одна позиція цього магазину
+    order_ids_subq = (
+        select(OrderItem.order_id)
+        .where(OrderItem.supplier_id == supplier_id)
+        .distinct()
+        .subquery()
+    )
+
+    conditions = [Order.id.in_(select(order_ids_subq.c.order_id))]
+    # Замовлення головного флоу бота: Order.supplier_id заповнений напряму
+    conditions.append(Order.supplier_id == supplier_id)
+    stmt = (
+        select(Order)
+        .where(or_(*conditions))
+        .options(selectinload(Order.items))
+    )
+    if status is not None:
+        stmt = stmt.where(Order.status == status)
+    stmt = (
+        stmt
+        .order_by(Order.created_at.desc().nullslast(), Order.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+
+    orders = (await db.execute(stmt)).scalars().unique().all()
+
+    return [
+        SupplierOrderResponse(
+            id=order.id,
+            order_uid=order.order_uid,
+            status=order.status,
+            customer_name=order.customer_name,
+            customer_phone=order.customer_phone,
+            delivery_service=order.delivery_service,
+            delivery_address=order.delivery_address,
+            payment_type=order.payment_type,
+            note=order.note,
+            total_price=order.total_price,
+            created_at=order.created_at,
+            updated_at=order.updated_at,
+            items=_items_for_supplier(order, supplier_id),
+        )
+        for order in orders
+    ]
+
+
+@router.patch("/{order_id}/status", response_model=SupplierOrderResponse)
+async def update_order_status(
+    order_id: int,
+    payload: OrderStatusUpdate,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Зміна статусу замовлення менеджером/власником магазину (Orders Hub).
+
+    Доступ: юзер має керувати магазином, до якого належить замовлення
+    (Order.supplier_id або OrderItem.supplier_id хоча б однієї позиції).
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    order = await db.get(Order, order_id, options=[selectinload(Order.items)])
+    if not order:
+        raise HTTPException(status_code=404, detail="Замовлення не знайдено")
+
+    # Магазини, з якими пов'язане це замовлення
+    order_supplier_ids = {item.supplier_id for item in (order.items or []) if item.supplier_id}
+    if order.supplier_id:
+        order_supplier_ids.add(order.supplier_id)
+
+    if not order_supplier_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="Замовлення не прив'язане до жодного магазину",
+        )
+
+    can_manage = False
+    for sid in order_supplier_ids:
+        if await _user_manages_supplier(db, user.id, sid):
+            can_manage = True
+            break
+    if not can_manage:
+        raise HTTPException(
+            status_code=403,
+            detail="Немає доступу до цього замовлення",
+        )
+
+    old_status = order.status
+    order.status = payload.status
+    # `updated_at` має onupdate, але для надійності ставимо явно
+    order.updated_at = datetime.now(timezone.utc)
+
+    try:
+        await db.commit()
+        await db.refresh(order)
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Помилка зміни статусу замовлення #{order_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Не вдалося зберегти статус замовлення")
+
+    logger.info(
+        "Замовлення #%s (%s): статус змінено user=%s: %s -> %s",
+        order.id, order.order_uid, user.id, old_status, order.status,
+    )
+
+    primary_supplier_id = next(iter(order_supplier_ids))
+    return SupplierOrderResponse(
+        id=order.id,
+        order_uid=order.order_uid,
+        status=order.status,
+        customer_name=order.customer_name,
+        customer_phone=order.customer_phone,
+        delivery_service=order.delivery_service,
+        delivery_address=order.delivery_address,
+        payment_type=order.payment_type,
+        note=order.note,
+        total_price=order.total_price,
+        created_at=order.created_at,
+        updated_at=order.updated_at,
+        items=_items_for_supplier(order, primary_supplier_id),
     )
 
 
