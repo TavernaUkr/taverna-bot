@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft, Wallet, Landmark, TrendingDown, TrendingUp, Loader2,
   Settings2, Store, AlertTriangle, CalendarClock, Check,
+  ShoppingBag, UserCheck, TicketCheck,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -319,6 +320,11 @@ export default function StoreWallet() {
                 {transactions.map((tx) => {
                   const isIncome = tx.amount > 0;
                   const isBonus = tx.currency === "BONUS";
+                  // Іконка за типом транзакції (fallback — напрям руху)
+                  const TxIcon = TX_TYPE_ICON[tx.type] ?? (isIncome ? TrendingUp : TrendingDown);
+                  // Списання, яке створило борг перед менеджерами
+                  // (опис містить позначку «у борг») — червоний акцент.
+                  const isDebtCharge = !isIncome && !!tx.description?.includes("у борг");
                   return (
                     <div
                       key={tx.id}
@@ -327,14 +333,23 @@ export default function StoreWallet() {
                       <div
                         className={cn(
                           "w-9 h-9 rounded-full flex items-center justify-center shrink-0",
-                          isIncome ? "bg-success/15" : "bg-muted"
+                          isIncome
+                            ? "bg-success/15"
+                            : isDebtCharge
+                              ? "bg-destructive/10"
+                              : "bg-muted"
                         )}
                       >
-                        {isIncome ? (
-                          <TrendingUp className="h-4 w-4 text-success" />
-                        ) : (
-                          <TrendingDown className="h-4 w-4 text-muted-foreground" />
-                        )}
+                        <TxIcon
+                          className={cn(
+                            "h-4 w-4",
+                            isIncome
+                              ? "text-success"
+                              : isDebtCharge
+                                ? "text-destructive"
+                                : "text-muted-foreground"
+                          )}
+                        />
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-medium text-foreground truncate">
@@ -484,9 +499,18 @@ export default function StoreWallet() {
 
 /** Людські назви типів транзакцій операційного балансу магазину. */
 const TX_TYPE_TITLE: Record<string, string> = {
+  supplier_income: "Дохід від замовлення",
+  supplier_order_fee: "Оплата менеджеру (замовлення)",
   supplier_ticket_payout: "Винагорода менеджеру (тікет)",
-  supplier_order_payout: "Винагорода менеджеру (замовлення)",
+  managers_debt_repayment: "Погашення боргу менеджерам",
   platform_fee: "Комісія платформи",
-  supplier_income: "Надходження від замовлення",
   withdrawal: "Вивід коштів",
+};
+
+/** Іконка транзакції за типом (fallback у компоненті — TrendingUp/Down). */
+const TX_TYPE_ICON: Record<string, typeof ShoppingBag> = {
+  supplier_income: ShoppingBag,
+  supplier_order_fee: UserCheck,
+  supplier_ticket_payout: TicketCheck,
+  managers_debt_repayment: Landmark,
 };

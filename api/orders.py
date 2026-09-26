@@ -38,9 +38,11 @@ from database.models import (
     Supplier,
     SupplierType,
     User,
+    supplier_managers,
 )
 from services.mydrop_api import create_order_in_mydrop, denamespace_supplier_code, MyDropAPIError
 from config_reader import config
+from core.billing_service import process_order_income, process_order_payout
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +362,46 @@ async def update_order_status(
     order.status = payload.status
     # `updated_at` має onupdate, але для надійності ставимо явно
     order.updated_at = datetime.now(timezone.utc)
+
+    # --- ФІНАНСОВИЙ СПЛІТ: перехід у 'delivered' («Виконано») -----------------
+    # Нараховуємо дохід магазину (supplier_income) та, якщо статус змінив
+    # МЕНЕДЖЕР, — його винагороду rate_per_order (order_reward +
+    # supplier_order_fee). Атомарно з цим же commit; повторні виклики —
+    # no-op (захист по reference_id в Ledger).
+    # ВАЖЛИВО: у нашій системі немає статусу 'completed' — він перейменований
+    # на 'delivered' міграцією e03e5517cb5c (completed → delivered).
+    if payload.status == OrderStatus.delivered and old_status != OrderStatus.delivered:
+        total_billed = 0
+        for sid in order_supplier_ids:
+            total_billed += await process_order_income(db, order, sid)
+
+        # Винагорода менеджеру: лише якщо статус переводить менеджер
+        # (юзер з контрактом у supplier_managers цього магазину), не власник.
+        manager_supplier_id: Optional[int] = None
+        for sid in order_supplier_ids:
+            has_contract = (
+                await db.execute(
+                    select(supplier_managers.c.user_id).where(
+                        supplier_managers.c.supplier_id == sid,
+                        supplier_managers.c.user_id == user.id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if has_contract:
+                manager_supplier_id = sid
+                break
+
+        reward = 0
+        if manager_supplier_id is not None:
+            reward = await process_order_payout(
+                order.id, manager_supplier_id, user.id, db
+            )
+
+        if total_billed > 0 or reward > 0:
+            logger.info(
+                "Білінг замовлення #%s: дохід магазинів=%s коп., винагорода менеджеру=%s коп.",
+                order.id, total_billed, reward,
+            )
 
     try:
         await db.commit()
