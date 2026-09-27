@@ -210,11 +210,16 @@ async def _resolve_current_admin(
     db: AsyncSession,
     telegram_id: Optional[int],
     authorization: Optional[str],
-) -> tuple[Optional[int], Optional[User]]:
-    """Поточний адмін: Bearer initData → query telegram_id → перший User з роллю admin."""
-    admin_tg = _assert_admin(telegram_id, authorization)
-    if _is_placeholder_telegram_id(admin_tg):
-        admin_tg = None
+) -> tuple[Optional[int], Optional[int], Optional[User]]:
+    """
+    Поточний адмін: Bearer initData → query telegram_id → перший User з роллю admin.
+    Повертає (raw_admin_tg, effective_admin_tg, admin_user):
+      raw_admin_tg — сире TG ID з initData/query (навіть тестовий 123456789);
+      effective_admin_tg — те саме без плейсхолдерів (для пошуку User у БД);
+      admin_user — рядок User поточного адміна.
+    """
+    raw_admin_tg = _assert_admin(telegram_id, authorization)
+    admin_tg = None if _is_placeholder_telegram_id(raw_admin_tg) else raw_admin_tg
     admin_user = await _load_user_by_telegram(db, admin_tg) if admin_tg else None
     if admin_user is None:
         admin_user = (
@@ -224,18 +229,19 @@ async def _resolve_current_admin(
         ).scalars().first()
         if admin_user and admin_tg is None and getattr(admin_user, "telegram_id", None):
             admin_tg = int(admin_user.telegram_id)
-    return admin_tg, admin_user
+    return raw_admin_tg, admin_tg, admin_user
 
 
 async def _resolve_shop_owner(
     db: AsyncSession,
     request_data: AdminDirectCreateSupplierRequest,
-    admin_tg: Optional[int],
+    raw_admin_tg: Optional[int],
+    effective_admin_tg: Optional[int],
     admin_user: Optional[User],
 ) -> tuple[Optional[int], Optional[int]]:
     """
     Власник магазину: явний user_id / telegram_id з тіла запиту,
-    інакше — поточний адмін.
+    інакше — поточний адмін (user_id = admin_user.id, якщо він є).
     """
     owner_user_id = getattr(request_data, "user_id", None)
     owner_tg = (
@@ -258,12 +264,18 @@ async def _resolve_shop_owner(
         return tg, int(owner_user.id)
 
     if not _is_placeholder_telegram_id(owner_tg):
-        return int(owner_tg), admin_user.id if admin_user else None
+        # Явний TG власника, якого немає у БД: юзаємо його TG, але
+        # user_id все одно пробуємо взяти від поточного адміна.
+        return int(owner_tg), int(admin_user.id) if admin_user else None
 
-    return (
-        int(admin_tg) if admin_tg else None,
-        int(admin_user.id) if admin_user else None,
+    # Немає власника в запиті (або тестовий 123456789) →
+    # магазин одразу належить поточному адміну.
+    owner_tg_final = (
+        effective_admin_tg
+        if effective_admin_tg is not None
+        else raw_admin_tg
     )
+    return owner_tg_final, int(admin_user.id) if admin_user else None
 
 
 def _shop_name_of(supplier: Supplier) -> str:
@@ -874,9 +886,9 @@ async def direct_create_supplier(
     ІПН/ЄДРПОУ/IBAN — необов'язкові. Якщо є yml_link — одразу стартує імпорт.
     Якщо власника не вказано / тестовий — магазин належить адміну.
     """
-    admin_tg, admin_user = await _resolve_current_admin(db, telegram_id, authorization)
+    admin_tg, effective_admin_tg, admin_user = await _resolve_current_admin(db, telegram_id, authorization)
     owner_tg, owner_user_id = await _resolve_shop_owner(
-        db, request_data, admin_tg, admin_user
+        db, request_data, admin_tg, effective_admin_tg, admin_user
     )
     try:
         store_name = request_data.resolved_name()

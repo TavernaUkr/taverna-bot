@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   Store, Settings, Loader2, UserPlus, Send, Shield, Eye,
   Package, Crown, Users, Wallet, AlertTriangle,
-  LifeBuoy, TrendingUp, Gift, Trophy, ThumbsUp, MessageCircle,
+  LifeBuoy, Megaphone, Gift, Trophy, MessageCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -311,11 +311,10 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
                   {/* Темний градієнт для читабельності */}
                   <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-black/30 pointer-events-none" />
 
-                  {/* Міні-іконки (7, 8, 9, 10) — як у MyShops */}
+                  {/* Міні-іконки (7, 8, 9) — як у MyShops */}
                   <div className="absolute top-2 right-2 z-10 flex gap-1.5">
                     <HeaderIconButton icon={Gift} title="Бонуси" onClick={() => navigate(`/supplier/${supplier.id}`)} />
                     <HeaderIconButton icon={Trophy} title="Рейтинг" onClick={() => navigate(`/ratings`)} />
-                    <HeaderIconButton icon={ThumbsUp} title="Оцінка" onClick={() => navigate(`/supplier/${supplier.id}`)} />
                     <HeaderIconButton icon={MessageCircle} title="Відгуки" onClick={() => navigate(`/supplier/${supplier.id}`)} />
                   </div>
 
@@ -372,6 +371,9 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
                   <Badge variant={supplier.is_active ? "default" : "secondary"} className="text-[10px]">
                     {supplier.is_active ? "Активний" : "Неактивний"}
                   </Badge>
+                  <span className="flex items-center gap-1 text-[11px] text-muted-foreground font-mono">
+                    ID: {supplier.id}
+                  </span>
                   <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
                     <Package className="h-3 w-3" />
                     {supplier.product_count || 0} товарів
@@ -399,7 +401,7 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
                       />
                       {/* Кнопка 2 (зліва знизу): Просування */}
                       <GridAction
-                        icon={TrendingUp}
+                        icon={Megaphone}
                         label="Просування"
                         onClick={() => navigate(`/manager?shop=${supplier.id}&step=2`)}
                       />

@@ -17,7 +17,7 @@ from config_reader import config
 from bot_instance import get_bot_instance
 # --- ОНОВЛЕНІ ІМПОРТИ (План 23) ---
 from services.auth_service import get_current_admin_user 
-from services import gemini_service, publisher_service
+from services import publisher_service
 from services import omnichannel_service as ads_service
 from api_models import * # (Ми це зробили в минулому кроці)
 

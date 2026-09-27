@@ -33,6 +33,7 @@ import {
   removeManager,
   updateManagerContract,
   getMyManagerContract,
+  updateMyManagerCommunication,
   type BackendSupplierManager,
   type BackendMyManagerContract,
   type ManagerPermissions,
@@ -74,6 +75,8 @@ export default function StoreManagers() {
   const [isSavingPermissions, setIsSavingPermissions] = useState(false);
   const [inviteLink, setInviteLink] = useState<string | null>(null);
   const [isGeneratingInvite, setIsGeneratingInvite] = useState(false);
+  // «Мої налаштування комунікації» (режим manager): індикатор збереження
+  const [isSavingMyComm, setIsSavingMyComm] = useState(false);
 
   useEffect(() => {
     loadContext();
@@ -128,6 +131,33 @@ export default function StoreManagers() {
       toast.error(err?.message || "Не вдалося завантажити ваш контракт");
     } finally {
       setIsContractLoading(false);
+    }
+  };
+
+  /**
+   * Менеджер змінює СВОЇ налаштування комунікації:
+   * PATCH /suppliers/{supplierId}/managers/me/communication.
+   * Оновлює myContract відповіддю бекенду та показує toast.
+   */
+  const handleUpdateMyCommunication = async (
+    patch: { channel?: "webapp" | "telegram"; notifications_enabled?: boolean }
+  ) => {
+    if (!supplierId || isSavingMyComm) return;
+    setIsSavingMyComm(true);
+    try {
+      const updated = await updateMyManagerCommunication(Number(supplierId), patch);
+      setMyContract(updated);
+      triggerHapticFeedback("notification", "success");
+      toast.success("Налаштування комунікації збережено");
+    } catch (err: any) {
+      console.error("Error updating my communication:", err);
+      triggerHapticFeedback("notification", "error");
+      toast.error(err?.message || "Не вдалося зберегти налаштування");
+      // Невдале збереження → перечитати актуальний стан з бекенду,
+      // щоб перемикачі не показували оптимістичне значення.
+      await loadMyContract();
+    } finally {
+      setIsSavingMyComm(false);
     }
   };
 
@@ -347,38 +377,59 @@ export default function StoreManagers() {
                 </CardContent>
               </Card>
 
-              {/* === Комунікація (read-only) === */}
+              {/* === Комунікація (інтерактивна: менеджер змінює СВОЇ налаштування) === */}
               <Card>
                 <CardHeader className="pb-3">
                   <CardTitle className="text-base flex items-center gap-2">
                     <MessageSquare className="h-4 w-4 text-primary" />
                     Комунікація
                   </CardTitle>
+                  <CardDescription>
+                    Ці налаштування керуєте лише ви — вони стосуються вашої роботи.
+                  </CardDescription>
                 </CardHeader>
                 <CardContent className="space-y-2">
-                  <div className="flex items-center justify-between gap-3 p-3 rounded-xl border border-border bg-muted/30">
-                    <p className="text-sm font-medium text-foreground">Канал для чату з клієнтами</p>
-                    <Badge variant="secondary" className="text-[10px] shrink-0">
-                      {myContract.comm_settings?.chat_channel === "telegram"
-                        ? "Telegram Бот"
-                        : "Mini App"}
-                    </Badge>
+                  {/* Канал для чату з клієнтами: Select Mini App / Telegram Bot */}
+                  <div className="p-3 rounded-xl border border-border bg-muted/30 space-y-2">
+                    <Label className="text-sm font-medium text-foreground">
+                      Канал для чату з клієнтами
+                    </Label>
+                    <Select
+                      value={myContract.comm_settings?.chat_channel === "telegram" ? "telegram" : "webapp"}
+                      disabled={isSavingMyComm}
+                      onValueChange={(v) => {
+                        hapticSelection();
+                        handleUpdateMyCommunication({ channel: v as "webapp" | "telegram" });
+                      }}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue placeholder="Оберіть канал" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="webapp">Mini App</SelectItem>
+                        <SelectItem value="telegram">Telegram Бот</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Де ви отримуватимете повідомлення від покупців магазину.
+                    </p>
                   </div>
+                  {/* Сповіщення: Switch */}
                   <div className="flex items-center justify-between gap-3 p-3 rounded-xl border border-border bg-muted/30">
-                    <p className="text-sm font-medium text-foreground">Сповіщення про нові події</p>
-                    <Badge variant="secondary" className="gap-1 text-[10px] shrink-0">
-                      {myContract.comm_settings?.receive_notifications ? (
-                        <>
-                          <CheckCircle2 className="h-3 w-3" />
-                          Увімкнено
-                        </>
-                      ) : (
-                        <>
-                          <XCircle className="h-3 w-3" />
-                          Вимкнено
-                        </>
-                      )}
-                    </Badge>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-foreground">Сповіщення про нові події</p>
+                      <p className="text-xs text-muted-foreground">
+                        Замовлення, спори, скарги — миттєво сповіщаємо вас
+                      </p>
+                    </div>
+                    <Switch
+                      checked={myContract.comm_settings?.receive_notifications ?? true}
+                      disabled={isSavingMyComm}
+                      onCheckedChange={(v) => {
+                        hapticSelection();
+                        handleUpdateMyCommunication({ notifications_enabled: v });
+                      }}
+                    />
                   </div>
                 </CardContent>
               </Card>
@@ -454,7 +505,12 @@ export default function StoreManagers() {
           </button>
           <div className="flex-1">
             <h1 className="text-lg font-bold text-foreground">Менеджери магазину</h1>
-            <p className="text-sm text-muted-foreground">{shopName || "Мій магазин"}</p>
+            <p className="text-sm text-muted-foreground">
+              {shopName || "Мій магазин"}
+              {supplierId && (
+                <span className="text-xs text-muted-foreground/70 ml-1">(ID: {supplierId})</span>
+              )}
+            </p>
           </div>
         </div>
       </div>

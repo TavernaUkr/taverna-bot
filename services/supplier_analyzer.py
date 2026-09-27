@@ -1,49 +1,21 @@
 # services/supplier_analyzer.py
-"""AI-модерація заявок постачальників — прямі REST-запити до Gemini API (aiohttp).
+"""AI-модерація заявок постачальників через NVIDIA Build (NIM).
 Не чіпає логіку товарів.
 
-SDK google-genai НЕ використовується: він хибно трактує ключі формату AQ...
-як OAuth-токени і шле Bearer-заголовок, через що Google повертає 401 UNAUTHENTICATED.
-REST API з ключем у query-параметрі ?key=... працює коректно.
+Рефакторинг: платний Gemini замінено на безкоштовний NVIDIA NIM
+(services.llm_service, OpenAI SDK). Зміна моделі — NVIDIA_MODEL у .env
+або DEFAULT_MODEL у services/llm_service.py.
 """
 import asyncio
 import json
 import logging
 from typing import Any, Dict, Optional
 
-import aiohttp
-
-from config_reader import config, sanitize_gemini_api_key
-from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager
+from config_reader import config
+from services import llm_service
+from services.llm_service import LLMCapacityError
 
 logger = logging.getLogger(__name__)
-
-GEMINI_MODEL = "gemini-3.6-flash"
-GEMINI_FALLBACK_MODEL = "gemini-3.6-flash"
-
-GEMINI_REST_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-GEMINI_REST_TIMEOUT = aiohttp.ClientTimeout(total=120)
-
-
-def _extract_gemini_rest_text(data: Dict[str, Any]) -> str:
-    """Витягує згенерований текст з JSON-відповіді REST API generateContent."""
-    if not isinstance(data, dict):
-        return ""
-    candidates = data.get("candidates") or []
-    if not candidates:
-        feedback = data.get("promptFeedback") or {}
-        block_reason = feedback.get("blockReason")
-        if block_reason:
-            raise Exception(f"Gemini заблокував запит: {block_reason}")
-        return ""
-    first = candidates[0] if isinstance(candidates[0], dict) else {}
-    finish_reason = str(first.get("finishReason") or "")
-    parts = ((first.get("content") or {}).get("parts")) or []
-    texts = [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text")]
-    text = "".join(texts).strip()
-    if not text and finish_reason and finish_reason not in ("STOP", ""):
-        raise Exception(f"Gemini завершив відповідь без тексту: finishReason={finish_reason}")
-    return text
 
 
 def _normalize_source_link(link: Optional[str]) -> str:
@@ -119,20 +91,15 @@ class SupplierAnalyzer:
     """Короткий security-звіт по заявці магазину для CEO."""
 
     def __init__(self, api_key: Optional[str] = None):
-        self._key_manager = get_key_manager()
-        self.model_name = GEMINI_MODEL
-        self.fallback_model = GEMINI_FALLBACK_MODEL
-        if api_key and str(api_key).strip():
-            from services.gemini_key_manager import GeminiKeyManager
-            self._key_manager = GeminiKeyManager(
-                [str(api_key).strip(), *list(config.GEMINI_API_KEYS)]
-            )
-        if not self._key_manager.has_keys():
-            logger.warning("GEMINI_API_KEYS не знайдено. AI-скоринг заявок буде пропущено.")
+        # [MIGRATION] api_key (Gemini) ігноруємо — ключ NVIDIA живе в llm_service
+        self.model_name = llm_service.DEFAULT_MODEL
+
+        if not llm_service.has_llm_keys():
+            logger.warning("NVIDIA_API_KEY не знайдено. AI-скоринг заявок буде пропущено.")
 
     @property
     def is_ready(self) -> bool:
-        return bool(self._key_manager.has_keys())
+        return llm_service.has_llm_keys()
 
     def _build_prompt(self, supplier_data: dict, has_duplicates: bool, history_note: str = "") -> str:
         extra = f" {history_note}" if history_note else ""
@@ -150,81 +117,16 @@ class SupplierAnalyzer:
         response_mime_type: Optional[str] = None,
     ) -> str:
         """
-        Прямий асинхронний REST-запит до Gemini API через aiohttp.
-        SDK google-genai НЕ використовується (401 UNAUTHENTICATED на ключах AQ...).
-        Ключ передається через query-параметр ?key=..., як рекомендує REST API.
+        Один LLM-виклик через services.llm_service (NVIDIA NIM, OpenAI SDK).
+        response_mime_type залишено для сумісності сигнатури — JSON-чистку
+        llm_service виконує сам (clean_json_string/extract_json).
         """
-        if not self._key_manager.has_keys():
-            raise Exception("Gemini client is not configured")
-
-        generation_config: Dict[str, Any] = {
-            "temperature": 0.2,
-            "maxOutputTokens": 800,
-        }
-        if response_mime_type:
-            generation_config["responseMimeType"] = response_mime_type
-
-        payload: Dict[str, Any] = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": generation_config,
-        }
-
-        last_error: Optional[Exception] = None
-        for _ in range(max(1, self._key_manager.key_count)):
-            try:
-                active_key = self._key_manager.get_next_active_key()
-            except AllKeysExhaustedError as e:
-                raise Exception("429 Rate Limit") from e
-
-            key = sanitize_gemini_api_key(active_key)
-            url = f"{GEMINI_REST_BASE}/{model_name}:generateContent?key={key}"
-
-            try:
-                async with aiohttp.ClientSession(timeout=GEMINI_REST_TIMEOUT) as session:
-                    async with session.post(
-                        url,
-                        json=payload,
-                        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-                    ) as resp:
-                        status = resp.status
-                        raw_text = await resp.text()
-
-                        if status == 200:
-                            try:
-                                data = json.loads(raw_text)
-                            except Exception as e:
-                                raise Exception(
-                                    f"Gemini REST повернув невалідний JSON (HTTP 200): {raw_text[:300]}"
-                                ) from e
-                            text = _extract_gemini_rest_text(data)
-                            if not text:
-                                raise Exception("Gemini повернув порожню відповідь")
-                            return text
-
-                        if status == 429:
-                            self._key_manager.mark_key_exhausted(active_key)
-                            last_error = Exception(f"429 Rate Limit: {raw_text[:300]}")
-                            continue
-
-                        if status in (401, 403):
-                            self._key_manager.mark_key_exhausted(active_key)
-                            last_error = Exception(f"{status} UNAUTHENTICATED: {raw_text[:300]}")
-                            continue
-
-                        if status == 503:
-                            raise Exception(f"503 High Demand: {raw_text[:300]}")
-
-                        raise Exception(f"Gemini API Error {status}: {raw_text[:500]}")
-            except aiohttp.ClientError as e:
-                last_error = e
-                logger.warning(
-                    "Gemini REST мережева помилка на ключі ...%s: %s",
-                    key[-4:],
-                    e,
-                )
-                continue
-
-        raise Exception("429 Rate Limit") from last_error
+        return await llm_service.generate_json_response(
+            prompt=prompt,
+            system_prompt="Ти - Security Manager маркетплейсу Taverna. Відповідай стисло і по суті.",
+            temperature=0.2,
+            max_tokens=4096,
+        )
 
     async def analyze_supplier(self, supplier_data: dict, has_duplicates: bool) -> str:
         """Повертає текстовий звіт. 503 — до 3 спроб з паузою 5с."""
@@ -239,7 +141,7 @@ class SupplierAnalyzer:
             dup = "так" if has_duplicates else "ні"
             extra = f"\n{history_note}" if history_note else ""
             return (
-                "AI-аналіз пропущено (немає GEMINI_API_KEYS).\n"
+                "AI-аналіз пропущено (немає NVIDIA_API_KEY).\n"
                 f"Дублікати в БД: {dup}.{extra}\n"
                 "Потрібна ручна перевірка заявки адміністратором."
             )
@@ -247,26 +149,21 @@ class SupplierAnalyzer:
         prompt = self._build_prompt(supplier_data, has_duplicates, history_note)
         last_error = None
         for attempt in range(1, 4):
-            for model_name in (self.model_name, self.fallback_model):
-                try:
-                    report = await self._complete(model_name, prompt)
-                    if report:
-                        return report
-                except Exception as e:
-                    last_error = e
-                    logger.warning(
-                        "SupplierAnalyzer (%s, спроба %s/3): %s",
-                        model_name, attempt, e,
-                    )
-                    err = str(e)
-                    if "503" in err or "429" in err:
-                        break
-                    if model_name == self.model_name:
-                        continue
-            if last_error and ("503" in str(last_error) or "429" in str(last_error)) and attempt < 3:
-                await asyncio.sleep(5)
-                continue
-            break
+            try:
+                report = await self._complete(self.model_name, prompt)
+                if report:
+                    return report
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "SupplierAnalyzer (%s, спроба %s/3): %s",
+                    self.model_name, attempt, e,
+                )
+                # 429/5xx — тимчасова перевантаженість NIM: пауза і ретрай
+                if isinstance(e, LLMCapacityError) and attempt < 3:
+                    await asyncio.sleep(5)
+                    continue
+                break
 
         logger.error("SupplierAnalyzer не зміг отримати звіт: %s", last_error)
         dup = "так" if has_duplicates else "ні"
@@ -295,7 +192,7 @@ async def analyze_telegram_channel(channel_link: str) -> dict:
     """
     AI-оцінка Telegram-каналу постачальника.
 
-    Пости беремо через Telethon (`get_recent_channel_posts`), далі Gemini
+    Пости беремо через Telethon (`get_recent_channel_posts`), далі NVIDIA LLM
     повертає JSON-звіт для адміна.
     """
     from services.telegram_parser import (
@@ -349,42 +246,34 @@ async def analyze_telegram_channel(channel_link: str) -> dict:
     if history_note:
         prompt = f"{history_note} {prompt}"
 
-    from services.gemini_service import extract_gemini_json
-
     last_error: Optional[Exception] = None
     for attempt in range(1, 4):
-        for model_name in (analyzer.model_name, analyzer.fallback_model):
-            try:
-                try:
-                    raw = await analyzer._complete(
-                        model_name,
-                        prompt,
-                        response_mime_type="application/json",
-                    )
-                except Exception:
-                    raw = await analyzer._complete(model_name, prompt)
-                parsed = extract_gemini_json(raw) if raw else None
-                if isinstance(parsed, dict):
-                    result = _normalize_channel_score(parsed, channel_link)
-                    if history_note and history_note not in str(result.get("admin_summary") or ""):
-                        result["admin_summary"] = f"{history_note} {result['admin_summary']}"
-                    return result
-                last_error = Exception("Gemini повернув не-JSON відповідь")
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    "analyze_telegram_channel (%s, спроба %s/3): %s",
-                    model_name, attempt, e,
-                )
-                err = str(e)
-                if "503" in err or "429" in err:
-                    break
-                if model_name == analyzer.model_name:
-                    continue
-        if last_error and ("503" in str(last_error) or "429" in str(last_error)) and attempt < 3:
-            await asyncio.sleep(5)
-            continue
-        break
+        try:
+            # response_mime_type='application/json' — сумісність сигнатури,
+            # чистку JSON llm_service виконує сам.
+            raw = await analyzer._complete(
+                analyzer.model_name,
+                prompt,
+                response_mime_type="application/json",
+            )
+            parsed = llm_service.extract_json(raw) if raw else None
+            if isinstance(parsed, dict):
+                result = _normalize_channel_score(parsed, channel_link)
+                if history_note and history_note not in str(result.get("admin_summary") or ""):
+                    result["admin_summary"] = f"{history_note} {result['admin_summary']}"
+                return result
+            last_error = Exception("NVIDIA LLM повернув не-JSON відповідь")
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                "analyze_telegram_channel (%s, спроба %s/3): %s",
+                analyzer.model_name, attempt, e,
+            )
+            # 429/5xx — тимчасова перевантаженість NIM: пауза і ретрай
+            if isinstance(e, LLMCapacityError) and attempt < 3:
+                await asyncio.sleep(5)
+                continue
+            break
 
     logger.error("analyze_telegram_channel не зміг отримати звіт: %s", last_error)
     fallback_text = (

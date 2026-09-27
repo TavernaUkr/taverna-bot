@@ -16,6 +16,7 @@ sys.path.append(str(current_dir))
 from sqlalchemy import delete, select, update
 
 from database.db import AsyncSessionLocal
+from database.db import PLATFORM_SUPPORT_SUPPLIER_KEY
 from database.models import (
     Order,
     OrderItem,
@@ -47,6 +48,18 @@ async def hard_delete_supplier() -> None:
         supplier = await session.get(Supplier, supplier_id)
         if supplier is None:
             print(f"❌ Магазин #{supplier_id} не знайдено.")
+            return
+
+        # --- ЗАХИСТ СИСТЕМНОГО МАГАЗИНА ---
+        # Taverna Support — службовий магазин платформи (тікети підтримки/скарг).
+        # Випадкове видалення ламає ескалацію тікетів (supplier_id NOT NULL
+        # у support_tickets), тому фізичне знищення заборонено.
+        if (supplier.key or "").strip() == PLATFORM_SUPPORT_SUPPLIER_KEY:
+            print(
+                f"❌ ПОМИЛКА: Магазин #{supplier_id} — це системний магазин платформи "
+                f"(Taverna Support, key='{PLATFORM_SUPPORT_SUPPLIER_KEY}'). "
+                "Його видаляти заборонено!"
+            )
             return
 
         product_ids = list(

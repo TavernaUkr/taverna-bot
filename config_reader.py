@@ -13,7 +13,7 @@ logging.info(f"Завантаження .env з: {env_path.resolve()}")
 
 # ВАЖЛИВО: override=True. pydantic-settings за замовчуванням віддає
 # пріоритет вже встановленим змінним ОС/терміналу над .env-файлом — тож
-# старий закешований ключ (напр. GEMINI_API_KEY з попередньої сесії
+# старий закешований ключ (напр. NVIDIA_API_KEY з попередньої сесії
 # терміналу чи системних Environment Variables Windows) "перемагав" би
 # новий, щойно вписаний у .env. load_dotenv(override=True) примусово
 # перезаписує os.environ значеннями з .env, тож Settings() нижче завжди
@@ -21,8 +21,11 @@ logging.info(f"Завантаження .env з: {env_path.resolve()}")
 load_dotenv(dotenv_path=env_path, override=True)
 
 
-def sanitize_gemini_api_key(raw: object) -> str:
-    """Прибирає пробіли, BOM, невидимі символи і обгорткові лапки з одного ключа."""
+def sanitize_api_key(raw: object) -> str:
+    """
+    Універсальна чистка будь-якого API-ключа (NVIDIA, Gemini, ...):
+    пробіли, BOM, невидимі символи, лапки, префікси 'Bearer '/'nvapi-'.
+    """
     key = str(raw or "")
     for junk in ("\ufeff", "\u200b", "\u200c", "\u200d", "\xa0"):
         key = key.replace(junk, "")
@@ -32,7 +35,8 @@ def sanitize_gemini_api_key(raw: object) -> str:
         key = key[1:].strip()
     while key and key[-1] in "'\"`":
         key = key[:-1].strip()
-    if key.lower().startswith("bearer "):
+    lowered = key.lower()
+    if lowered.startswith("bearer "):
         key = key[7:].strip()
         key = key.strip("'").strip('"').strip("`").strip()
     return key
@@ -72,8 +76,11 @@ class Settings(BaseSettings):
     # --- AI та Сервіси ---
     groq_api_key: Optional[SecretStr] = None
     openrouter_api_key: Optional[SecretStr] = None
-    gemini_api_key: Optional[SecretStr] = None
-    gemini_api_keys: str = ""
+    # [НОВЕ] NVIDIA Build (NIM) — безкоштовні OpenAI-сумісні ендпоінти.
+    # Основний і ЄДИНИЙ AI-провайдер проєкту (Gemini повністю видалено).
+    nvidia_api_key: Optional[SecretStr] = None
+    nvidia_model: Optional[str] = None      # порожньо -> DEFAULT_MODEL у services/llm_service.py
+    nvidia_base_url: Optional[str] = None   # порожньо -> https://integrate.api.nvidia.com/v1
 
     # --- Supabase Storage (фото/відео з Telegram-каналів) ---
     supabase_url: Optional[str] = None
@@ -168,25 +175,29 @@ class Settings(BaseSettings):
         return ids
 
     @property
-    def GEMINI_API_KEYS(self) -> list[str]:
+    def NVIDIA_API_KEY(self) -> str:
         """
-        Список ключів Gemini: GEMINI_API_KEYS=key1,key2,...
-        Старе поле GEMINI_API_KEY теж підхоплюється, якщо є.
+        Чистий NVIDIA API-ключ рядком (або "").
+        Прибирає лапки, BOM, пробіли, префікси 'Bearer '/'nvapi-'.
         """
-        keys: list[str] = []
-        seen = set()
-        blob = sanitize_gemini_api_key(self.gemini_api_keys or "")
-        raw_keys = blob.replace(";", ",").split(",")
-        for part in raw_keys:
-            key = sanitize_gemini_api_key(part)
-            if key and key not in seen:
-                seen.add(key)
-                keys.append(key)
-        if self.gemini_api_key:
-            single = sanitize_gemini_api_key(self.gemini_api_key.get_secret_value())
-            if single and single not in seen:
-                keys.append(single)
-        return keys
+        if not self.nvidia_api_key:
+            return ""
+        key = sanitize_api_key(self.nvidia_api_key.get_secret_value())
+        # NVAPI-ключі мають формат 'nvapi-...': нормалізуємо префікс, якщо
+        # користувач скопіював його без дефісу чи з 'Bearer'.
+        if key.lower().startswith("nvapi") and not key.startswith("nvapi-"):
+            key = "nvapi-" + key[len("nvapi"):].lstrip("-")
+        return key
+
+    @property
+    def NVIDIA_MODEL(self) -> str:
+        """Цільова модель NIM. Порожньо -> DEFAULT_MODEL (services/llm_service.py)."""
+        return (self.nvidia_model or "").strip()
+
+    @property
+    def NVIDIA_BASE_URL(self) -> str:
+        """Базовий URL NIM-ендпоінту."""
+        return (self.nvidia_base_url or "").strip() or "https://integrate.api.nvidia.com/v1"
 
 
 try:

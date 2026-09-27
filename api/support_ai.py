@@ -5,8 +5,8 @@
 
 Що робить:
 - POST /api/v1/support/ai/chat — приймає категорію + історію повідомлень,
-  підставляє ПРИХОВАНИЙ системний промт під категорію, питає Gemini
-  (services.gemini_service, ротація ключів при 429) і повертає:
+  підставляє ПРИХОВАНИЙ системний промт під категорію, питає NVIDIA LLM
+  (services.llm_service, OpenAI-сумісний NIM-ендпоінт) і повертає:
     * reply — текст відповіді клієнту;
     * escalate — чи потрібна жива людина (менеджер магазину/модератор);
     * ticket_topic / ticket_text — зібрана суть для створення тікета.
@@ -29,7 +29,7 @@ from sqlalchemy import select
 
 from api.auth import validate_init_data
 from database.db import get_db, AsyncSession
-from services import gemini_service
+from services import llm_service
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ class SupportAiChatResponse(BaseModel):
 
 def _short_json_prompt_hint() -> str:
     """
-    Інструкція Gemini відповісти СТРУКТУРОВО. Gemini зобов'язаний повернути
+    Інструкція LLM відповісти СТРУКТУРОВО. Модель зобов'язана повернути
     JSON-об'єкт {reply, escalate, ticket_text} — фронтенд далі малює
     відповідь і, за потреби, кнопку «Створити звернення».
     """
@@ -183,8 +183,8 @@ async def support_ai_chat(
     Контекстний AI-чат підтримки. Приймає категорію + історію, повертає
     відповідь + прапорець ескалації + готовий текст тікета.
     """
-    # 0) AI доступний? (ключі Gemini сконфігуровано?)
-    if not gemini_service._has_gemini_keys():
+    # 0) AI доступний? (NVIDIA_API_KEY сконфігуровано?)
+    if not llm_service.has_llm_keys():
         raise HTTPException(
             status_code=503,
             detail="AI-асистент тимчасово недоступний. Спробуйте пізніше.",
@@ -211,36 +211,40 @@ async def support_ai_chat(
         + _short_json_prompt_hint()
     )
 
-    # 2) Історія → звичайний діалог для Gemini
-    history_lines: List[str] = []
-    for msg in payload.messages[-12:]:
-        who = "Клієнт" if msg.role == "user" else "Підтримка"
-        history_lines.append(f"{who}: {msg.content}")
-    dialogue = "\n".join(history_lines)
+    # 2) Історія фронтенду → стандартний формат OpenAI
+    #    [{"role": "user"|"assistant", "content": "..."}]
+    chat_messages: List[Dict[str, str]] = [
+        {"role": msg.role, "content": msg.content}
+        for msg in payload.messages[-12:]
+    ]
 
-    prompt = (
+    # Контекст звернення додаємо першим user-повідомленням —
+    # модель бачить категорію/supplier_id/order_id до самого діалогу.
+    context_message = (
         f"Категорія звернення: {payload.category}\n"
         f"supplier_id: {payload.supplier_id or 'не вказано'}\n"
-        f"order_id: {payload.order_id or 'не вказано'}\n\n"
-        f"Діалог:\n{dialogue}"
+        f"order_id: {payload.order_id or 'не вказано'}"
     )
+    chat_messages.insert(0, {"role": "user", "content": context_message})
 
-    # 3) Gemini → JSON {reply, escalate, ticket_text}
+    # 3) NVIDIA LLM → JSON {reply, escalate, ticket_text}
     try:
-        raw = await gemini_service._generate_content(
-            prompt,
-            system_instruction=system_instruction,
+        raw = await llm_service.generate_chat_response(
+            messages=chat_messages,
+            system_prompt=system_instruction,
             temperature=0.4,
-            max_output_tokens=800,
+            # deepseek-v4.1-flash може «думати» перед відповіддю, тому ліміт
+            # має покривати і роздуми, і саму відповідь (не 800!).
+            max_tokens=4096,
         )
     except Exception as e:
-        logger.error("Support AI chat: Gemini error: %s", e, exc_info=True)
+        logger.error("Support AI chat: NVIDIA LLM error: %s", e, exc_info=True)
         raise HTTPException(
             status_code=502,
             detail="AI-сервер не відповів. Спробуйте ще раз.",
         )
 
-    parsed = gemini_service.extract_gemini_json(raw) if raw else None
+    parsed = llm_service.extract_json(raw) if raw else None
     reply_text = ""
     escalate = False
     ticket_text: Optional[str] = None
@@ -251,7 +255,7 @@ async def support_ai_chat(
         tt = parsed.get("ticket_text")
         ticket_text = str(tt).strip() if tt else None
     else:
-        # Gemini відповів не-JSON (буває) — показуємо як звичайний текст,
+        # Модель відповіла не-JSON (буває) — показуємо як звичайний текст,
         # ескалацію не форсуємо, клієнт може попросити людину вручну.
         reply_text = (raw or "").strip()
 

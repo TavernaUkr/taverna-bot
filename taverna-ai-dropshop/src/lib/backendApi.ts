@@ -1021,13 +1021,36 @@ export interface BackendPendingSupplierApplication {
 function adminTelegramHeaders(): Record<string, string> {
   const initData =
     typeof window !== "undefined"
-      ? String(window.Telegram?.WebApp?.initData || "")
+      ? String(
+          window.Telegram?.WebApp?.initData ||
+            window.__TAVERNA_INIT_DATA__ ||
+            sessionStorage.getItem("taverna_tg_init_data") ||
+            ""
+        )
       : "";
   const headers: Record<string, string> = {};
   if (initData) {
     headers.Authorization = `Bearer ${initData}`;
   }
   return headers;
+}
+
+/**
+ * Реальний Telegram ID поточного адміністратора (БЕЗ хардкоду!).
+ * Пріоритет: живий Mini App (initDataUnsafe) → явний аргумент виклику →
+ * dev-плейсхолдер 123456789 (лише браузерне прев'ю без Telegram-контексту).
+ * Раніше адмін-функції отримували фейковий 123456789 з previewProfile, тому
+ * бекенд шукав «мої» магазини за неіснуючим telegram_id — і адмін бачив
+ * порожній список власних магазинів.
+ */
+function resolveAdminTelegramId(explicit?: number | null): string {
+  const liveId =
+    typeof window !== "undefined"
+      ? window.Telegram?.WebApp?.initDataUnsafe?.user?.id?.toString() || ""
+      : "";
+  if (liveId) return liveId;
+  if (explicit != null && Number(explicit) > 0) return String(explicit);
+  return "123456789";
 }
 
 /** GET /api/v1/suppliers/me — усі магазини поточного постачальника. */
@@ -1413,6 +1436,27 @@ export async function getMyManagerContract(
   );
 }
 
+/**
+ * PATCH /api/v1/suppliers/{supplierId}/managers/me/communication —
+ * менеджер змінює ВЛАСНІ налаштування комунікації: канал
+ * (channel: 'miniapp' | 'webapp' | 'telegram') та/або сповіщення
+ * (notifications_enabled). Повертає ОНОВЛЕНИЙ контракт менеджера.
+ */
+export async function updateMyManagerCommunication(
+  supplierId: number,
+  data: {
+    channel?: "miniapp" | "webapp" | "telegram";
+    notifications_enabled?: boolean;
+  }
+): Promise<BackendMyManagerContract> {
+  return backendPatch<BackendMyManagerContract>(
+    `${supplierManagersEndpoint(supplierId)}/me/communication`,
+    data,
+    "Не вдалося зберегти налаштування комунікації",
+    adminTelegramHeaders()
+  );
+}
+
 // --- Фінансове ядро: Гаманець + Журнал транзакцій (Ledger) ------------------
 
 /**
@@ -1701,7 +1745,7 @@ export async function fetchSupplierImportProgress(): Promise<BackendWidgetQueueS
 export async function fetchAdminStores(
   telegramId?: number | null
 ): Promise<BackendAdminStore[]> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendGet<BackendAdminStore[]>(
     `${API_BASE_URL}/api/v1/admin/suppliers/all${params}`,
     adminTelegramHeaders()
@@ -1711,7 +1755,7 @@ export async function fetchAdminStores(
 export async function fetchAdminImportProgress(
   telegramId?: number | null
 ): Promise<BackendSupplierImportProgress> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendGet<BackendSupplierImportProgress>(
     `${API_BASE_URL}/api/v1/admin/suppliers/import-progress${params}`,
     adminTelegramHeaders()
@@ -1721,7 +1765,7 @@ export async function fetchAdminImportProgress(
 export async function fetchAdminAiQueue(
   telegramId?: number | null
 ): Promise<BackendAdminAiQueue> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendGet<BackendAdminAiQueue>(
     `${API_BASE_URL}/api/v1/admin/ai-queue${params}`,
     adminTelegramHeaders()
@@ -1731,7 +1775,7 @@ export async function fetchAdminAiQueue(
 export async function fetchPendingSupplierApplications(
   telegramId?: number | null
 ): Promise<BackendPendingSupplierApplication[]> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendGet<BackendPendingSupplierApplication[]>(
     `${ADMIN_PENDING_SUPPLIERS_ENDPOINT}${params}`,
     adminTelegramHeaders()
@@ -1741,7 +1785,7 @@ export async function fetchPendingSupplierApplications(
 export async function fetchSupplierDeletionRequests(
   telegramId?: number | null
 ): Promise<BackendPendingSupplierApplication[]> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendGet<BackendPendingSupplierApplication[]>(
     `${API_BASE_URL}/api/v1/admin/suppliers/deletion-requests${params}`,
     adminTelegramHeaders()
@@ -1751,7 +1795,7 @@ export async function fetchSupplierDeletionRequests(
 export async function fetchSupplierHistory(
   telegramId?: number | null
 ): Promise<BackendPendingSupplierApplication[]> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendGet<BackendPendingSupplierApplication[]>(
     `${API_BASE_URL}/api/v1/admin/suppliers/history${params}`,
     adminTelegramHeaders()
@@ -1762,7 +1806,7 @@ export async function restoreSupplier(
   supplierId: number,
   telegramId?: number | null
 ): Promise<BackendPendingSupplierApplication> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendPost<BackendPendingSupplierApplication>(
     `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/restore${params}`,
     {},
@@ -1783,7 +1827,7 @@ export async function approveSupplierDeletion(
   ai_cancelled: number;
   detail?: string;
 }> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendPost(
     `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/approve-deletion${params}`,
     {},
@@ -1796,7 +1840,7 @@ export async function approveSupplierApplication(
   supplierId: number,
   telegramId?: number | null
 ): Promise<BackendPendingSupplierApplication> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendPost<BackendPendingSupplierApplication>(
     `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/approve${params}`,
     {},
@@ -1809,7 +1853,7 @@ export async function rejectSupplierApplication(
   supplierId: number,
   telegramId?: number | null
 ): Promise<BackendPendingSupplierApplication> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendPost<BackendPendingSupplierApplication>(
     `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/reject${params}`,
     {},
@@ -1822,7 +1866,7 @@ export async function deleteSupplierAccount(
   supplierId: number,
   telegramId?: number | null
 ): Promise<{ ok: boolean; supplier_id: number; user_reverted?: boolean; detail?: string }> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendDelete(
     `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}${params}`,
     "Не вдалося видалити постачальника",
@@ -1852,7 +1896,7 @@ export async function directCreateSupplier(
   payload: BackendDirectCreateSupplierPayload,
   telegramId?: number | null
 ): Promise<BackendPendingSupplierApplication> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendPost<BackendPendingSupplierApplication>(
     `${ADMIN_DIRECT_CREATE_SUPPLIER_ENDPOINT}${params}`,
     payload,
@@ -1871,7 +1915,7 @@ export async function transferSupplierOwnership(
   newOwnerUsername: string,
   telegramId?: number | null
 ): Promise<BackendSupplierTransferResponse> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendPost<BackendSupplierTransferResponse>(
     `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/transfer${params}`,
     { new_owner_username: newOwnerUsername },
@@ -1896,7 +1940,7 @@ export interface BackendAICategorizationRuleCreate {
 export async function fetchAdminAiRules(
   telegramId?: number | null
 ): Promise<BackendAICategorizationRule[]> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendGet<BackendAICategorizationRule[]>(
     `${API_BASE_URL}/api/v1/admin/ai-rules${params}`,
     adminTelegramHeaders()
@@ -1908,7 +1952,7 @@ export async function createAdminAiRule(
   payload: BackendAICategorizationRuleCreate,
   telegramId?: number | null
 ): Promise<BackendAICategorizationRule> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendPost<BackendAICategorizationRule>(
     `${API_BASE_URL}/api/v1/admin/ai-rules${params}`,
     payload,
@@ -1924,7 +1968,7 @@ export async function deleteAdminAiRule(
   ruleId: number,
   telegramId?: number | null
 ): Promise<{ ok: boolean; rule_id: number }> {
-  const params = telegramId ? `?telegram_id=${encodeURIComponent(String(telegramId))}` : "";
+  const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendDelete<{ ok: boolean; rule_id: number }>(
     `${API_BASE_URL}/api/v1/admin/ai-rules/${ruleId}${params}`,
     "Не вдалося видалити правило",

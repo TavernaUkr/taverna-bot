@@ -5,7 +5,7 @@ AI-резюмування тікетів підтримки + архітекту
 Що робить:
 - generate_ticket_summary(): при закритті тікета збирає всю переписку
   (TicketMessage, сортовані за created_at), формує діалог "Role: Text"
-  і просить Gemini зробити короткий звіт українською (до 500 символів).
+  і просить NVIDIA LLM зробити короткий звіт українською (до 500 символів).
 - Сервіс викликається через FastAPI BackgroundTasks, тому ВІДКРИВАЄ
   ВЛАСНУ сесію БД (AsyncSessionLocal), якщо session=None: сесія запиту
   закривається одразу після відповіді клієнту і непридатна для фону.
@@ -14,10 +14,9 @@ AI-резюмування тікетів підтримки + архітекту
 - TicketMessage.media_url — посилання на файл (voice/video_note);
 - TicketMessage.is_transcribed — прапорець "голосове вже розшифровано";
 - _render_dialogue() позначає нерозшифровані голосові як
-  "[Голосове повідомлення — не розшифровано]", щоб Gemini не вигадував зміст.
+  "[Голосове повідомлення — не розшифровано]", щоб LLM не вигадував зміст.
 
-Gemini: використовуємо існуючу асинхронну обгортку проєкту
-services.gemini_service._generate_content (google-genai + ротація ключів при 429).
+LLM: використовуємо services.llm_service (NVIDIA NIM, OpenAI SDK).
 """
 import logging
 from typing import List, Optional
@@ -26,7 +25,7 @@ from sqlalchemy import select
 
 from database.db import AsyncSession, AsyncSessionLocal
 from database.models import SupportTicket, TicketMessage
-from services import gemini_service
+from services import llm_service
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +119,7 @@ class AISupportService:
             # 2. Текстовий діалог: "Role: Text \n Role: Text..."
             dialogue = AISupportService._render_dialogue(messages)
 
-            # 3. Промт у Gemini
+            # 3. Промт у NVIDIA LLM
             prompt = (
                 "Проаналізуй цей діалог між клієнтом і підтримкою. "
                 "Напиши короткий звіт (до 500 символів) українською: "
@@ -130,19 +129,19 @@ class AISupportService:
 
             summary = ""
             try:
-                summary = await gemini_service._generate_content(
-                    prompt,
-                    system_instruction=(
+                summary = await llm_service.generate_chat_response(
+                    messages=[{"role": "user", "content": prompt}],
+                    system_prompt=(
                         "Ти — аналітик служби підтримки маркетплейсу. "
                         "Ти пишеш стислі, фактичні звіти українською, без води, "
                         "без вигадок. Якщо рішення в діалозі не прозвучало — так і напиши."
                     ),
                     temperature=0.3,
-                    max_output_tokens=1024,
+                    max_tokens=2048,
                 )
             except Exception as e:
                 logger.error(
-                    "AI-резюме #%s: помилка Gemini: %s", ticket_id, e, exc_info=True
+                    "AI-резюме #%s: помилка NVIDIA LLM: %s", ticket_id, e, exc_info=True
                 )
                 return ""
 

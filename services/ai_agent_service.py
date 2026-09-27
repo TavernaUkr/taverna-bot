@@ -14,7 +14,7 @@ from collections import Counter
 from database.db import AsyncSessionLocal, AsyncSession
 from database.models import Supplier, SupplierStatus, Channel, UserRole, Product
 from config_reader import config
-from services import gemini_service, notification_service
+from services import notification_service
 from handlers.supplier_handlers import get_or_create_topic # Імпортуємо наш хелпер
 from aiogram import Bot
 
@@ -23,14 +23,16 @@ logger = logging.getLogger(__name__)
 # --- [ПЛАН 22] Cервіс Перевірки Цін ---
 async def check_for_cosmic_price(product_name: str, supplier_price: float) -> (bool, str):
     """
-    (План 22) Використовує Gemini для "пошуку" середньої ринкової ціни.
+    (План 22) Використовує NVIDIA LLM для "пошуку" середньої ринкової ціни.
     Повертає (is_cosmic, analysis_text).
     """
-    if not getattr(config, "GEMINI_API_KEYS", None) or supplier_price == 0 or not product_name:
+    from services import llm_service
+
+    if not llm_service.has_llm_keys() or supplier_price == 0 or not product_name:
         return False, "Перевірку ціни пропущено (немає API, ціни, або назви)."
 
     try:
-        # Ми просимо Gemini виступити в ролі аналітика ринку
+        # Ми просимо LLM виступити в ролі аналітика ринку
         system_prompt = f"""
 Ти - AI-аналітик маркетплейсу TavernaGroup.
 Твоє завдання - оцінити ДРОП-ціну постачальника.
@@ -41,11 +43,11 @@ async def check_for_cosmic_price(product_name: str, supplier_price: float) -> (b
 Поверни JSON: {{ "market_retail_price_avg": int, "is_cosmic": bool, "analysis": "твій короткий коментар українською" }}
 """
         prompt = f"Назва Товару: '{product_name}', Дроп-Ціна: {supplier_price} UAH"
-        text = await gemini_service._generate_content(
-            prompt,
-            system_instruction=system_prompt,
+        text = await llm_service.generate_json_response(
+            prompt=prompt,
+            system_prompt=system_prompt,
             temperature=0.1,
-            response_mime_type="application/json",
+            max_tokens=2048,
         )
         data = json.loads(text or "{}")
         is_cosmic = data.get("is_cosmic", False)
@@ -57,6 +59,56 @@ async def check_for_cosmic_price(product_name: str, supplier_price: float) -> (b
     except Exception as e:
         logger.error(f"Помилка AI Price Check: {e}")
         return False, f"Помилка AI-аналізу ціни: {e}"
+
+
+# --- [ПЛАН 19] AI-категоризація потоку товарів ---
+async def _classify_main_category_with_llm(texts: List[str]) -> Optional[str]:
+    """
+    Порт gemini_service.classify_main_category_with_ai на NVIDIA NIM.
+    Визначає ГОЛОВНУ категорію магазину за прикладами описів товарів.
+    Повертає коротку категорію (напр. "Одяг", "Електроніка") або None.
+    """
+    from services import llm_service
+
+    if not llm_service.has_llm_keys():
+        logger.warning("Категоризацію пропущено (немає NVIDIA_API_KEY).")
+        return None
+
+    joined = " ".join([t.strip() for t in texts if t and t.strip()])
+    joined = joined[:15000]
+
+    system_prompt = """
+Ти - AI-категоризатор для E-commerce платформи TavernaGroup.
+Твоє завдання - визначити ГОЛОВНУ категорію магазину за прикладами описів товарів.
+Поверни ТІЛЬКИ JSON у форматі:
+{ "category": "..." }
+
+Правила:
+- category: коротка назва українською (1-4 слова), без зайвих пояснень.
+- Якщо не впевнений — поверни "General".
+"""
+
+    try:
+        text = await llm_service.generate_json_response(
+            prompt=joined,
+            system_prompt=system_prompt,
+            temperature=0.0,
+            max_tokens=2048,
+        )
+        data = llm_service.extract_json(text)
+        if not isinstance(data, dict):
+            return "General"
+
+        category = str(data.get("category") or "General").strip()
+        if not category:
+            return "General"
+
+        logger.info(f"✅ NVIDIA LLM категоризував потік як: {category}")
+        return category
+
+    except Exception as e:
+        logger.error(f"❌ Помилка NVIDIA LLM (classify): {e}", exc_info=True)
+        return None
 
 # --- [ПЛАН 21] Сервіс Перевірки Дублікатів ---
 async def check_for_duplicates(db: AsyncSession, product_name: str, sku: str) -> (bool, str):
@@ -139,11 +191,11 @@ async def analyze_supplier_source(db: AsyncSession, supplier: Supplier) -> (Opti
             return None, "Не вдалося зчитати товари з URL/XML."
             
         # --- 3. Визначаємо Категорію (План 19) ---
-        logger.info(f"AI-Агент: Відправляю {len(raw_products_text)} товарів в Gemini для категоризації...")
-        main_category = await gemini_service.classify_main_category_with_ai(raw_products_text)
+        logger.info(f"AI-Агент: Відправляю {len(raw_products_text)} товарів в NVIDIA LLM для категоризації...")
+        main_category = await _classify_main_category_with_llm(raw_products_text)
 
         if not main_category:
-            return None, "Gemini не зміг визначити категорію."
+            return None, "NVIDIA LLM не зміг визначити категорію."
 
         main_category = main_category or "General"
 

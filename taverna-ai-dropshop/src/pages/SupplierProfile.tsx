@@ -623,7 +623,6 @@ const SupplierProfile = () => {
           if (tab === "catalog") navigate("/");
           else if (tab === "suppliers") navigate("/suppliers");
           else if (tab === "support") navigate("/support");
-          else if (tab === "cart") navigate("/cart");
           else navigate("/");
         }} 
       />

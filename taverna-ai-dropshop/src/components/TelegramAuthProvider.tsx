@@ -228,9 +228,17 @@ export function TelegramAuthProvider({ children }: TelegramAuthProviderProps) {
     moderator: 'Модератор',
     admin: 'Адмін',
   };
+  // Реальний Telegram ID адміна з живого Mini App (БЕЗ хардкоду!).
+  // Раніше тут стояв фейковий 123456789, який при ввімкненому Dev-перемикачі
+  // ролей підмінював telegram_id адміна — і адмінка шукала «його» магазини
+  // за неіснуючим ID. Фолбек 123456789 — лише для браузерного dev-прев'ю
+  // взагалі без Telegram-контексту.
+  const liveTelegramUserId = typeof window !== 'undefined'
+    ? (window as any).Telegram?.WebApp?.initDataUnsafe?.user?.id
+    : null;
   const previewProfile = canUseDevRoleSwitcher ? {
     id: PREVIEW_PROFILE_ID,
-    telegram_id: 123456789,
+    telegram_id: liveTelegramUserId || auth.profile?.telegram_id || 123456789,
     first_name: 'Тест',
     last_name: previewRoleNames[effectiveRole],
     phone: '380501234567',

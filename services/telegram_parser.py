@@ -1,5 +1,5 @@
 # services/telegram_parser.py
-"""Парсинг публічних Telegram-каналів постачальників (Telethon + Gemini)."""
+"""Парсинг публічних Telegram-каналів постачальників (Telethon + NVIDIA LLM)."""
 import asyncio
 import logging
 import re
@@ -41,7 +41,7 @@ class TelegramChannelParser:
         """
         Перетворює сирий текст поста Telegram на стандартизований JSON товару.
 
-        Цей метод буде звертатися до Gemini для перетворення сирого тексту поста
+        Цей метод буде звертатися до NVIDIA LLM для перетворення сирого тексту поста
         на стандартизований JSON з полями:
         - name
         - price
@@ -636,7 +636,7 @@ async def _stitch_channel_messages(
 ) -> list[dict]:
     """
     Хронологічно склеює альбоми: фото без тексту йдуть у попередній товар,
-    а не створюють окремий пост для Gemini.
+    а не створюють окремий пост для NVIDIA LLM.
     """
     ctx = stitch_ctx or AlbumStitchContext()
     ordered = sorted(messages, key=lambda item: int(getattr(item, "id", 0) or 0))
@@ -835,7 +835,7 @@ async def hydrate_posts_media(
     supplier_id: int,
 ) -> None:
     """
-    Качає фото в Storage лише для постів, які Gemini визнав товарами.
+    Качає фото в Storage лише для постів, які LLM визнав товарами.
     Інформаційні пости не чіпаємо.
     """
     if not posts or not keep_message_ids:
@@ -1306,15 +1306,11 @@ async def verify_channel_access(channel_link: str) -> dict:
     return {"status": "ok"}
 
 
-_GEMINI_MODEL = "gemini-3.6-flash"
-_GEMINI_FALLBACK_MODEL = "gemini-3.6-flash"
-
-
 def _safe_json_array(text: str) -> list[dict]:
-    """Дістає JSON-масив об'єктів з відповіді Gemini. Інакше []."""
-    from services.gemini_service import extract_gemini_json
+    """Дістає JSON-масив об'єктів з відповіді LLM. Інакше []."""
+    from services.llm_service import extract_json
 
-    parsed = extract_gemini_json(text)
+    parsed = extract_json(text)
     if parsed is None:
         return []
 
@@ -1369,7 +1365,7 @@ _CHAR_META_KEYS = {
 
 
 def _normalize_characteristics(raw) -> list[dict]:
-    """Масив [{"name": "...", "value": "..."}] з відповіді Gemini (або старого dict)."""
+    """Масив [{"name": "...", "value": "..."}] з відповіді LLM (або старого dict)."""
     items = []
     if isinstance(raw, dict):
         items = list(raw.items())
@@ -1459,7 +1455,7 @@ def _normalize_sizes(raw) -> list[str]:
 
 
 def _coerce_is_product(item: dict) -> bool:
-    """False лише якщо Gemini явно сказав, що це не товар."""
+    """False лише якщо LLM явно сказав, що це не товар."""
     if not isinstance(item, dict):
         return False
     raw = item.get("is_product")
@@ -1531,6 +1527,13 @@ _TELEGRAM_PARSE_SYSTEM_PROMPT = """
   niche і season. Категорію/нішу НЕ став, поки не витягнув характеристики.
 search_tags — масив коротких рядків з характеристик і типу товару (напр. ["кросівки","зима","nike","шкіра"]).
 
+ВАЖЛИВО (МЕДІАГРУПИ): У Telegram пости часто складаються з медіагрупи (декілька фото) та одного тексту-опису під ними.
+Усі фотографії, які передані разом із текстом, належать ВИКЛЮЧНО до цього ж товару.
+НЕ ПЛУТАЙ фотографії між різними товарами.
+Якщо ти бачиш масив URL картинок, присвоюй їх усі до того товару, опис якого йде поруч
+із ними (в одному об'єкті повідомлення або в суміжних).
+Зберігай оригінальний порядок фотографій.
+
 Формат ОДНОГО об'єкта:
 {
   "is_product": true,
@@ -1578,24 +1581,24 @@ search_tags — масив коротких рядків з характерис
 
 async def parse_telegram_posts_to_products(posts_text: str) -> list[dict]:
     """
-    Gemini витягує товари з тексту постів Telegram-каналу.
+    NVIDIA LLM витягує товари з тексту постів Telegram-каналу.
 
     Повертає список словників: name, price, description, characteristics,
     sizes, vendor_code, niche, season, image_urls.
-    429/503 — ротація ключів і повтор. Помилка не піднімається нагору: [].
+    429/5xx — ретраї всередині llm_service. Помилка не піднімається нагору: [].
     """
     blob = (posts_text or "").strip()
     if not blob:
         return []
 
-    from services.gemini_service import (
-        _generate_content,
-        _has_gemini_keys,
-        _is_capacity_error,
+    from services.llm_service import (
+        LLMCapacityError,
+        generate_json_response,
+        has_llm_keys,
     )
 
-    if not _has_gemini_keys():
-        logger.error("parse_telegram_posts_to_products: немає GEMINI_API_KEYS — імпорт пропущено.")
+    if not has_llm_keys():
+        logger.error("parse_telegram_posts_to_products: немає NVIDIA_API_KEY — імпорт пропущено.")
         return []
 
     prompt = (
@@ -1609,59 +1612,52 @@ async def parse_telegram_posts_to_products(posts_text: str) -> list[dict]:
 
     last_error: Optional[Exception] = None
     for attempt in range(1, 4):
-        for model_name in (_GEMINI_MODEL, _GEMINI_FALLBACK_MODEL):
-            try:
-                try:
-                    raw = await _generate_content(
-                        prompt,
-                        system_instruction=_TELEGRAM_PARSE_SYSTEM_PROMPT,
-                        temperature=0.1,
-                        max_output_tokens=8192,
-                        response_mime_type="application/json",
-                        model_name=model_name,
-                    )
-                except Exception as mime_error:
-                    if _is_capacity_error(mime_error):
-                        raise
-                    raw = await _generate_content(
-                        prompt,
-                        system_instruction=_TELEGRAM_PARSE_SYSTEM_PROMPT,
-                        temperature=0.1,
-                        max_output_tokens=8192,
-                        model_name=model_name,
-                    )
-                items = []
-                skipped = 0
-                for item in _safe_json_array(raw):
-                    if not _coerce_is_product(item):
-                        skipped += 1
-                        continue
-                    normalized = _normalize_parsed_product(item, blob)
-                    if normalized:
-                        items.append(normalized)
-                logger.info(
-                    "parse_telegram_posts_to_products: Gemini повернув %s товарів, пропущено не-товарів: %s.",
-                    len(items),
-                    skipped,
-                )
-                return items
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    "parse_telegram_posts_to_products (%s, спроба %s/3): %s",
-                    model_name, attempt, e,
-                )
-                if _is_capacity_error(e):
-                    break
-                if model_name == _GEMINI_MODEL:
+        try:
+            # Один LLM-виклик: NVIDIA NIM через OpenAI-сумісний ендпоінт.
+            # llm_service сам чистить markdown-огорожі (clean_json_string),
+            # ретраїть 429/5xx/таймаути і повертає чистий JSON-рядок.
+            raw = await generate_json_response(
+                prompt=prompt,
+                system_prompt=_TELEGRAM_PARSE_SYSTEM_PROMPT,
+                temperature=0.1,
+                max_tokens=8192,
+            )
+            items = []
+            skipped = 0
+            for item in _safe_json_array(raw):
+                if not _coerce_is_product(item):
+                    skipped += 1
                     continue
-        if last_error and _is_capacity_error(last_error) and attempt < 3:
-            await asyncio.sleep(5)
-            continue
-        break
+                normalized = _normalize_parsed_product(item, blob)
+                if normalized:
+                    items.append(normalized)
+            logger.info(
+                "parse_telegram_posts_to_products: NVIDIA LLM повернув %s товарів, пропущено не-товарів: %s.",
+                len(items),
+                skipped,
+            )
+            return items
+        except LLMCapacityError as e:
+            # 429/5xx після внутрішніх ретраїв llm_service — пауза і ще спроба
+            last_error = e
+            logger.warning(
+                "parse_telegram_posts_to_products (спроба %s/3): NIM перевантажено: %s",
+                attempt, e,
+            )
+            if attempt < 3:
+                await asyncio.sleep(5)
+                continue
+            break
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                "parse_telegram_posts_to_products (спроба %s/3): %s",
+                attempt, e,
+            )
+            break
 
     logger.error(
-        "parse_telegram_posts_to_products: пости не розпарсено (Gemini 429/503 або інша помилка): %s",
+        "parse_telegram_posts_to_products: пости не розпарсено (NVIDIA LLM 429/5xx або інша помилка): %s",
         last_error,
     )
     return []

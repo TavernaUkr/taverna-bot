@@ -42,7 +42,7 @@ from database.models import (
 )
 from services.mydrop_api import create_order_in_mydrop, denamespace_supplier_code, MyDropAPIError
 from config_reader import config
-from core.billing_service import process_order_income, process_order_payout
+from core.order_service import change_order_status
 
 logger = logging.getLogger(__name__)
 
@@ -359,55 +359,39 @@ async def update_order_status(
         )
 
     old_status = order.status
-    order.status = payload.status
     # `updated_at` має onupdate, але для надійності ставимо явно
     order.updated_at = datetime.now(timezone.utc)
 
-    # --- ФІНАНСОВИЙ СПЛІТ: перехід у 'delivered' («Виконано») -----------------
-    # Нараховуємо дохід магазину (supplier_income) та, якщо статус змінив
-    # МЕНЕДЖЕР, — його винагороду rate_per_order (order_reward +
-    # supplier_order_fee). Атомарно з цим же commit; повторні виклики —
-    # no-op (захист по reference_id в Ledger).
-    # ВАЖЛИВО: у нашій системі немає статусу 'completed' — він перейменований
-    # на 'delivered' міграцією e03e5517cb5c (completed → delivered).
-    if payload.status == OrderStatus.delivered and old_status != OrderStatus.delivered:
-        total_billed = 0
-        for sid in order_supplier_ids:
-            total_billed += await process_order_income(db, order, sid)
-
-        # Винагорода менеджеру: лише якщо статус переводить менеджер
-        # (юзер з контрактом у supplier_managers цього магазину), не власник.
-        manager_supplier_id: Optional[int] = None
-        for sid in order_supplier_ids:
-            has_contract = (
-                await db.execute(
-                    select(supplier_managers.c.user_id).where(
-                        supplier_managers.c.supplier_id == sid,
-                        supplier_managers.c.user_id == user.id,
-                    )
+    # Чи є користувач МЕНЕДЖЕРОМ цього магазину (не власником)?
+    # Лише менеджеру за контрактом нараховується rate_per_order.
+    is_manager_of_order = False
+    for sid in order_supplier_ids:
+        has_contract = (
+            await db.execute(
+                select(supplier_managers.c.user_id).where(
+                    supplier_managers.c.supplier_id == sid,
+                    supplier_managers.c.user_id == user.id,
                 )
-            ).scalar_one_or_none()
-            if has_contract:
-                manager_supplier_id = sid
-                break
-
-        reward = 0
-        if manager_supplier_id is not None:
-            reward = await process_order_payout(
-                order.id, manager_supplier_id, user.id, db
             )
+        ).scalar_one_or_none()
+        if has_contract:
+            is_manager_of_order = True
+            break
 
-        if total_billed > 0 or reward > 0:
-            logger.info(
-                "Білінг замовлення #%s: дохід магазинів=%s коп., винагорода менеджеру=%s коп.",
-                order.id, total_billed, reward,
-            )
-
+    # --- ЦЕНТРАЛЬНА зміна статусу (Order State Machine) -----------------------
+    # Білінг (дохід магазину + винагорода менеджеру) гарантовано спрацює
+    # при переході у 'delivered' — логіка централізована в core/order_service.
     try:
-        await db.commit()
-        await db.refresh(order)
+        order = await change_order_status(
+            db,
+            order_id,
+            payload.status,
+            changed_by_user_id=user.id,
+            changed_by_manager_role=is_manager_of_order,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        await db.rollback()
         logger.error(f"Помилка зміни статусу замовлення #{order_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Не вдалося зберегти статус замовлення")
 

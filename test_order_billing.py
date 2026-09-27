@@ -168,6 +168,137 @@ async def main():
 
         print("\n[OK] USI 7 TESTIV PROIDENO")
 
+    # === Order State Machine: change_order_status ============================
+    from core.order_service import change_order_status, _normalize_status
+
+    async with AsyncSessionLocal() as s:
+        # Очищаємо попередні фікстури через свіжу схему
+        await s.rollback()
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+
+        owner2 = User(telegram_id=555, role=UserRole.supplier)
+        manager2 = User(telegram_id=666, role=UserRole.user)
+        sup2 = Supplier(name="TestShop2", user_id=owner2.id)
+        manager2_w = None
+        s.add_all([owner2, manager2, sup2])
+        await s.flush()
+        await s.execute(insert(supplier_managers).values(
+            supplier_id=sup2.id, user_id=manager2.id, rate_per_order=1000
+        ))
+
+        order4 = Order(order_uid="WEB-TEST-4", status=OrderStatus.new,
+                       total_price=300, subtotal=300.0,
+                       customer_name="Тест", customer_phone="380...")
+        s.add(order4)
+        await s.flush()
+        s.add(OrderItem(order_id=order4.id, supplier_id=sup2.id,
+                        product_name="Товар А", quantity=1, price_per_item=300))
+        await s.commit()
+
+        manager2_w = await ensure_user_wallet(manager2.id, s)
+        await s.commit()
+
+        # --- Тест 8: delivered БЕЗ менеджера (автоматика) — дохід, без винагороди ---
+        order4 = await change_order_status(
+            s, order4.id, "delivered",
+            changed_by_user_id=None, changed_by_manager_role=False,
+        )
+        print(f"[8] Статус: {order4.status.value} (очікуємо delivered)")
+        assert order4.status == OrderStatus.delivered
+        print(f"[8] Баланс магазину: {sup2.balance} (очікуємо 30000)")
+        assert sup2.balance == 30000
+        print(f"[8] Гаманець менеджера: {manager2_w.main_balance} (очікуємо 0 — автоматика)")
+        assert manager2_w.main_balance == 0
+
+        rows = (await s.execute(select(Transaction).order_by(Transaction.id))).scalars().all()
+        print(f"[8] Ledger: {[(r.type, r.amount) for r in rows]} (лише supplier_income)")
+        assert [r.type for r in rows] == ["supplier_income"]
+
+        # --- Тест 9: повторний delivered — повний no-op (без дублів) ---
+        order4 = await change_order_status(
+            s, order4.id, OrderStatus.delivered,
+            changed_by_user_id=None, changed_by_manager_role=False,
+        )
+        total = (await s.execute(select(func.count(Transaction.id)))).scalar()
+        print(f"[9] Повторний delivered: записів {total} (очікуємо 1)")
+        assert total == 1
+
+        # --- Тест 10: delivered МЕНЕДЖЕРОМ — дохід + винагорода ---
+        order5 = Order(order_uid="WEB-TEST-5", status=OrderStatus.shipped,
+                       total_price=500, subtotal=500.0,
+                       customer_name="Тест", customer_phone="380...")
+        s.add(order5)
+        await s.flush()
+        s.add(OrderItem(order_id=order5.id, supplier_id=sup2.id,
+                        product_name="Товар Б", quantity=1, price_per_item=500))
+        await s.commit()
+
+        order5 = await change_order_status(
+            s, order5.id, "delivered",
+            changed_by_user_id=manager2.id, changed_by_manager_role=True,
+        )
+        print(f"[10] Баланс магазину: {sup2.balance} (очікуємо 79000)")
+        assert sup2.balance == 79000
+        print(f"[10] Гаманець менеджера: {manager2_w.main_balance} (очікуємо 1000)")
+        assert manager2_w.main_balance == 1000
+
+        rows = (await s.execute(select(Transaction).order_by(Transaction.id))).scalars().all()
+        print(f"[10] Ledger: {[(r.type, r.amount) for r in rows]}")
+        assert [r.type for r in rows] == [
+            "supplier_income", "supplier_income", "supplier_order_fee", "order_reward",
+        ]
+
+        # --- Тест 11: delivered ВЛАСНИКОМ — дохід, БЕЗ винагороди ---
+        order6 = Order(order_uid="WEB-TEST-6", status=OrderStatus.shipped,
+                       total_price=200, subtotal=200.0,
+                       customer_name="Тест", customer_phone="380...")
+        s.add(order6)
+        await s.flush()
+        s.add(OrderItem(order_id=order6.id, supplier_id=sup2.id,
+                        product_name="Товар В", quantity=1, price_per_item=200))
+        await s.commit()
+
+        await change_order_status(
+            s, order6.id, "delivered",
+            changed_by_user_id=owner2.id, changed_by_manager_role=False,
+        )
+        print(f"[11] Баланс: {sup2.balance} (очікуємо 99000), менеджер: {manager2_w.main_balance} (очікуємо 1000)")
+        assert sup2.balance == 99000
+        assert manager2_w.main_balance == 1000
+
+        # --- Тест 12: легасі-аліас 'completed' → delivered; no-op статуси ---
+        order7 = Order(order_uid="WEB-TEST-7", status=OrderStatus.processing,
+                       total_price=100, subtotal=100.0,
+                       customer_name="Тест", customer_phone="380...")
+        s.add(order7)
+        await s.flush()
+        s.add(OrderItem(order_id=order7.id, supplier_id=sup2.id,
+                        product_name="Товар Г", quantity=1, price_per_item=100))
+        await s.commit()
+
+        order7 = await change_order_status(s, order7.id, "completed")
+        print(f"[12] Аліас 'completed': статус {order7.status.value} (очікуємо delivered)")
+        assert order7.status == OrderStatus.delivered
+        print(f"[12] Баланс: {sup2.balance} (очікуємо 109000)")
+        assert sup2.balance == 109000
+
+        # no-op: той самий статус
+        same = await change_order_status(s, order7.id, "delivered")
+        total = (await s.execute(select(func.count(Transaction.id)))).scalar()
+        print(f"[12] No-op той самий статус: записів {total} (без змін)")
+        assert same.id == order7.id
+
+        # невідомий статус → ValueError
+        try:
+            await change_order_status(s, order7.id, "unknown_status")
+            raise SystemExit("[12] ПОМИЛКА: мав бути ValueError")
+        except ValueError as e:
+            print(f"[12] Невідомий статус → ValueError: OK")
+
+        print("\n[OK] USI 12 TESTIV PROIDENO (включно з Order State Machine)")
+
     await engine.dispose()
 
 

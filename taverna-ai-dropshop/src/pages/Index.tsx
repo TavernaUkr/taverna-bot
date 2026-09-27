@@ -384,8 +384,6 @@ const Index = () => {
       navigate("/suppliers");
     } else if (tab === "support") {
       navigate("/support");
-    } else if (tab === "cart") {
-      navigate("/cart");
     } else {
       setMainTab(tab);
     }

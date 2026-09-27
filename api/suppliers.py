@@ -18,9 +18,11 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from fastapi import APIRouter, Depends, HTTPException, Header, Query
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 
 from api_models import (
     ManagerCommSettings,
+    ManagerCommUpdateRequest,
     ManagerContractMeResponse,
     ManagerContractRates,
     ManagerContractUpdateRequest,
@@ -981,6 +983,112 @@ async def get_my_manager_contract(
     )
 
 
+@router.patch("/{supplier_id}/managers/me/communication", response_model=ManagerContractMeResponse)
+async def update_my_communication_settings(
+    supplier_id: int,
+    payload: ManagerCommUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Менеджер змінює ВЛАСНІ налаштування комунікації:
+    PATCH /api/v1/suppliers/{supplier_id}/managers/me/communication
+    Доступ: поточний юзер — менеджер цього магазину (рядок у supplier_managers).
+    Тіло: channel ('miniapp' → 'webapp', 'webapp', 'telegram') та/або
+    notifications_enabled (bool). Повертає ОНОВЛЕНИЙ контракт.
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    me = await _get_user_by_telegram_id(db, telegram_id)
+    if not me:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    supplier = await db.get(Supplier, supplier_id)
+    if not supplier or _enum_value(supplier.status) == SupplierStatus.deleted.value:
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+
+    # RBAC: тільки менеджер цього магазину (власник отримує 403 —
+    # у нього немає рядка в supplier_managers).
+    is_manager = (
+        await db.execute(
+            select(supplier_managers.c.user_id).where(
+                supplier_managers.c.supplier_id == supplier_id,
+                supplier_managers.c.user_id == me.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not is_manager:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Часткове оновлення: тільки передані поля.
+    values: dict[str, Any] = {}
+    if payload.channel is not None:
+        # Зовнішнє 'miniapp' = внутрішнє 'webapp'
+        channel = payload.channel if payload.channel != "miniapp" else "webapp"
+        values["chat_channel"] = channel
+    if payload.notifications_enabled is not None:
+        values["receive_notifications"] = bool(payload.notifications_enabled)
+    if not values:
+        raise HTTPException(
+            status_code=400,
+            detail="Передайте channel та/або notifications_enabled для оновлення.",
+        )
+
+    # Прямий атомарний UPDATE таблиці-посередника.
+    stmt = (
+        update(supplier_managers)
+        .where(supplier_managers.c.supplier_id == supplier_id)
+        .where(supplier_managers.c.user_id == me.id)
+        .values(**values)
+    )
+    result = await db.execute(stmt)
+    if not result.rowcount:
+        raise HTTPException(status_code=404, detail="Менеджера не знайдено у цьому магазині")
+    await db.commit()
+
+    logger.info(
+        "Менеджер user_id=%s оновив СВОЇ налаштування комунікації (supplier_id=%s): %s",
+        me.id, supplier_id, values,
+    )
+
+    # Повертаємо СВІЖИЙ контракт після оновлення.
+    row = (
+        await db.execute(
+            select(
+                supplier_managers.c.can_edit_info,
+                supplier_managers.c.can_manage_products,
+                supplier_managers.c.can_view_balance,
+                supplier_managers.c.can_resolve_disputes,
+                supplier_managers.c.rate_per_order,
+                supplier_managers.c.rate_per_dispute,
+                supplier_managers.c.chat_channel,
+                supplier_managers.c.receive_notifications,
+            ).where(
+                supplier_managers.c.supplier_id == supplier_id,
+                supplier_managers.c.user_id == me.id,
+            )
+        )
+    ).first()
+
+    return ManagerContractMeResponse(
+        supplier_id=supplier.id,
+        user_id=me.id,
+        permissions=ManagerPermissions(
+            can_edit_info=bool(row[0]),
+            can_manage_products=bool(row[1]),
+            can_view_balance=bool(row[2]),
+            can_resolve_disputes=bool(row[3]),
+        ),
+        rates=_rates_from_row(row[4], row[5]),
+        comm_settings=_comm_from_row(row[6], row[7]),
+    )
+
+
 @router.get("/me/shops", response_model=List[SupplierShopCardResponse])
 async def get_my_shops(
     db: AsyncSession = Depends(get_db),
@@ -1857,8 +1965,6 @@ async def get_supplier_products(
             status_code=400,
             detail=f"Невірний tab. Дозволені: {', '.join(sorted(VALID_PRODUCT_TAB_STATUSES))}",
         )
-
-    from sqlalchemy.orm import selectinload
 
     conditions = [Product.supplier_id == supplier_id]
     if tab == "active":

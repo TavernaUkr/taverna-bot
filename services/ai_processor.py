@@ -1,114 +1,32 @@
 # services/ai_processor.py
 """
-PIM (Product Information Management) через прямі REST-запити до Gemini API (aiohttp):
+PIM (Product Information Management) через NVIDIA Build (NIM):
 жорстка таксономія main_category / target_niche + динамічні атрибути + SEO-опис.
 
-SDK google-genai НЕ використовується для генерації — він хибно трактує ключі
-формату AQ... як OAuth-токени і шле Bearer-заголовок, через що Google повертає
-401 UNAUTHENTICATED. REST API з ключем у query-параметрі ?key=... працює коректно.
+Рефакторинг (перехід з платного Gemini на безкоштовні NVIDIA-ендпоінти):
+усі LLM-виклики йдуть через services.llm_service (OpenAI SDK, AsyncOpenAI,
+base_url=https://integrate.api.nvidia.com/v1). Зміна моделі — лише
+NVIDIA_MODEL у .env або DEFAULT_MODEL у services/llm_service.py.
 """
 import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
 
-import aiohttp
-
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config_reader import config, sanitize_gemini_api_key
 from database.models import AICategorizationRule, Product, ProductAIStatus, ProductStatus, ProductVariant
-from services.gemini_key_manager import AllKeysExhaustedError, get_key_manager
+from services import llm_service
+from services.llm_service import LLMCapacityError
 
 logger = logging.getLogger(__name__)
 
-GEMINI_REST_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-GEMINI_REST_TIMEOUT = aiohttp.ClientTimeout(total=120)
+# [СУМІСНІСТЬ] services/ai_queue_worker.py та інші споживачі імпортують
+# GeminiCapacityError саме з цього модуля. Робимо його синонімом
+# LLMCapacityError (429/5xx -> товар повертається у pending, черга живе далі).
+GeminiCapacityError = LLMCapacityError
 
-def _gemini_http_status(exc: Exception) -> Optional[int]:
-    """Дістає HTTP-код з google.genai.errors.ClientError / APIError."""
-    for attr in ("code", "status_code"):
-        raw = getattr(exc, attr, None)
-        try:
-            if raw is None:
-                continue
-            value = int(raw)
-            if value:
-                return value
-        except (TypeError, ValueError):
-            continue
-    msg = str(exc)
-    status_name = str(getattr(exc, "status", "") or "")
-    combined = f"{msg} {status_name}".upper()
-    if "429" in msg or "RESOURCE_EXHAUSTED" in combined or "QUOTA" in combined:
-        return 429
-    if "CLIENTCONNECTORDNSERROR" in combined:
-        return 429
-    if "503" in msg or "UNAVAILABLE" in combined:
-        return 503
-    return None
-
-
-def _exception_text(exc: BaseException) -> str:
-    parts = [str(exc), repr(exc), type(exc).__name__]
-    nested = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
-    if isinstance(nested, BaseException):
-        parts.extend([str(nested), type(nested).__name__])
-    return " ".join(parts)
-
-
-def _is_sdk_quota_crash(exc: BaseException) -> bool:
-    """
-    google-genai може впасти AttributeError (ClientConnectorDNSError)
-    замість errors.ClientError 429 — тоді товар не має йти в failed.
-    """
-    error_str = _exception_text(exc)
-    return (
-        "ClientConnectorDNSError" in error_str
-        or "429" in error_str
-        or "503" in error_str
-    )
-
-
-class GeminiCapacityError(Exception):
-    """Gemini 429 / 503 — товар треба повернути в чергу, не падати."""
-
-    def __init__(self, status: int, message: str = ""):
-        super().__init__(message or f"Gemini capacity error {status}")
-        self.status = status
-
-
-class GeminiHTTPError(Exception):
-    """Будь-яка інша (не 429/503) HTTP-помилка REST API Gemini, з кодом статусу."""
-
-    def __init__(self, status: int, message: str = ""):
-        super().__init__(message or f"Gemini API Error {status}")
-        self.status = status
-
-
-def _extract_gemini_rest_text(data: Dict[str, Any]) -> str:
-    """Витягує згенерований текст з JSON-відповіді REST API generateContent."""
-    if not isinstance(data, dict):
-        return ""
-    candidates = data.get("candidates") or []
-    if not candidates:
-        feedback = data.get("promptFeedback") or {}
-        block_reason = feedback.get("blockReason")
-        if block_reason:
-            raise Exception(f"Gemini заблокував запит: {block_reason}")
-        return ""
-    first = candidates[0] if isinstance(candidates[0], dict) else {}
-    finish_reason = str(first.get("finishReason") or "")
-    parts = ((first.get("content") or {}).get("parts")) or []
-    texts = [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text")]
-    text = "".join(texts).strip()
-    if not text and finish_reason and finish_reason not in ("STOP", ""):
-        raise Exception(f"Gemini завершив відповідь без тексту: finishReason={finish_reason}")
-    return text
-
-GEMINI_MODEL = "gemini-2.0-flash"
-GEMINI_FALLBACK_MODEL = "gemini-3.6-flash"
 
 _HTML_RE = re.compile(r"<[^>]+>")
 _NUMERIC_RE = re.compile(r"^\d+$")
@@ -635,32 +553,29 @@ def _extract_ai_fields(data: Dict[str, Any], source_text: str) -> Optional[Dict[
 
 
 class ProductAIProcessor:
-    """Бере сирий Product з БД, питає Gemini, оновлює поля в сесії (без commit)."""
+    """Бере сирий Product з БД, питає NVIDIA LLM, оновлює поля в сесії (без commit)."""
 
     def __init__(self, api_key: Optional[str] = None):
-        if api_key and str(api_key).strip():
-            from services.gemini_key_manager import GeminiKeyManager
-            self._key_manager = GeminiKeyManager(
-                [str(api_key).strip(), *list(config.GEMINI_API_KEYS)]
-            )
-        else:
-            self._key_manager = get_key_manager()
-        self.model_name = "gemini-3.6-flash"
-        self.fallback_model = "gemini-3.6-flash"
+        # [MIGRATION] api_key (Gemini) більше не використовується — пропускаємо.
+        # Ключ NVIDIA читається з конфігу всередині services.llm_service.
+        self.model_name = llm_service.DEFAULT_MODEL
+        self.fallback_model = llm_service.DEFAULT_MODEL
 
-        if not self._key_manager.has_keys():
-            logger.warning("GEMINI_API_KEYS не знайдено. AI-обробку товарів буде пропущено.")
+        if not llm_service.has_llm_keys():
+            logger.warning(
+                "NVIDIA_API_KEY не знайдено. AI-обробку товарів буде пропущено."
+            )
             return
 
         logger.info(
-            "ProductAIProcessor: Gemini REST готовий (%s), ключів: %s.",
-            self.model_name,
-            self._key_manager.key_count,
+            "ProductAIProcessor: NVIDIA NIM готовий (модель %s, base_url=%s).",
+            llm_service.config.NVIDIA_MODEL or self.model_name,
+            llm_service.config.NVIDIA_BASE_URL,
         )
 
     @property
     def is_ready(self) -> bool:
-        return bool(self._key_manager and self._key_manager.has_keys())
+        return llm_service.has_llm_keys()
 
     def _source_blob(self, product: Product) -> str:
         raw_description = _strip_html(product.description)[:4000]
@@ -709,18 +624,17 @@ class ProductAIProcessor:
         )
 
     def _raise_capacity_if_needed(self, exc: Exception) -> None:
-        """429/503 → GeminiCapacityError, щоб черга повернула товар у pending."""
-        status = getattr(exc, "status", None) or _gemini_http_status(exc)
+        """429/5xx → LLMCapacityError, щоб черга повернула товар у pending."""
+        if isinstance(exc, LLMCapacityError):
+            raise exc
+        status = llm_service._status_from_exception(exc)
         if status in (429, 503):
-            raise GeminiCapacityError(int(status), "API Quota/Rate Limit Exceeded") from exc
-        msg = str(exc)
-        if "429" in msg or "RESOURCE_EXHAUSTED" in msg.upper() or "QUOTA" in msg.upper():
-            raise GeminiCapacityError(429, "API Quota/Rate Limit Exceeded") from exc
-        if "503" in msg or "UNAVAILABLE" in msg.upper():
-            raise GeminiCapacityError(503, "API Quota/Rate Limit Exceeded") from exc
+            raise LLMCapacityError(int(status), "NVIDIA API Quota/Rate Limit Exceeded") from exc
+        if llm_service.is_capacity_error(exc):
+            raise LLMCapacityError(503, "NVIDIA API недоступний") from exc
 
     def _is_client_error(self, exc: Exception) -> bool:
-        status = getattr(exc, "status", None)
+        status = llm_service._status_from_exception(exc)
         return isinstance(status, int) and 400 <= status < 500
 
     async def _complete(
@@ -731,122 +645,33 @@ class ProductAIProcessor:
         system_instruction: Optional[str] = None,
     ) -> str:
         """
-        Прямий асинхронний REST-запит до Gemini API через aiohttp.
-        SDK google-genai НЕ використовується: він хибно шле Bearer-заголовок
-        для ключів формату AQ..., через що Google повертає 401 UNAUTHENTICATED.
-        Ключ передається через query-параметр ?key=..., як і рекомендує REST API.
+        Один LLM-виклик через services.llm_service (NVIDIA NIM, OpenAI SDK).
+        Ретраї на 429/5xx/таймаут уже вбудовані в llm_service.chat_completion;
+        якщо NIM так і не відповів — LLMCapacityError (товар → назад у pending).
         """
-        if not self._key_manager:
-            raise Exception("Gemini client is not configured")
-
         instruction = (system_instruction or _ANALYZE_SYSTEM_PROMPT).strip()
         if rules_text:
             instruction = f"{rules_text.strip()}\n\n{instruction}"
 
-        payload: Dict[str, Any] = {
-            "contents": [{"parts": [{"text": user_prompt}]}],
-            "systemInstruction": {"parts": [{"text": instruction}]},
-            "generationConfig": {
-                "temperature": 0.1,
-                "responseMimeType": "application/json",
-            },
-        }
-
-        last_error: Optional[Exception] = None
-        attempts = max(1, self._key_manager.key_count)
-        for _ in range(attempts):
-            try:
-                active_key = self._key_manager.get_next_active_key()
-            except AllKeysExhaustedError as e:
-                raise GeminiCapacityError(429, str(e)) from e
-
-            key = sanitize_gemini_api_key(active_key)
-            url = f"{GEMINI_REST_BASE}/{model_name}:generateContent?key={key}"
-
-            try:
-                async with aiohttp.ClientSession(timeout=GEMINI_REST_TIMEOUT) as session:
-                    async with session.post(
-                        url,
-                        json=payload,
-                        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-                    ) as resp:
-                        status = resp.status
-                        raw_text = await resp.text()
-
-                        if status == 200:
-                            try:
-                                data = json.loads(raw_text)
-                            except Exception as e:
-                                raise Exception(
-                                    f"Gemini REST повернув невалідний JSON (HTTP 200): {raw_text[:300]}"
-                                ) from e
-                            text = _extract_gemini_rest_text(data)
-                            if not text:
-                                raise Exception(
-                                    f"Gemini повернув порожню відповідь (модель {model_name})"
-                                )
-                            return text
-
-                        if status == 429:
-                            self._key_manager.mark_key_exhausted(active_key)
-                            last_error = GeminiCapacityError(429, raw_text[:300])
-                            logger.warning(
-                                "Gemini 429 (REST) на ключі ...%s — переходжу на наступний.",
-                                key[-4:],
-                            )
-                            continue
-
-                        if status in (401, 403):
-                            self._key_manager.mark_key_exhausted(active_key)
-                            last_error = GeminiCapacityError(status, raw_text[:300])
-                            logger.error(
-                                "Gemini %s (auth) на ключі ...%s — блокую ключ, пробую наступний. %s",
-                                status,
-                                key[-4:],
-                                raw_text[:300],
-                            )
-                            continue
-
-                        if status in (500, 503):
-                            logger.error(
-                                "Gemini %s (перевантаження серверів Google) — повертаю товар у чергу. %s",
-                                status,
-                                raw_text[:300],
-                            )
-                            raise GeminiCapacityError(status, f"Gemini {status}: {raw_text[:300]}")
-
-                        raise GeminiHTTPError(status, f"Gemini API Error {status}: {raw_text[:500]}")
-            except GeminiCapacityError:
-                raise
-            except GeminiHTTPError:
-                raise
-            except aiohttp.ClientError as e:
-                last_error = e
-                logger.warning(
-                    "Gemini REST мережева помилка на ключі ...%s: %s",
-                    key[-4:],
-                    e,
-                )
-                continue
-
-        raise GeminiCapacityError(
-            429,
-            "API Quota/Rate Limit Exceeded",
-        ) from last_error
+        return await llm_service.generate_json_response(
+            prompt=user_prompt,
+            system_prompt=instruction,
+            temperature=0.1,
+        )
 
     async def process_product(self, product: Product, db_session: AsyncSession) -> Optional[bool]:
         """
-        Відправляє товар у Gemini двома кроками (екстракція → аналіз)
+        Відправляє товар у NVIDIA LLM двома кроками (екстракція → аналіз)
         і оновлює PIM-поля + search_tags у attributes JSON.
         Commit робить викликач.
 
         Повертає True лише якщо JSON розпарсився і поля записано.
         None — пост не є товаром (is_product=false): cancelled, нічого не активуємо.
-        False — збій відповіді Gemini.
+        False — збій відповіді LLM.
         """
         if not self.is_ready:
             logger.warning(
-                "process_product: Gemini не ініціалізовано, товар #%s пропущено.",
+                "process_product: NVIDIA LLM не ініціалізовано, товар #%s пропущено.",
                 getattr(product, "id", "?"),
             )
             return False
@@ -855,153 +680,130 @@ class ProductAIProcessor:
         rules_text = await load_ai_categorization_rules_text(db_session)
         extract_prompt = self._build_extract_prompt(product)
         source_text = self._source_blob(product)
-        models_to_try = (self.model_name, self.fallback_model)
+        model_name = llm_service.config.NVIDIA_MODEL or self.model_name
 
-        for attempt, model_name in enumerate(models_to_try):
-            try:
-                extract_content = await self._complete(
-                    model_name,
-                    extract_prompt,
-                    system_instruction=_EXTRACT_SYSTEM_PROMPT,
-                )
-                extract_data = _safe_json_loads(extract_content) or {}
-                if extract_data and not _coerce_is_product(extract_data):
-                    product.ai_status = ProductAIStatus.cancelled
-                    product.status = ProductStatus.inactive
-                    product.is_ai_processed = False
-                    logger.info(
-                        "AI: #%s не товар (is_product=false) — cancelled, аналіз пропущено.",
-                        product_id,
-                    )
-                    return None
-                extracted_pairs = _ground_characteristic_pairs(
-                    _characteristic_pairs(
-                        extract_data.get("characteristics")
-                        if extract_data.get("characteristics") is not None
-                        else extract_data.get("attributes")
-                    ),
-                    source_text,
-                )
-                if not extracted_pairs:
-                    extracted_pairs = _existing_characteristic_pairs(product.attributes)
-                extracted_sizes = _normalize_sizes(extract_data.get("sizes"))
-                extracted_color = _clip(extract_data.get("color"), 80) or _color_from_pairs(extracted_pairs)
-                extracted_model = _clip(extract_data.get("base_model_name"), 200) or _fallback_base_model(
-                    extract_data.get("name") or product.name,
-                    extracted_color,
-                )
-                if extracted_color and not _color_from_pairs(extracted_pairs):
-                    extracted_pairs.append({"name": "Колір", "value": extracted_color})
-
-                analyze_prompt = self._build_analyze_prompt(
-                    product, extracted_pairs, extracted_sizes
-                )
-                analyze_content = await self._complete(
-                    model_name,
-                    analyze_prompt,
-                    rules_text=rules_text,
-                    system_instruction=_ANALYZE_SYSTEM_PROMPT,
-                )
-                data = _safe_json_loads(analyze_content)
-                if not data:
-                    logger.warning(
-                        "Gemini (аналіз) повернув невалідний JSON для товару #%s. Raw: %s",
-                        product_id,
-                        analyze_content[:500],
-                    )
-                    return False
-
-                if not data.get("name"):
-                    data["name"] = extract_data.get("name") or product.name
-                data["characteristics"] = extracted_pairs
-                data["sizes"] = extracted_sizes
-                fields = _extract_ai_fields(data, f"{source_text}\n{json.dumps(extracted_pairs, ensure_ascii=False)}")
-                if not fields:
-                    logger.warning(
-                        "Gemini повернув порожні або невалідні поля для товару #%s: %s",
-                        product_id,
-                        data,
-                    )
-                    return False
-
-                product.name = _clean_text(fields["name"])
-                product.category = _clean_text(fields["main_category"])
-                product.sub_category = _clean_text(fields["sub_category"])
-                product.season = _clean_text(fields["season"]) or None
-                product.target_niche = _clean_text(fields["target_niche"])
-                product.gender = _clean_text(fields["gender"]) or None
-                product.attributes = _merge_extracted_attributes(
-                    product.attributes,
-                    fields.get("characteristics") or extracted_pairs,
-                    search_tags=fields.get("search_tags"),
-                    base_model_name=extracted_model,
-                    color=extracted_color,
-                )
-                product.ai_category = _clip(
-                    f"{fields['target_niche']} / {fields['main_category']} / {fields['sub_category']}",
-                    255,
-                )
-                product.description = _strip_html(fields["description"])
-                product.is_ai_processed = True
-                product.ai_status = ProductAIStatus.completed
-                product.status = ProductStatus.active
-                sizes_for_option = fields.get("sizes") or extracted_sizes
-                if sizes_for_option:
-                    from services.telegram_sync import _upsert_size_option
-                    await _upsert_size_option(db_session, product_id, sizes_for_option)
-                await db_session.execute(
-                    update(ProductVariant)
-                    .where(ProductVariant.product_id == product_id)
-                    .values(is_available=True)
-                )
-
-                await db_session.flush()
+        try:
+            extract_content = await self._complete(
+                model_name,
+                extract_prompt,
+                system_instruction=_EXTRACT_SYSTEM_PROMPT,
+            )
+            extract_data = _safe_json_loads(extract_content) or {}
+            if extract_data and not _coerce_is_product(extract_data):
+                product.ai_status = ProductAIStatus.cancelled
+                product.status = ProductStatus.inactive
+                product.is_ai_processed = False
                 logger.info(
-                    "✅ AI PIM #%s → «%s» / [%s | %s -> %s | %s | %s] tags=%s (%s)",
+                    "AI: #%s не товар (is_product=false) — cancelled, аналіз пропущено.",
                     product_id,
-                    fields["name"],
-                    fields["target_niche"],
-                    fields["main_category"],
-                    fields["sub_category"],
-                    fields["season"] or "—",
-                    fields["gender"] or "—",
-                    (fields.get("search_tags") or [])[:6],
-                    model_name,
                 )
-                return True
+                return None
+            extracted_pairs = _ground_characteristic_pairs(
+                _characteristic_pairs(
+                    extract_data.get("characteristics")
+                    if extract_data.get("characteristics") is not None
+                    else extract_data.get("attributes")
+                ),
+                source_text,
+            )
+            if not extracted_pairs:
+                extracted_pairs = _existing_characteristic_pairs(product.attributes)
+            extracted_sizes = _normalize_sizes(extract_data.get("sizes"))
+            extracted_color = _clip(extract_data.get("color"), 80) or _color_from_pairs(extracted_pairs)
+            extracted_model = _clip(extract_data.get("base_model_name"), 200) or _fallback_base_model(
+                extract_data.get("name") or product.name,
+                extracted_color,
+            )
+            if extracted_color and not _color_from_pairs(extracted_pairs):
+                extracted_pairs.append({"name": "Колір", "value": extracted_color})
 
-            except GeminiCapacityError:
-                raise
-            except Exception as e:
-                error_str = str(e)
-                if (
-                    "ClientConnectorDNSError" in error_str
-                    or "429" in error_str
-                    or "503" in error_str
-                    or _is_sdk_quota_crash(e)
-                ):
-                    raise GeminiCapacityError(
-                        429,
-                        "API Quota Exceeded (Google SDK Bug)",
-                    ) from e
-                if self._is_client_error(e):
-                    status = _gemini_http_status(e)
-                    if status in (429, 503):
-                        raise GeminiCapacityError(
-                            status,
-                            "API Quota/Rate Limit Exceeded",
-                        ) from e
-                self._raise_capacity_if_needed(e)
-                logger.error(
-                    "❌ Gemini помилка для товару #%s (%s): %s",
+            analyze_prompt = self._build_analyze_prompt(
+                product, extracted_pairs, extracted_sizes
+            )
+            analyze_content = await self._complete(
+                model_name,
+                analyze_prompt,
+                rules_text=rules_text,
+                system_instruction=_ANALYZE_SYSTEM_PROMPT,
+            )
+            data = _safe_json_loads(analyze_content)
+            if not data:
+                logger.warning(
+                    "NVIDIA LLM (аналіз) повернув невалідний JSON для товару #%s. Raw: %s",
                     product_id,
-                    model_name,
-                    e,
-                    exc_info=True,
+                    analyze_content[:500],
                 )
-                if attempt == 0:
-                    logger.warning("ProductAIProcessor: фолбек на модель %s.", self.fallback_model)
-                    continue
                 return False
 
-        return False
+            if not data.get("name"):
+                data["name"] = extract_data.get("name") or product.name
+            data["characteristics"] = extracted_pairs
+            data["sizes"] = extracted_sizes
+            fields = _extract_ai_fields(data, f"{source_text}\n{json.dumps(extracted_pairs, ensure_ascii=False)}")
+            if not fields:
+                logger.warning(
+                    "NVIDIA LLM повернув порожні або невалідні поля для товару #%s: %s",
+                    product_id,
+                    data,
+                )
+                return False
+
+            product.name = _clean_text(fields["name"])
+            product.category = _clean_text(fields["main_category"])
+            product.sub_category = _clean_text(fields["sub_category"])
+            product.season = _clean_text(fields["season"]) or None
+            product.target_niche = _clean_text(fields["target_niche"])
+            product.gender = _clean_text(fields["gender"]) or None
+            product.attributes = _merge_extracted_attributes(
+                product.attributes,
+                fields.get("characteristics") or extracted_pairs,
+                search_tags=fields.get("search_tags"),
+                base_model_name=extracted_model,
+                color=extracted_color,
+            )
+            product.ai_category = _clip(
+                f"{fields['target_niche']} / {fields['main_category']} / {fields['sub_category']}",
+                255,
+            )
+            product.description = _strip_html(fields["description"])
+            product.is_ai_processed = True
+            product.ai_status = ProductAIStatus.completed
+            product.status = ProductStatus.active
+            sizes_for_option = fields.get("sizes") or extracted_sizes
+            if sizes_for_option:
+                from services.telegram_sync import _upsert_size_option
+                await _upsert_size_option(db_session, product_id, sizes_for_option)
+            await db_session.execute(
+                update(ProductVariant)
+                .where(ProductVariant.product_id == product_id)
+                .values(is_available=True)
+            )
+
+            await db_session.flush()
+            logger.info(
+                "✅ AI PIM #%s → «%s» / [%s | %s -> %s | %s | %s] tags=%s (%s)",
+                product_id,
+                fields["name"],
+                fields["target_niche"],
+                fields["main_category"],
+                fields["sub_category"],
+                fields["season"] or "—",
+                fields["gender"] or "—",
+                (fields.get("search_tags") or [])[:6],
+                model_name,
+            )
+            return True
+
+        except GeminiCapacityError:
+            # 429/5xx NIM — пропускаємо назовні: черга поверне товар у pending
+            raise
+        except Exception as e:
+            self._raise_capacity_if_needed(e)
+            logger.error(
+                "❌ NVIDIA LLM помилка для товару #%s (%s): %s",
+                product_id,
+                model_name,
+                e,
+                exc_info=True,
+            )
+            return False

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Store, Star, Package, ChevronRight, Loader2, Tag, Search, X } from "lucide-react";
+import { Store, Star, Package, ChevronRight, Loader2, Tag, Search, X, ThumbsUp } from "lucide-react";
 import { Header } from "@/components/Header";
 import { BottomNavigation } from "@/components/BottomNavigation";
 import { SupplierBadge, getSupplierBadge, type SupplierBadgeInfo } from "@/components/ui/supplier-badge";
@@ -112,8 +112,6 @@ const Suppliers = () => {
       setActiveTab(tab);
     } else if (tab === "support") {
       navigate("/support");
-    } else if (tab === "cart") {
-      navigate("/cart");
     } else if (tab === "account") {
       navigate("/?tab=account");
     } else if (tab === "live") {
@@ -246,6 +244,17 @@ const Suppliers = () => {
                     {supplier.badge && supplier.badge.tier && (
                       <SupplierBadge badge={supplier.badge} size="sm" />
                     )}
+                    {/* Оцінка магазину (лайк) — лише візуальний рейтинг біля назви,
+                        НЕ кнопка керування */}
+                    <span
+                      className="inline-flex items-center gap-0.5 text-[11px] text-muted-foreground shrink-0"
+                      title="Оцінка магазину"
+                    >
+                      <ThumbsUp className="h-3 w-3 text-primary" />
+                      {(supplier.avg_rating || 0) > 0
+                        ? supplier.avg_rating!.toFixed(1)
+                        : "—"}
+                    </span>
                     <ChevronRight className="h-4 w-4 text-muted-foreground ml-auto group-hover:text-primary group-hover:translate-x-1 transition-all flex-shrink-0" />
                   </div>
 

@@ -17,6 +17,7 @@ import {
 
 import { useWallet } from "@/hooks/useWallet";
 import { useTelegramAuthContext } from "./TelegramAuthProvider";
+import { useCartStore } from "@/store/cartStore";
 
 
 interface HeaderProps {
@@ -36,7 +37,7 @@ const iconMain = `${iconBtn} text-muted-foreground hover:text-foreground`;
 const iconWallet = `${iconBtn} text-primary hover:bg-primary/10`;
 
 export const Header = ({
-  cartCount = 0,
+  cartCount,
   favoritesCount = 0,
   onCartClick,
   onSearchClick,
@@ -52,6 +53,10 @@ export const Header = ({
   const [isReferralsOpen, setIsReferralsOpen] = useState(false);
   const { effectiveRole } = useTelegramAuthContext() as any;
   const { wallet } = useWallet();
+  // Бейдж кошика — глобальний стан (Zustand), доступний на кожній сторінці.
+  // Пропс cartCount лишається для сумісності (пріоритет над стором, якщо передано).
+  const storeCartCount = useCartStore((s) => s.getTotalItems());
+  const effectiveCartCount = cartCount ?? storeCartCount;
 
   const isGuest = !effectiveRole || effectiveRole === "guest";
   const isManager = effectiveRole === "shop_manager";
@@ -160,13 +165,19 @@ export const Header = ({
               }
             </button>
             <button
-              onClick={() => requireAuth(() => onCartClick?.(), "/")}
+              onClick={() => requireAuth(() => {
+                if (onCartClick) {
+                  onCartClick();
+                } else {
+                  navigate("/cart");
+                }
+              }, "/cart")}
               className={`relative ${iconMain} col-start-4 row-start-1`}
               aria-label="Кошик">
               <ShoppingCart className="h-4 w-4" />
-              {cartCount > 0 && (
+              {effectiveCartCount > 0 && (
                 <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 flex items-center justify-center bg-live text-live-foreground text-[9px] font-bold rounded-full">
-                  {cartCount > 99 ? "99+" : cartCount}
+                  {effectiveCartCount > 99 ? "99+" : effectiveCartCount}
                 </span>
               )}
             </button>

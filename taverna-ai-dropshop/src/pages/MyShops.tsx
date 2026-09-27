@@ -2,8 +2,8 @@ import { useState, useEffect, type ComponentType } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft, Store, Plus, Package, PackageSearch, Settings, Users, LifeBuoy, Wallet,
-  Loader2, Trash2,
-  Eye, Gift, Trophy, ThumbsUp, MessageCircle, User,
+  Loader2, Trash2, Megaphone,
+  Eye, Gift, Trophy, MessageCircle, User,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -94,17 +94,18 @@ const isLovableDevEnvironment = () => {
 /**
  * Картка магазину за UX-макетом:
  *
- * ┌──────────────────────────────────┐
- * │ ХЕДЕР: cover-банер + градієнт     │
- * │ [Avatar] Назва [Роль]    7 8 9 10 │ ← міні-іконки (Gift/Trophy/ThumbsUp/MessageCircle)
- * │ Статус, товари                    │
- * ├──────────────────────────────────┤
- * │ grid-cols-2:                      │
- * │ [1 Керування]  [3 Баланс]         │
- * │ [2 Мої Товари] [4 Менеджери]     │
- * ├──────────────────────────────────┤
- * │ [5 Замовлення / Комунікація] w-full│
- * └──────────────────────────────────┘
+ * ┌──────────────────────────────────────┐
+ * │ ХЕДЕР: cover-банер + градієнт         │
+ * │ [Avatar] Назва [Роль]        7 8 9   │ ← міні-іконки (Gift/Trophy/MessageCircle)
+ * │ Статус, товари                         │
+ * ├──────────────────────────────────────┤
+ * │ grid-cols-2 (Grid 2x2):               │
+ * │ [Керування]     [Баланс]              │
+ * │ [Просування]    [Менеджери / Для мене]│
+ * ├──────────────────────────────────────┤
+ * │ [Мої Товари] w-full                    │
+ * │ [Замовлення / Комунікація] w-full     │
+ * └──────────────────────────────────────┘
  */
 function StoreCard({
   shop,
@@ -116,6 +117,7 @@ function StoreCard({
   onSupport,
   onWallet,
   onProducts,
+  onPromotion,
   onDelete,
   onMiniIcon,
 }: {
@@ -128,6 +130,8 @@ function StoreCard({
   onSupport: (shop: ShopInfo) => void;
   onWallet: (shop: ShopInfo) => void;
   onProducts: (shop: ShopInfo) => void;
+  /** Просування (Megaphone) → кампанія магазину. */
+  onPromotion: (shop: ShopInfo) => void;
   onDelete: (shop: ShopInfo) => void;
   /** Міні-іконки хедера: bonuses / rating / reviews → свій маршрут на магазин. */
   onMiniIcon: (target: "bonuses" | "rating" | "reviews", shop: ShopInfo) => void;
@@ -211,11 +215,10 @@ function StoreCard({
         {/* Темний градієнт для читабельності тексту */}
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-black/30 pointer-events-none" />
 
-        {/* Міні-іконки справа зверху (кнопки 7, 8, 9, 10) */}
+        {/* Міні-іконки справа зверху (кнопки 7, 8, 9) */}
         <div className="absolute top-2 right-2 z-10 flex gap-1.5">
           <HeaderIconButton icon={Gift} title="Бонуси магазину" onClick={() => onMiniIcon("bonuses", shop)} />
           <HeaderIconButton icon={Trophy} title="Рейтинг магазину" onClick={() => onMiniIcon("rating", shop)} />
-          <HeaderIconButton icon={ThumbsUp} title="Оцінка" onClick={() => onMiniIcon("rating", shop)} />
           <HeaderIconButton icon={MessageCircle} title="Відгуки" onClick={() => onMiniIcon("reviews", shop)} />
         </div>
 
@@ -275,6 +278,7 @@ function StoreCard({
               </Badge>
             </div>
             <div className="flex items-center gap-2 text-[11px] text-white/80 mt-0.5">
+              <span className="shrink-0">ID: {shop.id}</span>
               {supplierTypeLabel(shop.supplier_type) && (
                 <span>{supplierTypeLabel(shop.supplier_type)}</span>
               )}
@@ -301,7 +305,7 @@ function StoreCard({
         )}
       </div>
 
-      {/* === 2. ТІЛО: grid-cols-2 з 4 кнопок (кнопки 1–4) === */}
+      {/* === 2. ТІЛО: Grid 2x2 — Керування / Баланс / Просування / Менеджери === */}
       <div className="grid grid-cols-2 gap-2 p-3">
         {/* Кнопка 1 (зліва зверху): Керування (Settings) — owner або manager з can_edit_info */}
         <GridAction
@@ -310,10 +314,10 @@ function StoreCard({
           onClick={() => onSettings(shop)}
           disabled={!canEdit}
         />
-        {/* Кнопка 3 (справа зверху): Баланс (Wallet) — owner або manager з can_view_balance */}
+        {/* Кнопка 2 (справа зверху): Баланс (Wallet) — owner або manager з can_view_balance */}
         <GridAction icon={Wallet} label="Баланс" onClick={() => onWallet(shop)} disabled={!canViewBalance} />
-        {/* Кнопка 2 (зліва знизу): Мої Товари (PackageSearch) — дашборд асортименту */}
-        <GridAction icon={PackageSearch} label="Мої Товари" onClick={() => onProducts(shop)} />
+        {/* Кнопка 3 (зліва знизу): Просування (Megaphone) — кампанія магазину */}
+        <GridAction icon={Megaphone} label="Просування" onClick={() => onPromotion(shop)} />
         {/* Кнопка 4 (справа знизу): Менеджери — власник; «Для мене» — менеджер
             (дивиться власні права + інструкцію) */}
         <GridAction
@@ -323,8 +327,20 @@ function StoreCard({
         />
       </div>
 
-      {/* === 3. ФУТЕР: Замовлення / Комунікація на всю ширину (кнопка 5) === */}
-      <div className="px-3 pb-3">
+      {/* === 3. ФУТЕР: Мої Товари + Замовлення / Комунікація (на всю ширину) === */}
+      <div className="px-3 pb-3 space-y-2">
+        <Button
+          size="sm"
+          className="w-full h-9 justify-start gap-2 px-3 text-xs font-medium"
+          onClick={(e) => {
+            e.stopPropagation();
+            hapticSelection();
+            onProducts(shop);
+          }}
+        >
+          <PackageSearch className="h-4 w-4 shrink-0" />
+          <span>Мої Товари</span>
+        </Button>
         <Button
           size="sm"
           className="w-full h-9 justify-start gap-2 px-3 text-xs font-medium"
@@ -534,6 +550,11 @@ export default function MyShops() {
                 onProducts={(item) => {
                   hapticSelection();
                   navigate(`/supplier/${item.id}/products`);
+                }}
+                // Кнопка 5: Просування → кампанія магазину в Менеджері просування
+                onPromotion={(item) => {
+                  hapticSelection();
+                  navigate(`/manager?shop=${item.id}&step=2`);
                 }}
                 // Міні-іконки хедера → маршрути конкретного магазину
                 onMiniIcon={(target, item) => {

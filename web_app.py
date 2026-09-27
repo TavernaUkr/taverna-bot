@@ -267,7 +267,6 @@ async def handle_order_payment(db: AsyncSession, bot: Bot, order_uid: str, liqpa
         
         # TODO: Визначити 'partial' чи 'paid'
         order.payment_status = PaymentStatus.paid
-        order.status = OrderStatus.pending # Готово до відправки
         
         # --- [ПЛАН 24G] ЗАПУСК АВТО-ВИПЛАТИ ---
         asyncio.create_task(
@@ -277,10 +276,22 @@ async def handle_order_payment(db: AsyncSession, bot: Bot, order_uid: str, liqpa
         await cart_service.clear_cart(order.user_telegram_id)
         # TODO: Надіслати клієнту повідомлення "Оплачено!"
 
+        # Статус → Order State Machine (централізовано: якщо платіжна
+        # система колись переведе замовлення одразу в delivered —
+        # білінг гарантовано спрацює). changed_by_manager_role=False:
+        # це автоматика, винагорода менеджеру не нараховується.
+        from core.order_service import change_order_status
+        await change_order_status(
+            db, order.id, OrderStatus.pending,
+            changed_by_user_id=None,
+            changed_by_manager_role=False,
+        )
+        return
+
     elif liqpay_status == 'failure':
         order.payment_status = PaymentStatus.failed
-    
-    await db.commit()
+        await db.commit()
+
 
 async def handle_service_payment(db: AsyncSession, bot: Bot, service_uid: str, liqpay_status: str):
     """

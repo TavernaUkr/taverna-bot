@@ -14,7 +14,6 @@ from database.models import User, Supplier, Channel, SupplierType, SupplierStatu
 from config_reader import config
 from bot_instance import get_bot_instance
 from services.auth_service import get_current_supplier_or_admin
-from services import gemini_service
 from api_models import SupplierRegisterRequest, SupplierResponse
 
 logger = logging.getLogger(__name__)

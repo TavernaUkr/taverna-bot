@@ -12,11 +12,47 @@ from sqlalchemy import update
 from sqlalchemy.sql import func
 
 from config_reader import config
-from services import gemini_service
+from services import llm_service
 from database.models import Product, ProductVariant, Channel, Supplier
 from database.db import AsyncSessionLocal, AsyncSession
 
 logger = logging.getLogger(__name__)
+
+
+async def rewrite_text_with_ai(text_to_rewrite: str, product_name: str) -> str:
+    """
+    Асинхронно переписує опис товару (для автопостингу) через NVIDIA LLM.
+    При збої повертає оригінальний текст (постинг не ламається).
+    """
+    if not llm_service.has_llm_keys():
+        logger.warning("Рерайтинг пропущено (немає NVIDIA_API_KEY).")
+        return text_to_rewrite
+
+    try:
+        prompt = f"Назва товару: '{product_name}'. Оригінальний опис для рерайту:\n---\n{text_to_rewrite}"
+        rewritten_text = await llm_service.generate_chat_response(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt=(
+                "ТИ ПРОФЕСІЙНИЙ КОПІРАЙТЕР преміум-маркетплейсу. "
+                "Твоє завдання — повністю переписати текст. Зроби його унікальним, емоційним та продаючим. "
+                "ЖОДНИХ слідів оригінального постачальника. Жодного опту, дропу, посилань чи розмірів у цьому полі. "
+                "СТРУКТУРА: "
+                "Короткий вступ. "
+                "Потім список переваг. Кожен пункт списку ПОВИНЕН починатися з нового рядка (\\n) "
+                "і тематичного емодзі (✅, 🛡️, 💧, 🧵 тощо). "
+                "Поверни суворо відформатований рядок із \\n. "
+                "НЕ додавай ціну, артикул, посилання або заклики до дії."
+            ),
+            temperature=0.7,
+            max_tokens=4096,
+        )
+
+        logger.info(f"✅ NVIDIA LLM успішно переписав текст для '{product_name}'")
+        return rewritten_text or text_to_rewrite
+
+    except Exception as e:
+        logger.error(f"❌ Помилка рерайту (NVIDIA LLM): {e}", exc_info=True)
+        return text_to_rewrite
 
 # Ми більше не використовуємо файл posted_ids.txt. Ми використовуємо БД.
 # POSTED_PRODUCT_IDS = set() ... (ВИДАЛЕНО)
@@ -73,7 +109,7 @@ async def publish_product_to_telegram(product: Product, bot: Bot):
     price_text = f"<b>{min_price} грн</b>"
     
     # 3. Рерайтимо опис
-    rewritten_description = await gemini_service.rewrite_text_with_ai(
+    rewritten_description = await rewrite_text_with_ai(
         product.description or name, 
         name
     )

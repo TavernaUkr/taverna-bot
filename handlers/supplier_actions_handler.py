@@ -101,30 +101,37 @@ async def handle_supplier_confirm(cb: CallbackQuery, bot: Bot):
     
     parent_id = None
     async with AsyncSessionLocal() as db:
-        async with db.begin():
-            # 1. Знаходимо ChildOrder
-            stmt = select(Order).where(Order.order_uid == child_order_uid)
-            child_order = (await db.execute(stmt)).scalar_one_or_none()
-            
-            if not child_order or child_order.supplier_id is None:
-                await cb.answer("Замовлення не знайдено.", show_alert=True)
-                return
-            
-            if child_order.status != OrderStatus.new:
-                 await cb.answer("Замовлення вже оброблено!", show_alert=True)
-                 return
+        # 1. Знаходимо ChildOrder
+        stmt = select(Order).where(Order.order_uid == child_order_uid)
+        child_order = (await db.execute(stmt)).scalar_one_or_none()
+        
+        if not child_order or child_order.supplier_id is None:
+            await cb.answer("Замовлення не знайдено.", show_alert=True)
+            return
+        
+        if child_order.status != OrderStatus.new:
+             await cb.answer("Замовлення вже оброблено!", show_alert=True)
+             return
 
-            # 2. Оновлюємо статуси
-            child_order.status = OrderStatus.confirmed
-            await db.execute(
-                update(OrderItem)
-                .where(OrderItem.order_id == child_order.id)
-                .values(status=OrderItemStatus.confirmed)
-            )
+        # 2. Статуси позицій — в тій самій транзакції, ЩО зміна статусу
+        # (commit зробить change_order_status — атомарно разом)
+        await db.execute(
+            update(OrderItem)
+            .where(OrderItem.order_id == child_order.id)
+            .values(status=OrderItemStatus.confirmed)
+        )
+
+        # 3. Статус → Order State Machine (централізовано; перехід
+        # new→confirmed, білінг при цьому не активний)
+        from core.order_service import change_order_status
+        child_order = await change_order_status(
+            db, child_order.id, OrderStatus.confirmed,
+            changed_by_user_id=None,  # постачальник у боті — не менеджер-контрактник
+            changed_by_manager_role=False,
+        )
             
-            # 3. Отримуємо ParentOrder ID
-            parent_id = child_order.parent_order_id
-            await db.commit() # Коммітимо зміни
+        # 4. Отримуємо ParentOrder ID (expire_on_commit=False — об'єкт живий)
+        parent_id = child_order.parent_order_id
 
     # 4. Оновлюємо повідомлення постачальника (прибираємо кнопки)
     await cb.message.edit_text(
@@ -177,20 +184,25 @@ async def handle_supplier_cancel_reason(msg: Message, state: FSMContext, bot: Bo
     parent_id = None
 
     async with AsyncSessionLocal() as db:
-        async with db.begin():
-             stmt = select(Order).where(Order.order_uid == child_order_uid)
-             child_order = (await db.execute(stmt)).scalar_one_or_none()
-             if not child_order: return
-             
-             child_order.status = OrderStatus.cancelled
-             # Записуємо причину в товари
-             await db.execute(
-                update(OrderItem)
-                .where(OrderItem.order_id == child_order.id)
-                .values(status=OrderItemStatus.cancelled_supplier, cancel_reason=reason)
-            )
-             parent_id = child_order.parent_order_id
-             await db.commit()
+        stmt = select(Order).where(Order.order_uid == child_order_uid)
+        child_order = (await db.execute(stmt)).scalar_one_or_none()
+        if not child_order: return
+
+        # Причина скасування — в тій самій транзакції, ЩО статус
+        await db.execute(
+            update(OrderItem)
+            .where(OrderItem.order_id == child_order.id)
+            .values(status=OrderItemStatus.cancelled_supplier, cancel_reason=reason)
+        )
+
+        # Статус → Order State Machine (централізовано)
+        from core.order_service import change_order_status
+        child_order = await change_order_status(
+            db, child_order.id, OrderStatus.cancelled,
+            changed_by_user_id=None,
+            changed_by_manager_role=False,
+        )
+        parent_id = child_order.parent_order_id
              
     # Оновлюємо оригінальне повідомлення постачальника
     try:

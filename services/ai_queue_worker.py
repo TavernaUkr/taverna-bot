@@ -300,7 +300,7 @@ async def process_next_pending_product() -> None:
 
     processor = _get_processor()
     if not processor.is_ready:
-        logger.warning("AI-черга: GEMINI_API_KEYS немає — крок пропущено.")
+        logger.warning("AI-черга: NVIDIA_API_KEY немає — крок пропущено.")
         return
 
     wait_for_xml = False

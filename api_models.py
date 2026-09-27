@@ -446,6 +446,17 @@ class ManagerContractMeResponse(BaseModel):
     comm_settings: ManagerCommSettings = Field(default_factory=ManagerCommSettings)
 
 
+class ManagerCommUpdateRequest(BaseModel):
+    """
+    Тіло PATCH /suppliers/{supplier_id}/managers/me/communication.
+    Менеджер змінює ВЛАСНІ налаштування комунікації.
+    channel: зовнішнє значення 'miniapp' | 'webapp' | 'telegram'
+    ('miniapp' нормалізується у внутрішній 'webapp').
+    """
+    channel: Optional[Literal["miniapp", "webapp", "telegram"]] = None
+    notifications_enabled: Optional[bool] = None
+
+
 class SupplierInviteLinkResponse(BaseModel):
     """Відповідь POST /suppliers/{supplier_id}/invite-link."""
     ok: bool = True
