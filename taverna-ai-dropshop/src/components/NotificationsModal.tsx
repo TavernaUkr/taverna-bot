@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Bell, CheckCheck, Loader2 } from "lucide-react";
+import { Bell, CheckCheck, Loader2, Trash2 } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Dialog,
@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { useModalHistory } from "@/hooks/useModalHistory";
 import {
+  clearAllNotifications,
   fetchMyNotifications,
   markAllNotificationsRead,
   type BackendNotification,
@@ -97,6 +98,7 @@ export function NotificationsModal({ open, onClose, onMarkedAllRead }: Notificat
   useModalHistory(open, onClose);
   const queryClient = useQueryClient();
   const [isMarkingAll, setIsMarkingAll] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ["notifications", "list"],
@@ -116,6 +118,18 @@ export function NotificationsModal({ open, onClose, onMarkedAllRead }: Notificat
       onMarkedAllRead?.();
     } finally {
       setIsMarkingAll(false);
+    }
+  };
+
+  const handleClearAll = async () => {
+    hapticImpact("light");
+    setIsClearing(true);
+    try {
+      await clearAllNotifications();
+      await refetch();
+      onMarkedAllRead?.();
+    } finally {
+      setIsClearing(false);
     }
   };
 
@@ -143,24 +157,47 @@ export function NotificationsModal({ open, onClose, onMarkedAllRead }: Notificat
             </DialogTitle>
 
             {items.length > 0 && (
-              <button
-                type="button"
-                disabled={isMarkingAll || unreadCount === 0}
-                onClick={handleReadAll}
-                className={cn(
-                  "flex items-center gap-1.5 px-3 h-8 rounded-full text-xs font-medium transition-colors",
-                  unreadCount === 0
-                    ? "text-muted-foreground/50 cursor-default"
-                    : "text-sky-500 hover:bg-sky-500/10"
-                )}
-              >
-                {isMarkingAll ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <CheckCheck className="h-3.5 w-3.5" />
-                )}
-                Прочитати всі
-              </button>
+              <div className="flex items-center gap-1">
+                {/* «Прочитати всі»: is_read = true для всіх (POST /read-all) */}
+                <button
+                  type="button"
+                  disabled={isMarkingAll || unreadCount === 0}
+                  onClick={handleReadAll}
+                  className={cn(
+                    "flex items-center gap-1.5 px-3 h-8 rounded-full text-xs font-medium transition-colors",
+                    unreadCount === 0
+                      ? "text-muted-foreground/50 cursor-default"
+                      : "text-sky-500 hover:bg-sky-500/10"
+                  )}
+                >
+                  {isMarkingAll ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <CheckCheck className="h-3.5 w-3.5" />
+                  )}
+                  Прочитати всі
+                </button>
+
+                {/* «Очистити всі»: DELETE /me/notifications */}
+                <button
+                  type="button"
+                  disabled={isClearing}
+                  onClick={handleClearAll}
+                  className={cn(
+                    "flex items-center gap-1.5 px-3 h-8 rounded-full text-xs font-medium transition-colors",
+                    isClearing
+                      ? "text-muted-foreground/50 cursor-default"
+                      : "text-red-500 hover:bg-red-500/10"
+                  )}
+                >
+                  {isClearing ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-3.5 w-3.5" />
+                  )}
+                  Очистити всі
+                </button>
+              </div>
             )}
           </div>
         </DialogHeader>

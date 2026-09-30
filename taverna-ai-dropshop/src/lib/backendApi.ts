@@ -2313,3 +2313,12 @@ export async function markAllNotificationsRead(): Promise<{ ok: boolean; marked_
     tgAuthHeaders()
   );
 }
+
+/** DELETE /api/v1/me/notifications — очистити всі сповіщення користувача. */
+export async function clearAllNotifications(): Promise<{ ok: boolean; deleted: number }> {
+  return backendDelete(
+    MY_NOTIFICATIONS_ENDPOINT,
+    "Не вдалося очистити сповіщення",
+    tgAuthHeaders()
+  );
+}

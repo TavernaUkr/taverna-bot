@@ -13,6 +13,7 @@
 import asyncio
 import logging
 import math
+import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -446,6 +447,7 @@ async def process_next_pending_product() -> None:
             )
         except Exception as e:
             logger.error("AI-черга: не вдалося взяти pending-товар: %s", e, exc_info=True)
+            logger.error("Помилка AI-обробки (етап вибору з черги): %s\n%s", e, traceback.format_exc())
             await db.rollback()
             return
 
@@ -506,7 +508,17 @@ async def process_next_pending_product() -> None:
                 .values(ai_status=ProductAIStatus.failed)
             )
             await db.commit()
-            logger.error("AI-черга: товар #%s failed: %s", product_id, e, exc_info=True)
+            # Повний трейсбек: видно, на якому саме етапі ламається товар
+            # (LLM-виклик, JSON-парсинг, запис PIM-полів, commit тощо).
+            logger.error(
+                "Помилка AI-обробки: %s\n%s",
+                e,
+                traceback.format_exc(),
+            )
+            logger.error(
+                "AI-черга: товар #%s позначено failed (див. трейсбек вище).",
+                product_id,
+            )
 
 
 async def start_ai_product_queue() -> None:

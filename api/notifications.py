@@ -3,18 +3,20 @@
 Глобальна система сповіщень («Дзвоник») Mini App.
 Користувача визначаємо з Authorization: Bearer <initData> (як у wallets).
 
-  GET  /api/v1/me/notifications          — список сповіщень (created_at DESC)
-                                            + unread_count для бейджа;
-  POST /api/v1/me/notifications/read-all  — is_read=True для всіх сповіщень юзера.
+  GET    /api/v1/me/notifications          — список сповіщень (created_at DESC)
+                                             + unread_count для бейджа;
+  POST   /api/v1/me/notifications/read-all — is_read=True для всіх сповіщень юзера;
+  DELETE /api/v1/me/notifications          — ОЧИСТИТИ всі сповіщення юзера.
 """
 import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 
 from api.auth import validate_init_data
 from api_models import (
+    ClearNotificationsResponse,
     MarkAllReadResponse,
     NotificationResponse,
     NotificationsListResponse,
@@ -131,3 +133,30 @@ async def mark_all_notifications_read(
     marked = int(result.rowcount or 0)
     logger.info("Сповіщення user #%s: прочитано %s шт.", user.id, marked)
     return MarkAllReadResponse(ok=True, marked_read=marked)
+
+
+@router.delete("/notifications", response_model=ClearNotificationsResponse)
+async def clear_all_notifications(
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Очистити всі: видаляє ВСІ сповіщення поточного користувача."""
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    result = await db.execute(
+        delete(Notification).where(Notification.user_id == user.id)
+    )
+    await db.commit()
+
+    deleted = int(result.rowcount or 0)
+    logger.info("Сповіщення user #%s: видалено %s шт. (очищено список).", user.id, deleted)
+    return ClearNotificationsResponse(ok=True, deleted=deleted)

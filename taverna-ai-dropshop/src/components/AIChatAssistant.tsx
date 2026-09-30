@@ -59,6 +59,9 @@ export const AIChatAssistant = () => {
   const { sessionToken, profile } = useTelegramAuthContext();
   const floating = useFloatingToolsOptional();
   const setChatOpen = floating?.setChatOpen;
+  // Лічильник непрочитаних повідомлень чат-бота (зараз заглушка = 0
+  // у FloatingToolsContext): для бейджа з цифрою на великій кнопці.
+  const unreadAiMessages = Math.max(0, Number(floating?.unreadAiMessages ?? 0));
   const [isOpen, setIsOpen] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -226,7 +229,11 @@ export const AIChatAssistant = () => {
         )}
       >
         <Bot className="w-7 h-7 drop-shadow-md" />
-        <div className="absolute top-0 right-0 w-3.5 h-3.5 bg-red-500 border-2 border-white dark:border-[#1c1c1e] rounded-full" style={{ animation: "heartbeat 2s infinite ease-in-out" }}></div>
+        {unreadAiMessages > 0 && (
+          <span className="absolute -top-2 -right-2 min-w-[20px] h-[20px] px-1 flex items-center justify-center text-[10px] font-bold leading-none rounded-full bg-red-500 text-white border-2 border-white dark:border-[#1c1c1e] shadow-md pointer-events-none">
+            {unreadAiMessages > 99 ? "99+" : unreadAiMessages}
+          </span>
+        )}
       </button>
 
       {/* Chat Window */}

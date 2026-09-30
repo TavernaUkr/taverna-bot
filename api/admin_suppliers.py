@@ -70,6 +70,20 @@ from services.telegram_sync import run_telegram_import_job
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/admin", tags=["Admin (Supplier Applications)"])
 
+
+async def safe_import_wrapper(supplier_id: int) -> None:
+    """
+    Обгортка фонового Telegram-імпорту для BackgroundTasks (адмін-флоу).
+    print з трейсбеком гарантує, що краш фонової задачі видно у консолі
+    Uvicorn (logger.error може не дістатись хендлерів залежно від конфігу).
+    """
+    print(f"[TELEGRAM SYNC] safe_import_wrapper (admin): запуск фонового імпорту постачальника #{supplier_id}.")
+    try:
+        await run_telegram_import_job(supplier_id)
+    except Exception:
+        import traceback
+        print(f"\n[CRITICAL ERROR IN BACKGROUND TASK]\n{traceback.format_exc()}\n")
+
 PENDING_STATUSES = (
     SupplierStatus.pending_ai_analysis,
     SupplierStatus.ai_in_progress,
@@ -1095,7 +1109,9 @@ async def direct_create_supplier(
 
     import_started = False
     if source_type == "telegram":
-        background_tasks.add_task(run_telegram_import_job, new_supplier.id)
+        # safe_import_wrapper — try/except з print-трейсбек: краш фонової
+        # задачі видно у консолі Uvicorn, а не «ковтається» мовчки.
+        background_tasks.add_task(safe_import_wrapper, new_supplier.id)
         import_started = True
         from api.suppliers import _process_application_background, _schedule_background
         _schedule_background(

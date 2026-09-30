@@ -49,7 +49,10 @@ async def check_for_cosmic_price(product_name: str, supplier_price: float) -> (b
             temperature=0.1,
             max_tokens=2048,
         )
-        data = json.loads(text or "{}")
+        # Жорсткий захист: llama може лишити markdown/сміття навіть після
+        # clean_json_string (обрізана по max_tokens відповідь) — тоді
+        # json.loads кидає JSONDecodeError і ламає весь аналіз магазину.
+        data = llm_service.extract_json(text) or {}
         is_cosmic = data.get("is_cosmic", False)
         analysis = data.get("analysis", "AI-аналіз ціни завершено.")
         

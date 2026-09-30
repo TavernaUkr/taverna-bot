@@ -13,6 +13,12 @@ interface FloatingToolsContextValue {
   setBonusInventoryOpen: (open: boolean) => void;
   personalBonusOpen: boolean;
   setPersonalBonusOpen: (open: boolean) => void;
+  /**
+   * Лічильник непрочитаних повідомлень від чат-бота Taverna AI.
+   * Зараз — заглушка (0): стейту AI-сповіщень ще немає.
+   * Велика кнопка «Taverna AI» читає його для бейджа з цифрою.
+   */
+  unreadAiMessages: number;
 }
 
 const FloatingToolsContext = createContext<FloatingToolsContextValue | null>(null);
@@ -22,6 +28,10 @@ export function FloatingToolsProvider({ children }: { children: ReactNode }) {
   const [chatOpen, setChatOpen] = useState(false);
   const [bonusInventoryOpen, setBonusInventoryOpen] = useState(false);
   const [personalBonusOpen, setPersonalBonusOpen] = useState(false);
+
+  // Заглушка: непрочитані повідомлення від чат-бота Taverna AI.
+  // Коли з'явиться реальний стейт — замінити значення тут.
+  const unreadAiMessages = 0;
 
   const value = useMemo(
     () => ({
@@ -36,8 +46,9 @@ export function FloatingToolsProvider({ children }: { children: ReactNode }) {
       setPersonalBonusOpen,
       openBonusInventory: () => setBonusInventoryOpen(true),
       openPersonalBonus: () => setPersonalBonusOpen(true),
+      unreadAiMessages,
     }),
-    [feedOpen, chatOpen, bonusInventoryOpen, personalBonusOpen]
+    [feedOpen, chatOpen, bonusInventoryOpen, personalBonusOpen, unreadAiMessages]
   );
 
   return <FloatingToolsContext.Provider value={value}>{children}</FloatingToolsContext.Provider>;

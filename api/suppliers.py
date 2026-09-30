@@ -1197,6 +1197,21 @@ async def get_my_shops(
     return result
 
 
+async def safe_import_wrapper(supplier_id: int) -> None:
+    """
+    Обгортка фонового Telegram-імпорту для BackgroundTasks.
+    FastAPI може «проковтнути» виключення фонової задачі, а logger.error не
+    завжди видно у консолі Uvicorn залежно від конфігу логування.
+    print гарантовано пробиває блок логів Uvicorn — краш задачі видно одразу.
+    """
+    print(f"[TELEGRAM SYNC] safe_import_wrapper: запуск фонового імпорту постачальника #{supplier_id}.")
+    try:
+        await run_telegram_import_job(supplier_id)
+    except Exception as e:
+        import traceback
+        print(f"\n[CRITICAL ERROR IN BACKGROUND TASK]\n{traceback.format_exc()}\n")
+
+
 @router.post("/me/shops/{supplier_id}/start-import", response_model=ImportLimitResponse)
 async def start_import_with_limit(
     supplier_id: int,
@@ -1268,7 +1283,9 @@ async def start_import_with_limit(
     # Фоновий імпорт: run_telegram_import_job відкриває ВЛАСНУ сесію БД
     # (request-сесія закривається одразу після відповіді FastAPI, тому
     # передавати db у background task заборонено).
-    background_tasks.add_task(run_telegram_import_job, supplier.id)
+    # safe_import_wrapper — try/except з print-трейсбек, щоб краш задачі
+    # не «ковтався» Uvicorn мовчки.
+    background_tasks.add_task(safe_import_wrapper, supplier.id)
 
     logger.info(
         "Постачальник #%s обрав ліміт імпорту %s постів (скан: %s) — старт парсингу.",

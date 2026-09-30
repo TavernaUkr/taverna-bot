@@ -115,6 +115,28 @@ _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 _JSON_GREEDY_RE = re.compile(r"(\{.*\}|\[.*\])", re.DOTALL)
 
 
+def _hard_strip_markdown(text: str) -> str:
+    """
+    Жорстка очистка відповіді LLM від markdown-обгортки перед json.loads.
+
+    Прибирає префікси ```json / ``` та суфікс ``` БЕЗ regex — тому працює
+    навіть коли відповідь обрізана по max_tokens і закриваючої огорожі
+    немає (llama-3.2-11b часто так відповідає):
+        ```json
+        {"is_product": true, "charact   ← обрізано, ``` немає
+    """
+    if not text:
+        return ""
+    cleaned = str(text).strip()
+    if cleaned.startswith("```json"):
+        cleaned = cleaned[7:]
+    if cleaned.startswith("```"):
+        cleaned = cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    return cleaned.strip()
+
+
 def extract_json(text: str) -> Optional[Any]:
     """
     Витягує JSON з відповіді LLM (markdown-огорожки, «умствования» моделі).
@@ -122,7 +144,9 @@ def extract_json(text: str) -> Optional[Any]:
     """
     if not text:
         return None
-    raw = str(text).strip()
+    # 0) Жорстке знімання ```json/``` префікса й ``` суфікса (обрізані
+    #    відповіді llama без закриваючої огорожі — regex їх не бере).
+    raw = _hard_strip_markdown(text)
 
     # 1) Markdown-огорожа ```json ... ```
     fence = _JSON_FENCE_RE.search(raw)
@@ -172,7 +196,9 @@ def clean_json_string(text: str) -> str:
     """
     if not text:
         return ""
-    raw = str(text).strip()
+    # 0) Жорстке знімання ```json/``` (обрізані відповіді llama без
+    #    закриваючої огорожі — regex _JSON_FENCE_RE їх не матчить).
+    raw = _hard_strip_markdown(text)
     fence = _JSON_FENCE_RE.search(raw)
     if fence:
         return fence.group(1).strip()

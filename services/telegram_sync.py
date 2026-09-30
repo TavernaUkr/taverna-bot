@@ -602,6 +602,7 @@ async def upsert_parsed_telegram_items(
                 "upsert_parsed_telegram_items: не збережено %s (supplier #%s, msg %s): %s",
                 sku, supplier_id, message_id, e, exc_info=True,
             )
+            print(f"[TELEGRAM SYNC] ПОМИЛКА БД: не збережено товар {sku} (supplier #{supplier_id}, msg {message_id}): {e}")
     return saved
 
 
@@ -790,11 +791,13 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
             "run_telegram_import: у постачальника #%s немає telegram_channel_link.",
             supplier_id,
         )
+        print(f"[TELEGRAM SYNC] ПОМИЛКА: у постачальника #{supplier_id} немає telegram_channel_link.")
         return 0
 
     # Ліміт: постачальник обрав у Mini App (supplier.import_limit) або дефолт
     post_limit = _resolve_import_post_limit(supplier)
 
+    print(f"[TELEGRAM SYNC] СТАРТ імпорту #{supplier_id}: канал={channel_link}, ліміт={post_limit} постів.")
     await _set_supplier_import_status(db, supplier, SupplierStatus.parsing)
     logger.info(
         "run_telegram_import: #%s статус=parsing, канал %s, ліміт %s постів.",
@@ -835,6 +838,7 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
                     break
 
                 scanned += int(fetched or 0)
+                print(f"[TELEGRAM SYNC] #{supplier_id}: завантажано постів у батчі: {fetched} (обработано {scanned}/{post_limit}).")
                 leftover_media = stitch_ctx.take_attachments()
                 if leftover_media:
                     await attach_telegram_album_media(
@@ -862,6 +866,7 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
                         "run_telegram_import: #%s батч %s, постів %s, прочитано %s/%s.",
                         supplier_id, batch_index, len(posts), scanned, post_limit,
                     )
+                    print(f"[TELEGRAM SYNC] #{supplier_id}: батч {batch_index}, постів {len(posts)}, Gemini-парсинг...")
                     try:
                         parsed_products = await parse_telegram_posts_to_products(blob)
                     except Exception as e:
@@ -869,6 +874,7 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
                             "run_telegram_import: Gemini батч %s для #%s: %s",
                             batch_index, supplier_id, e, exc_info=True,
                         )
+                        print(f"[TELEGRAM SYNC] #{supplier_id}: ПОМИЛКА Gemini у батчі {batch_index}: {e}")
                         parsed_products = []
                     album_ids = stitch_ctx.take_album_ids()
                     keep_ids = {
@@ -907,6 +913,7 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
                             parsed_items=parsed_products,
                         )
                         total_saved += saved
+                        print(f"[TELEGRAM SYNC] #{supplier_id}: батч {batch_index} ЗБЕРЕЖЕНО в БД: {saved} шт. (всього {total_saved}).")
                     else:
                         logger.info(
                             "run_telegram_import: #%s батч %s без товарів — далі.",
@@ -962,6 +969,7 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
                 supplier_id, e, exc_info=True,
             )
             import_ok = False
+            print(f"[TELEGRAM SYNC] ПОМИЛКА: імпорт #{supplier_id} впав: {e}")
 
         fresh = await db.get(Supplier, supplier_id)
         if fresh and _status_value(fresh) not in (
@@ -1000,6 +1008,10 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
         "run_telegram_import: постачальник #%s, канал %s, scanned=%s saved=%s ok=%s.",
         supplier_id, channel_link, scanned, total_saved, import_ok,
     )
+    print(
+        f"[TELEGRAM SYNC] ФІНІШ імпорту #{supplier_id}: прочитано {scanned} постів, "
+        f"збережено в БД {total_saved} товарів, ok={import_ok}."
+    )
     return total_saved
 
 
@@ -1013,6 +1025,9 @@ async def run_telegram_import_job(supplier_id: int) -> None:
             "Фоновий Telegram-імпорт постачальника #%s впав: %s",
             supplier_id, e, exc_info=True,
         )
+        # print пробиває блок логів Uvicorn: краш видно у терміналі одразу.
+        import traceback
+        print(f"\n[CRITICAL ERROR IN BACKGROUND TASK]\n{traceback.format_exc()}\n")
 
 
 def schedule_telegram_import(supplier_id: int) -> None:

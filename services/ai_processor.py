@@ -254,7 +254,18 @@ def _safe_json_loads(text: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
 
-    cleaned_content = text.replace("```json", "").replace("```", "").strip()
+    # Жорстке знімання markdown-огорожі ```json/``` БЕЗ regex: обрізані
+    # по max_tokens відповіді llama не мають закриваючої ``` — regex-очистка
+    # llm_service.clean_json_string їх не бере (потрібен і префікс, і суфікс).
+    cleaned_content = text.strip()
+    if cleaned_content.startswith("```json"):
+        cleaned_content = cleaned_content[7:]
+    if cleaned_content.startswith("```"):
+        cleaned_content = cleaned_content[3:]
+    if cleaned_content.endswith("```"):
+        cleaned_content = cleaned_content[:-3]
+    cleaned_content = cleaned_content.strip()
+
     start_idx = cleaned_content.find("{")
     end_idx = cleaned_content.rfind("}")
     if start_idx != -1 and end_idx != -1:
@@ -689,6 +700,14 @@ class ProductAIProcessor:
                 system_instruction=_EXTRACT_SYSTEM_PROMPT,
             )
             extract_data = _safe_json_loads(extract_content) or {}
+            if not extract_data:
+                # Детальна діагностика: що саме повернула модель після очистки
+                logger.warning(
+                    "AI-екстракція #%s: JSON не розпарсився. Raw (%d симв.): %s",
+                    product_id,
+                    len(extract_content or ""),
+                    (extract_content or "")[:500],
+                )
             if extract_data and not _coerce_is_product(extract_data):
                 product.ai_status = ProductAIStatus.cancelled
                 product.status = ProductStatus.inactive
@@ -729,9 +748,10 @@ class ProductAIProcessor:
             data = _safe_json_loads(analyze_content)
             if not data:
                 logger.warning(
-                    "NVIDIA LLM (аналіз) повернув невалідний JSON для товару #%s. Raw: %s",
+                    "NVIDIA LLM (аналіз) повернув невалідний JSON для товару #%s. Raw (%d симв.): %s",
                     product_id,
-                    analyze_content[:500],
+                    len(analyze_content or ""),
+                    (analyze_content or "")[:500],
                 )
                 return False
 

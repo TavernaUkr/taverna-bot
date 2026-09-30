@@ -1273,3 +1273,9 @@ class MarkAllReadResponse(BaseModel):
     """Результат POST /me/notifications/read-all."""
     ok: bool = True
     marked_read: int = 0
+
+
+class ClearNotificationsResponse(BaseModel):
+    """Результат DELETE /me/notifications (очистити всі сповіщення)."""
+    ok: bool = True
+    deleted: int = 0

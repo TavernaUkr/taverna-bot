@@ -16,7 +16,7 @@ interface BonusFabProps {
   menuAlign?: "start" | "end" | "center";
 }
 
-/** Кнопка бонусів у глобальному стовпчику FAB. */
+/** Кнопка «Інвентар бонусів» у глобальному стовпчику FAB. */
 export const BonusFab = ({ className, menuAlign = "end" }: BonusFabProps) => {
   const { openBonusInventory, openPersonalBonus } = useFloatingTools();
 
@@ -27,11 +27,11 @@ export const BonusFab = ({ className, menuAlign = "end" }: BonusFabProps) => {
           type="button"
           aria-label="Бонуси"
           className={cn(
-            "relative flex items-center justify-center w-12 h-12 rounded-full text-white bg-gradient-to-b from-amber-500 to-orange-600 shadow-[0_8px_15px_rgba(234,88,12,0.4),inset_0_2px_3px_rgba(255,255,255,0.3),inset_0_-3px_4px_rgba(0,0,0,0.4)] hover:scale-105 transition-transform duration-300",
+            "relative flex items-center justify-center w-10 h-10 rounded-full text-white bg-gradient-to-b from-amber-500 to-orange-600 shadow-[0_8px_15px_rgba(234,88,12,0.4),inset_0_2px_3px_rgba(255,255,255,0.3),inset_0_-3px_4px_rgba(0,0,0,0.4)] hover:scale-105 transition-transform duration-300",
             className
           )}
         >
-          <Gift className="h-5 w-5 drop-shadow-md" />
+          <Gift className="h-4 w-4 drop-shadow-md" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent side="left" align={menuAlign} sideOffset={10} className="w-64 z-[80]">
@@ -60,10 +60,9 @@ export const BonusFab = ({ className, menuAlign = "end" }: BonusFabProps) => {
   );
 };
 
-/** Глобальна кнопка бонусів у спільному стовпчику FAB. */
-export const FloatingBonusWidget = () => {
+/** Модалки інвентаря та персонального бонусу (кнопки — у FloatingToolsContainer). */
+export const BonusInventorySheets = () => {
   const {
-    chatOpen,
     bonusInventoryOpen,
     setBonusInventoryOpen,
     personalBonusOpen,
@@ -72,8 +71,6 @@ export const FloatingBonusWidget = () => {
 
   return (
     <>
-      {!chatOpen && <BonusFab />}
-
       <PersonalBonusDialog open={personalBonusOpen} onOpenChange={setPersonalBonusOpen} />
       <MyBonusesInventorySheet open={bonusInventoryOpen} onOpenChange={setBonusInventoryOpen} />
     </>
