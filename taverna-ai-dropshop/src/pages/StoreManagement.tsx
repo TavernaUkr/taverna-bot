@@ -21,6 +21,7 @@ import { cn } from "@/lib/utils";
 import {
   getSupplierById,
   updateSupplier,
+  uploadImage,
 } from "@/lib/backendApi";
 
 const WEEK_DAYS = [
@@ -171,24 +172,16 @@ export default function StoreManagement() {
   };
 
   const uploadFile = async (file: File, folder: string): Promise<string | null> => {
+    // Завантаження через наш FastAPI-бекенд (POST /api/v1/upload/image):
+    // Bearer initData + server-side Supabase (бакет taverna-assets).
+    // Раніше файл ішов ПРЯМО в Supabase з клієнта у неіснуючий бакет
+    // 'shop-assets' — завантаження завжди падало.
     try {
-      const ext = file.name.split('.').pop();
-      const fileName = `${supplierId}/${folder}/${Date.now()}.${ext}`;
-
-      const { error } = await supabase.storage
-        .from('shop-assets')
-        .upload(fileName, file, { upsert: true });
-
-      if (error) throw error;
-
-      const { data: urlData } = await supabase.storage
-        .from('shop-assets')
-        .getPublicUrl(fileName);
-
-      return urlData.publicUrl;
-    } catch (err) {
+      const { url } = await uploadImage(file);
+      return url || null;
+    } catch (err: any) {
       console.error("Upload error:", err);
-      toast.error("Помилка завантаження файлу");
+      toast.error(err?.message || "Помилка завантаження файлу");
       return null;
     }
   };

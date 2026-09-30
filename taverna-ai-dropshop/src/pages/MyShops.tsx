@@ -27,7 +27,9 @@ import {
   BackendApiError,
   getMyShops,
   requestSupplierDeletion,
+  type BackendMyShop,
 } from "@/lib/backendApi";
+import StoreLimitModal from "@/components/supplier/StoreLimitModal";
 
 interface ShopInfo {
   id: string;
@@ -42,6 +44,8 @@ interface ShopInfo {
   status?: string;
   completed_products?: number;
   deletion_requested?: boolean;
+  /** Telegram-імпорт: постів знайдено сканом за 365д (waiting_limit). */
+  total_posts_last_year?: number;
   /** RBAC: права менеджера в цьому магазині (для власника — null, тобто можна все). */
   permissions?: {
     can_edit_info: boolean;
@@ -55,6 +59,10 @@ function supplierStatusLabel(status?: string) {
   switch (status) {
     case "active":
       return "Активний";
+    case "waiting_limit":
+      return "Схвалено — оберіть ліміт";
+    case "parsing":
+      return "Імпорт товарів";
     case "deletion_requested":
       return "Заявка на видалення";
     case "deleted":
@@ -120,6 +128,7 @@ function StoreCard({
   onPromotion,
   onDelete,
   onMiniIcon,
+  onStartImport,
 }: {
   shop: ShopInfo;
   canEdit: boolean;
@@ -135,6 +144,8 @@ function StoreCard({
   onDelete: (shop: ShopInfo) => void;
   /** Міні-іконки хедера: bonuses / rating / reviews → свій маршрут на магазин. */
   onMiniIcon: (target: "bonuses" | "rating" | "reviews", shop: ShopInfo) => void;
+  /** Старт імпорту з вибором ліміту (статус waiting_limit). */
+  onStartImport: (shop: ShopInfo) => void;
 }) {
   /** Міні-іконка без тексту (кнопки 7–10 у хедері картки). */
   const HeaderIconButton = ({
@@ -329,6 +340,21 @@ function StoreCard({
 
       {/* === 3. ФУТЕР: Мої Товари + Замовлення / Комунікація (на всю ширину) === */}
       <div className="px-3 pb-3 space-y-2">
+        {/* waiting_limit: кнопка старту імпорту з вибором ліміту */}
+        {shop.status === "waiting_limit" && (
+          <Button
+            size="sm"
+            className="w-full h-10 justify-center gap-2 text-xs font-semibold"
+            onClick={(e) => {
+              e.stopPropagation();
+              hapticSelection();
+              onStartImport(shop);
+            }}
+          >
+            <PackageSearch className="h-4 w-4 shrink-0" />
+            <span>Розпочати завантаження товарів</span>
+          </Button>
+        )}
         <Button
           size="sm"
           className="w-full h-9 justify-start gap-2 px-3 text-xs font-medium"
@@ -367,6 +393,10 @@ export default function MyShops() {
   const [deleteShop, setDeleteShop] = useState<ShopInfo | null>(null);
   const [deleteReason, setDeleteReason] = useState("");
   const [isSubmittingDeletion, setIsSubmittingDeletion] = useState(false);
+  /** Модалка вибору ліміту імпорту (waiting_limit). */
+  const [limitShop, setLimitShop] = useState<ShopInfo | null>(null);
+  /** Захист від авто-показу модалки після ручного закриття у цій сесії. */
+  const [limitDismissed, setLimitDismissed] = useState<Set<string>>(new Set());
 
   const isSupplier = effectiveRole === "supplier";
   const isShopManager = effectiveRole === "shop_manager";
@@ -394,6 +424,7 @@ export default function MyShops() {
           status: shop.status,
           completed_products: shop.completed_products,
           deletion_requested: shop.deletion_requested,
+          total_posts_last_year: shop.total_posts_last_year ?? 0,
           permissions: shop.permissions ?? null,
         }))
       );
@@ -404,6 +435,20 @@ export default function MyShops() {
       setIsLoading(false);
     }
   };
+
+  // Авто-показ модалки вибору ліміту: перший магазин у waiting_limit,
+  // який користувач ще не закривав вручну у цій сесії.
+  useEffect(() => {
+    const waiting = shops.find(
+      (shop) =>
+        shop.role === "owner" &&
+        shop.status === "waiting_limit" &&
+        !limitDismissed.has(shop.id)
+    );
+    if (waiting) {
+      setLimitShop(waiting);
+    }
+  }, [shops, limitDismissed]);
 
   // RBAC: «Керування» — власнику або менеджеру з правом can_edit_info
   const canEditShop = (shop: ShopInfo) => {
@@ -562,11 +607,35 @@ export default function MyShops() {
                   navigate(`/supplier/${item.id}/${target}`);
                 }}
                 onDelete={openDeleteDialog}
+                // waiting_limit: відкрити модалку вибору ліміту імпорту
+                onStartImport={(item) => {
+                  hapticSelection();
+                  setLimitShop(item);
+                }}
               />
             ))}
           </div>
         )}
       </div>
+
+      {/* Модалка вибору ліміту імпорту (waiting_limit) */}
+      {limitShop && (
+        <StoreLimitModal
+          store={
+            {
+              ...limitShop,
+              id: Number(limitShop.id),
+              store_name: limitShop.shop_name,
+              total_posts_last_year: limitShop.total_posts_last_year ?? 0,
+            } as unknown as BackendMyShop
+          }
+          onClose={() => {
+            setLimitShop(null);
+            setLimitDismissed((prev) => new Set(prev).add(limitShop.id));
+          }}
+          onStarted={() => fetchShops({ silent: true })}
+        />
+      )}
 
       {/* Delete request dialog */}
       <Dialog

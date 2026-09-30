@@ -315,6 +315,9 @@ class SupplierQueueShopProgress(BaseModel):
     wait_minutes: int = 0
     is_processing: bool = False
     is_fetching_xml: bool = False
+    # Лімітний імпорт (Telegram): «Завантажено X з Y останніх товарів»
+    imported_count: int = 0
+    import_limit: int = 0
 
 
 class SupplierImportProgressResponse(BaseModel):
@@ -385,6 +388,11 @@ class SupplierMeResponse(UtcJsonDates):
 
 
 class SupplierDeletionRequest(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=2000)
+
+
+class RejectSupplierRequest(BaseModel):
+    """Тіло POST /admin/suppliers/{id}/reject — причина відмови від адміна."""
     reason: str = Field(..., min_length=3, max_length=2000)
 
 
@@ -483,6 +491,24 @@ class SupplierShopCardResponse(UtcJsonDates):
     # RBAC: права поточного юзера-менеджера в цьому магазині
     # (для власника — None, тобто можна все).
     permissions: Optional[ManagerPermissions] = None
+    # Telegram-імпорт: постів знайдено сканом за 365д (для вибору ліміту)
+    total_posts_last_year: int = 0
+
+
+class ImportLimitRequest(BaseModel):
+    """Тіло POST /suppliers/me/shops/{supplier_id}/start-import."""
+    # Скільки останніх постів (товарів) імпортувати з каналу
+    limit: int = Field(gt=0, le=10000)
+
+
+class ImportLimitResponse(BaseModel):
+    """Відповідь: ліміт встановлено, парсинг запущено."""
+    ok: bool = True
+    supplier_id: int
+    store_name: str
+    status: str
+    import_limit: int
+    detail: str = ""
 
 
 class SupplierProductItemResponse(UtcJsonDates):
@@ -706,6 +732,8 @@ class PendingSupplierApplicationResponse(UtcJsonDates):
     deleted_at: Optional[datetime] = None
     import_started: bool = False
     deletion_reason: Optional[str] = None
+    # Причина відхилення заявки адміном (для історії заявки/магазину)
+    rejection_reason: Optional[str] = None
 
 
 class AdminStoreListItem(BaseModel):
@@ -1218,3 +1246,30 @@ class TicketResponse(BaseModel):
     # Агрегати для списку (заповнюються вручну в ендпоінті)
     message_count: int = 0
     last_message_at: Optional[datetime] = None
+
+
+# --- МОДЕЛІ ДЛЯ `api/notifications.py` (Глобальний «Дзвоник» Mini App) ---------
+
+class NotificationResponse(BaseModel):
+    """Сповіщення користувача (картка у «Дзвонику»)."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    title: str
+    message: str
+    image_url: Optional[str] = None
+    is_read: bool = False
+    created_at: Optional[datetime] = None
+
+
+class NotificationsListResponse(BaseModel):
+    """Список сповіщень + лічильник непрочитаних (для бейджа дзвоника)."""
+    items: List[NotificationResponse] = []
+    unread_count: int = 0
+
+
+class MarkAllReadResponse(BaseModel):
+    """Результат POST /me/notifications/read-all."""
+    ok: bool = True
+    marked_read: int = 0

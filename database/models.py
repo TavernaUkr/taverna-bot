@@ -26,6 +26,7 @@ class SupplierStatus(str, enum.Enum):
     ai_in_progress = "ai_in_progress"
     pending_admin_approval = "pending_admin_approval"
     parsing = "parsing"
+    waiting_limit = "waiting_limit"  # адмін схвалив; очікує вибору ліміту імпорту від постачальника
     active = "active"
     rejected = "rejected"
     disabled = "disabled"
@@ -148,6 +149,8 @@ class User(Base):
     bonus_history = relationship("BonusHistory", back_populates="user")
     suppliers = relationship("Supplier", back_populates="user")
     wallet = relationship("Wallet", back_populates="user", uselist=False)
+    # Глобальні сповіщення («Дзвоник» Mini App): причини відмов, статуси тощо
+    notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
     # Омніканальні тікети: як клієнт (створив) і як менеджер (взяв у роботу)
     tickets_as_customer = relationship(
         "SupportTicket", foreign_keys="SupportTicket.customer_id", back_populates="customer"
@@ -155,6 +158,24 @@ class User(Base):
     tickets_as_manager = relationship(
         "SupportTicket", foreign_keys="SupportTicket.assigned_manager_id", back_populates="assigned_manager"
     )
+
+class Notification(Base):
+    """
+    Глобальне сповіщення користувача («Дзвоник» Mini App).
+    Приклад: причина відхилення заявки постачальника адміном.
+    image_url — опційне фото-доказ (готово до майбутніх сценаріїв).
+    """
+    __tablename__ = 'notifications'
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    message = Column(Text, nullable=False)
+    image_url = Column(String, nullable=True)
+    is_read = Column(Boolean, nullable=False, default=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    user = relationship("User", back_populates="notifications")
 
 class Channel(Base):
     __tablename__ = 'channels'
@@ -244,6 +265,13 @@ class Supplier(Base):
     restored_at = Column(DateTime(timezone=True), nullable=True)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     queue_joined_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True)
+
+    # --- Telegram-імпорт: швидкий скан каналу (БЕЗ ШІ) + ліміт від постачальника ---
+    total_posts_last_year = Column(Integer, default=0)      # постів за останні 365 днів (Telethon-скан)
+    import_limit = Column(Integer, nullable=True)          # ліміт імпорту, який обрав постачальник (напр. 600 з 1000)
+    imported_count = Column(Integer, default=0)           # скільки постів фактично імпортовано
+    # Причина відхилення заявки адміном (заповнюється роутом reject)
+    rejection_reason = Column(String, nullable=True)
 
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     user = relationship("User", back_populates="suppliers")

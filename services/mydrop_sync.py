@@ -568,6 +568,9 @@ async def import_supplier_catalog_and_process_ai(supplier_id: int) -> Dict[str, 
             await db.commit()
             logger.info("import_supplier_catalog: #%s статус=parsing, XML ще не в БД.", supplier_id)
 
+        # ГАРАНТОВАНЕ РОЗБЛОКУВАННЯ: навіть при 503/таймауті MyDrop або краші
+        # корутини finally повертає parsing→active, інакше магазин блокує
+        # всю AI-чергу (черга чекає перший магазин і не йде далі).
         try:
             stats = await sync_supplier_products(
                 supplier_id,
@@ -616,6 +619,31 @@ async def import_supplier_catalog_and_process_ai(supplier_id: int) -> Dict[str, 
                     exc_info=True,
                 )
             raise
+        finally:
+            # ГАРАНТОВАНЕ РОЗБЛОКУВАННЯ (навіть при CancelledError/краші):
+            # parsing не може залишитись назавжди — інакше AI-черга,
+            # яка чекає головний магазин, заблокує ВСІ магазини платформи.
+            try:
+                # Після крашу сесія може бути у failed-transaction —
+                # спершу rollback, інакше commit впаде з PendingRollbackError.
+                await db.rollback()
+                fresh = await db.get(Supplier, supplier_id)
+                if fresh is not None:
+                    fresh_status = (
+                        fresh.status.value if hasattr(fresh.status, "value") else str(fresh.status)
+                    )
+                    if fresh_status == SupplierStatus.parsing.value:
+                        fresh.status = SupplierStatus.active
+                        await db.commit()
+                        logger.warning(
+                            "import_supplier_catalog: finally — #%s parsing→active (аварійне розблокування).",
+                            supplier_id,
+                        )
+            except Exception as unlock_error:
+                logger.error(
+                    "import_supplier_catalog: finally — не вдалося розблокувати #%s: %s",
+                    supplier_id, unlock_error, exc_info=True,
+                )
 
     logger.info(
         "import_supplier_catalog #%s завершено: created=%s updated=%s inactivated=%s variants=%s errors=%s ai_queued=%s",

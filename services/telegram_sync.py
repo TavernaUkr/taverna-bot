@@ -42,6 +42,22 @@ IMPORT_BATCH_SIZE = 10
 IMPORT_BATCH_SLEEP_SEC = 4
 
 
+def _resolve_import_post_limit(supplier: Supplier) -> int:
+    """
+    Ліміт постів для імпорту каналу:
+      * supplier.import_limit — вибрав постачальник у Mini App (waiting_limit);
+      * якщо не заданий/сміття — дефолт IMPORT_POST_LIMIT (300).
+    """
+    raw = getattr(supplier, "import_limit", None)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return IMPORT_POST_LIMIT
+    if value <= 0:
+        return IMPORT_POST_LIMIT
+    return value
+
+
 def _item_pictures(item: dict) -> list[str]:
     raw = item.get("image_urls") if isinstance(item, dict) else None
     urls: list[str] = []
@@ -746,7 +762,8 @@ async def _upsert_assigned_batch(
 
 async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
     """
-    Первинний імпорт каналу: до 300 постів, батчі по 10, пауза 4 с між Gemini.
+    Первинний імпорт каналу: до import_limit постів (вибрав постачальник;
+    дефолт — IMPORT_POST_LIMIT=300), батчі по 10, пауза 4 с між Gemini.
     Upsert за supplier_sku = tg-{message_id}.
     Під час роботи status=parsing, після успіху — active.
     """
@@ -775,10 +792,13 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
         )
         return 0
 
+    # Ліміт: постачальник обрав у Mini App (supplier.import_limit) або дефолт
+    post_limit = _resolve_import_post_limit(supplier)
+
     await _set_supplier_import_status(db, supplier, SupplierStatus.parsing)
     logger.info(
         "run_telegram_import: #%s статус=parsing, канал %s, ліміт %s постів.",
-        supplier_id, channel_link, IMPORT_POST_LIMIT,
+        supplier_id, channel_link, post_limit,
     )
 
     offset_id = 0
@@ -787,169 +807,193 @@ async def run_telegram_import(supplier_id: int, db: AsyncSession) -> int:
     batch_index = 0
     import_ok = False
     stitch_ctx = AlbumStitchContext()
+    # ГАРАНТОВАНЕ РОЗБЛОКУВАННЯ: навіть при жорсткому таймауті LLM, 503 чи
+    # падінні корутини магазин не залишиться назавжди в parsing — finally
+    # повертає active, інакше AI-черга бачить parsing і блокує ВСІ магазини.
     try:
-        while scanned < IMPORT_POST_LIMIT:
-            take = min(IMPORT_BATCH_SIZE, IMPORT_POST_LIMIT - scanned)
-            try:
-                posts, next_offset, fetched, done = await fetch_channel_posts_page(
-                    channel_link,
-                    limit=take,
-                    offset_id=offset_id,
-                    upload_media=False,
-                    supplier_name=getattr(supplier, "name", "") or "",
-                    supplier_id=int(supplier.id),
-                    stitch_ctx=stitch_ctx,
-                )
-            except TelegramChannelParseError as e:
-                logger.error("run_telegram_import: канал #%s (%s): %s", supplier_id, channel_link, e)
-                break
-            except Exception as e:
-                logger.error(
-                    "run_telegram_import: збій Telethon #%s (%s): %s",
-                    supplier_id, channel_link, e, exc_info=True,
-                )
-                break
+        try:
+            while scanned < post_limit:
+                take = min(IMPORT_BATCH_SIZE, post_limit - scanned)
+                try:
+                    posts, next_offset, fetched, done = await fetch_channel_posts_page(
+                        channel_link,
+                        limit=take,
+                        offset_id=offset_id,
+                        upload_media=False,
+                        supplier_name=getattr(supplier, "name", "") or "",
+                        supplier_id=int(supplier.id),
+                        stitch_ctx=stitch_ctx,
+                    )
+                except TelegramChannelParseError as e:
+                    logger.error("run_telegram_import: канал #%s (%s): %s", supplier_id, channel_link, e)
+                    break
+                except Exception as e:
+                    logger.error(
+                        "run_telegram_import: збій Telethon #%s (%s): %s",
+                        supplier_id, channel_link, e, exc_info=True,
+                    )
+                    break
 
-            scanned += int(fetched or 0)
-            leftover_media = stitch_ctx.take_attachments()
-            if leftover_media:
-                await attach_telegram_album_media(
-                    db,
-                    supplier_id=supplier_id,
-                    attachments=leftover_media,
-                )
-            if fetched <= 0:
+                scanned += int(fetched or 0)
+                leftover_media = stitch_ctx.take_attachments()
+                if leftover_media:
+                    await attach_telegram_album_media(
+                        db,
+                        supplier_id=supplier_id,
+                        attachments=leftover_media,
+                    )
+                if fetched <= 0:
+                    if done:
+                        import_ok = True
+                        break
+                    await asyncio.sleep(IMPORT_BATCH_SLEEP_SEC)
+                    continue
+
+                if posts:
+                    posts = await apply_telegram_reply_updates(
+                        db, supplier_id=supplier_id, posts=posts,
+                    )
+                if posts:
+                    batch_index += 1
+                    blob = "\n\n".join(
+                        f"{i}. {post['formatted']}" for i, post in enumerate(posts, 1)
+                    )
+                    logger.info(
+                        "run_telegram_import: #%s батч %s, постів %s, прочитано %s/%s.",
+                        supplier_id, batch_index, len(posts), scanned, post_limit,
+                    )
+                    try:
+                        parsed_products = await parse_telegram_posts_to_products(blob)
+                    except Exception as e:
+                        logger.error(
+                            "run_telegram_import: Gemini батч %s для #%s: %s",
+                            batch_index, supplier_id, e, exc_info=True,
+                        )
+                        parsed_products = []
+                    album_ids = stitch_ctx.take_album_ids()
+                    keep_ids = {
+                        int(message_id)
+                        for message_id, _item in _assign_batch_message_ids(parsed_products, posts)
+                    } if parsed_products else set()
+                    orphan_extras: dict[int, list[int]] = {}
+                    for parent_id, extra_id in album_ids:
+                        parent = int(parent_id)
+                        extra = int(extra_id)
+                        if parent in keep_ids:
+                            for post in posts:
+                                if int(post.get("message_id") or 0) == parent:
+                                    post.setdefault("album_message_ids", []).append(extra)
+                                    break
+                        else:
+                            orphan_extras.setdefault(parent, []).append(extra)
+                    if parsed_products:
+                        try:
+                            await hydrate_posts_media(
+                                channel_link,
+                                posts,
+                                keep_ids,
+                                supplier_name=getattr(supplier, "name", "") or "",
+                                supplier_id=int(supplier.id),
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "run_telegram_import: не вдалося довантажити фото батча %s: %s",
+                                batch_index, e,
+                            )
+                        saved = await _save_batch_products(
+                            db,
+                            supplier_id=supplier_id,
+                            batch=posts,
+                            parsed_items=parsed_products,
+                        )
+                        total_saved += saved
+                    else:
+                        logger.info(
+                            "run_telegram_import: #%s батч %s без товарів — далі.",
+                            supplier_id, batch_index,
+                        )
+                    if orphan_extras:
+                        fake_posts = [
+                            {
+                                "message_id": parent_id,
+                                "album_message_ids": extra_ids,
+                                "image_urls": [],
+                                "formatted": "",
+                            }
+                            for parent_id, extra_ids in orphan_extras.items()
+                        ]
+                        try:
+                            await hydrate_posts_media(
+                                channel_link,
+                                fake_posts,
+                                set(orphan_extras.keys()),
+                                supplier_name=getattr(supplier, "name", "") or "",
+                                supplier_id=int(supplier.id),
+                            )
+                            await attach_telegram_album_media(
+                                db,
+                                supplier_id=supplier_id,
+                                attachments=[
+                                    (post["message_id"], post.get("image_urls") or [])
+                                    for post in fake_posts
+                                ],
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "run_telegram_import: альбомні фото попереднього товару не додано: %s",
+                                e,
+                            )
+                    if not done and scanned < post_limit:
+                        await asyncio.sleep(IMPORT_BATCH_SLEEP_SEC)
+
                 if done:
                     import_ok = True
                     break
-                await asyncio.sleep(IMPORT_BATCH_SLEEP_SEC)
-                continue
+                if not next_offset or next_offset == offset_id:
+                    import_ok = True
+                    break
+                offset_id = next_offset
 
-            if posts:
-                posts = await apply_telegram_reply_updates(
-                    db, supplier_id=supplier_id, posts=posts,
-                )
-            if posts:
-                batch_index += 1
-                blob = "\n\n".join(
-                    f"{i}. {post['formatted']}" for i, post in enumerate(posts, 1)
-                )
-                logger.info(
-                    "run_telegram_import: #%s батч %s, постів %s, прочитано %s/%s.",
-                    supplier_id, batch_index, len(posts), scanned, IMPORT_POST_LIMIT,
-                )
-                try:
-                    parsed_products = await parse_telegram_posts_to_products(blob)
-                except Exception as e:
-                    logger.error(
-                        "run_telegram_import: Gemini батч %s для #%s: %s",
-                        batch_index, supplier_id, e, exc_info=True,
-                    )
-                    parsed_products = []
-                album_ids = stitch_ctx.take_album_ids()
-                keep_ids = {
-                    int(message_id)
-                    for message_id, _item in _assign_batch_message_ids(parsed_products, posts)
-                } if parsed_products else set()
-                orphan_extras: dict[int, list[int]] = {}
-                for parent_id, extra_id in album_ids:
-                    parent = int(parent_id)
-                    extra = int(extra_id)
-                    if parent in keep_ids:
-                        for post in posts:
-                            if int(post.get("message_id") or 0) == parent:
-                                post.setdefault("album_message_ids", []).append(extra)
-                                break
-                    else:
-                        orphan_extras.setdefault(parent, []).append(extra)
-                if parsed_products:
-                    try:
-                        await hydrate_posts_media(
-                            channel_link,
-                            posts,
-                            keep_ids,
-                            supplier_name=getattr(supplier, "name", "") or "",
-                            supplier_id=int(supplier.id),
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "run_telegram_import: не вдалося довантажити фото батча %s: %s",
-                            batch_index, e,
-                        )
-                    saved = await _save_batch_products(
-                        db,
-                        supplier_id=supplier_id,
-                        batch=posts,
-                        parsed_items=parsed_products,
-                    )
-                    total_saved += saved
-                else:
-                    logger.info(
-                        "run_telegram_import: #%s батч %s без товарів — далі.",
-                        supplier_id, batch_index,
-                    )
-                if orphan_extras:
-                    fake_posts = [
-                        {
-                            "message_id": parent_id,
-                            "album_message_ids": extra_ids,
-                            "image_urls": [],
-                            "formatted": "",
-                        }
-                        for parent_id, extra_ids in orphan_extras.items()
-                    ]
-                    try:
-                        await hydrate_posts_media(
-                            channel_link,
-                            fake_posts,
-                            set(orphan_extras.keys()),
-                            supplier_name=getattr(supplier, "name", "") or "",
-                            supplier_id=int(supplier.id),
-                        )
-                        await attach_telegram_album_media(
-                            db,
-                            supplier_id=supplier_id,
-                            attachments=[
-                                (post["message_id"], post.get("image_urls") or [])
-                                for post in fake_posts
-                            ],
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "run_telegram_import: альбомні фото попереднього товару не додано: %s",
-                            e,
-                        )
-                if not done and scanned < IMPORT_POST_LIMIT:
-                    await asyncio.sleep(IMPORT_BATCH_SLEEP_SEC)
-
-            if done:
+            else:
                 import_ok = True
-                break
-            if not next_offset or next_offset == offset_id:
-                import_ok = True
-                break
-            offset_id = next_offset
+        except Exception as e:
+            logger.error(
+                "run_telegram_import: імпорт #%s впав: %s",
+                supplier_id, e, exc_info=True,
+            )
+            import_ok = False
 
-        else:
-            import_ok = True
-    except Exception as e:
-        logger.error(
-            "run_telegram_import: імпорт #%s впав: %s",
-            supplier_id, e, exc_info=True,
-        )
-        import_ok = False
-
-    fresh = await db.get(Supplier, supplier_id)
-    if fresh and _status_value(fresh) not in (
-        SupplierStatus.deletion_requested.value,
-        SupplierStatus.deleted.value,
-        SupplierStatus.banned.value,
-    ):
-        await _set_supplier_import_status(db, fresh, SupplierStatus.active)
-        if not import_ok:
-            logger.warning(
-                "run_telegram_import: #%s завершено з помилками, статус=active (товари з успішних батчів збережено).",
-                supplier_id,
+        fresh = await db.get(Supplier, supplier_id)
+        if fresh and _status_value(fresh) not in (
+            SupplierStatus.deletion_requested.value,
+            SupplierStatus.deleted.value,
+            SupplierStatus.banned.value,
+        ):
+            await _set_supplier_import_status(db, fresh, SupplierStatus.active)
+            if not import_ok:
+                logger.warning(
+                    "run_telegram_import: #%s завершено з помилками, статус=active (товари з успішних батчів збережено).",
+                    supplier_id,
+                )
+    finally:
+        # ГАРАНТОВАНЕ РОЗБЛОКУВАННЯ (виконується навіть при CancelledError
+        # або краші під час скидання статусу вище): магазин не може
+        # назавжди залишитись parsing — інакше AI-черга заблокує ВСІ магазини.
+        try:
+            # Після крашу сесія може бути у failed-transaction —
+            # спершу rollback, інакше commit впаде з PendingRollbackError.
+            await db.rollback()
+            fresh = await db.get(Supplier, supplier_id)
+            if fresh and _status_value(fresh) == SupplierStatus.parsing.value:
+                await _set_supplier_import_status(db, fresh, SupplierStatus.active)
+                logger.warning(
+                    "run_telegram_import: finally — #%s parsing→active (аварійне розблокування).",
+                    supplier_id,
+                )
+        except Exception as e:
+            logger.error(
+                "run_telegram_import: finally — не вдалося розблокувати #%s: %s",
+                supplier_id, e, exc_info=True,
             )
 
     logger.info(

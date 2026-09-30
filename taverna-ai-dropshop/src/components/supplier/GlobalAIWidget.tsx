@@ -19,17 +19,37 @@ function ShopQueueRows({ queueData }: { queueData: BackendWidgetQueueShop[] }) {
           shop.status === "fetching_xml";
         const isProcessing = shop.status === "processing";
 
+        // Лімітний Telegram-імпорт: безпечні перевірки на null/undefined
+        const importLimit =
+          typeof shop.import_limit === "number" && Number.isFinite(shop.import_limit)
+            ? shop.import_limit
+            : 0;
+        const importedCount =
+          typeof shop.imported_count === "number" && Number.isFinite(shop.imported_count)
+            ? shop.imported_count
+            : 0;
+        const hasImportLimit = importLimit > 0;
+
         let topText = "";
         if (isFetching) {
-          topText = `Завантаження XML: ${shop.shop_name}...`;
+          topText = hasImportLimit
+            ? `Завантажено ${importedCount} з ${importLimit} останніх товарів з магазину "${shop.shop_name}"`
+            : `Завантаження: ${shop.shop_name}...`;
         } else if (isProcessing) {
-          topText = `AI-обробка: ${shop.shop_name}... Завантажено ${shop.processed} з ${shop.total}`;
+          topText = hasImportLimit
+            ? `Завантажено ${importedCount} з ${importLimit} останніх товарів з магазину "${shop.shop_name}"`
+            : `AI-обробка: ${shop.shop_name}... Завантажено ${shop.processed} з ${shop.total}`;
         } else {
           topText = `Очікування: ${shop.shop_name} (Ви в черзі ${shop.queue_position})`;
         }
 
-        const percentage = shop.total > 0 ? (shop.processed / shop.total) * 100 : 0;
-        const isIndeterminate = shop.total === 0 && (isFetching || isProcessing);
+        // Для лімітного імпорту прогрес = imported_count / import_limit
+        const percentage = hasImportLimit
+          ? Math.min(100, (importedCount / importLimit) * 100)
+          : shop.total > 0
+            ? (shop.processed / shop.total) * 100
+            : 0;
+        const isIndeterminate = !hasImportLimit && shop.total === 0 && (isFetching || isProcessing);
         const showBar = isFetching || isProcessing;
 
         return (

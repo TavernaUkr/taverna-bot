@@ -523,6 +523,24 @@ async def ensure_ticket_tables() -> None:
         await conn.run_sync(_ensure)
 
 
+async def ensure_notifications_table() -> None:
+    """
+    Live-режим: таблиця notifications — глобальні сповіщення користувача
+    («Дзвоник» Mini App: причини відмов заявок тощо). Створюється
+    через checkfirst — існуючі БД (Render/local) отримують її без alembic.
+    """
+    if engine is None:
+        return
+
+    def _ensure(sync_conn) -> None:
+        from database.models import Notification
+        Notification.__table__.create(bind=sync_conn, checkfirst=True)
+        logger.info("Таблиця notifications готова (checkfirst).")
+
+    async with engine.begin() as conn:
+        await conn.run_sync(_ensure)
+
+
 async def ensure_ticket_ai_columns() -> None:
     """
     Live-режим: AI-колонки омніканальних тікетів.

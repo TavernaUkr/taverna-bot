@@ -20,6 +20,7 @@ from api_models import (
     AdminStoreListItem,
     AdminSupplierDeleteResponse,
     PendingSupplierApplicationResponse,
+    RejectSupplierRequest,
     SupplierImportProgressResponse,
     SupplierQueueShopProgress,
     SupplierTransferRequest,
@@ -30,6 +31,7 @@ from api_models import (
 from config_reader import config
 from database.db import get_db, AsyncSession, PLATFORM_SUPPORT_SUPPLIER_KEY
 from database.models import (
+    Notification,
     Order,
     OrderItem,
     PaidService,
@@ -72,6 +74,9 @@ PENDING_STATUSES = (
     SupplierStatus.pending_ai_analysis,
     SupplierStatus.ai_in_progress,
     SupplierStatus.pending_admin_approval,
+    # Схвалено адміном, але постачальник ще не обрав ліміт імпорту —
+    # заявка лишається видимою в адмінці до вибору ліміту.
+    SupplierStatus.waiting_limit,
 )
 
 HISTORY_STATUSES = (
@@ -102,6 +107,8 @@ def _to_application(
         ui_status = "approved"
     elif status_value == SupplierStatus.disabled.value:
         ui_status = "banned"
+    elif status_value == SupplierStatus.waiting_limit.value:
+        ui_status = "pending"  # схвалено — чекаємо вибір ліміту постачальником
     else:
         ui_status = status_value
     return PendingSupplierApplicationResponse(
@@ -134,6 +141,7 @@ def _to_application(
         deleted_at=getattr(supplier, "deleted_at", None),
         import_started=import_started,
         deletion_reason=_deletion_reason(supplier),
+        rejection_reason=getattr(supplier, "rejection_reason", None),
     )
 
 
@@ -379,6 +387,102 @@ async def _count_other_approved_shops(
     return int(result.scalar() or 0)
 
 
+async def _count_other_alive_shops(
+    db: AsyncSession,
+    user_id: int,
+    exclude_supplier_id: int,
+) -> int:
+    """
+    Скільки «живих» магазинів лишилось у user_id (без exclude_supplier_id):
+    active, parsing, waiting_limit та будь-які pending* (аналіз/модерація).
+    rejected/deleted/banned/disabled НЕ рахуємо — після відхилення
+    єдиного магазину користувач повертається в роль client.
+    """
+    result = await db.execute(
+        select(func.count(Supplier.id)).where(
+            Supplier.user_id == user_id,
+            Supplier.id != exclude_supplier_id,
+            Supplier.status.in_(
+                (
+                    SupplierStatus.active,
+                    SupplierStatus.parsing,
+                    SupplierStatus.waiting_limit,
+                    SupplierStatus.pending_ai_analysis,
+                    SupplierStatus.ai_in_progress,
+                    SupplierStatus.pending_admin_approval,
+                )
+            ),
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+async def _notify_supplier_rejected(
+    db: AsyncSession,
+    supplier: Supplier,
+    reason: str,
+) -> None:
+    """
+    Після відхилення заявки створюємо сповіщення власнику магазину
+    (Глобальний «Дзвоник» Mini App). Фото-докази (image_url) — готові
+    до підключення, поки що її не передаємо.
+    """
+    if not supplier.user_id:
+        logger.info(
+            "Reject #%s: власника (user_id) немає — сповіщення не створено.",
+            supplier.id,
+        )
+        return
+    db.add(
+        Notification(
+            user_id=supplier.user_id,
+            title="Заявку відхилено",
+            message=reason,
+        )
+    )
+    logger.info(
+        "Reject #%s: створено сповіщення для user_id=%s (причина: %s).",
+        supplier.id, supplier.user_id, reason[:80],
+    )
+
+
+async def _maybe_revert_user_to_client_after_reject(
+    db: AsyncSession,
+    user_id: Optional[int],
+    rejected_supplier_id: int,
+) -> bool:
+    """
+    Role Reversion після відхилення заявки: роль → client, ЛИШЕ якщо
+    користувач не адмін і це був його останній «живий» магазин.
+    """
+    if not user_id:
+        return False
+    user = await db.get(User, user_id)
+    if not user:
+        return False
+    if _user_role_value(user) == UserRole.admin.value:
+        logger.info(
+            "Reject: роль admin не змінюємо (user_id=%s, магазин #%s).",
+            user_id, rejected_supplier_id,
+        )
+        return False
+    others = await _count_other_alive_shops(db, user_id, rejected_supplier_id)
+    if others > 0:
+        logger.info(
+            "Reject: у user #%s лишилось %s живих магазинів — роль supplier лишаємо.",
+            user_id, others,
+        )
+        return False
+    if _user_role_value(user) == UserRole.client.value:
+        return False  # уже client — нічого не робимо
+    user.role = UserRole.client
+    logger.info(
+        "Reject: user #%s позбувся останнього живого магазину (#%s) — роль → client.",
+        user_id, rejected_supplier_id,
+    )
+    return True
+
+
 async def _maybe_revert_user_to_client(
     db: AsyncSession,
     user_id: Optional[int],
@@ -599,13 +703,22 @@ async def list_all_active_stores(
     """
     Усі магазини платформи для адмінки (без фільтра по user_id / telegram_id).
     Активні та вимкнені; видалені й заявки не показуємо.
+    Магазини зі статусом parsing (щойно створені адміном з імпортом товарів)
+    показуємо ОДРАЗУ — інакше в адмінці вони «з'являлись» лише після
+    завершення імпорту, що виглядало як кешування на 5 хвилин.
     """
     _assert_admin(telegram_id, authorization)
 
     stmt = (
         select(Supplier)
         .where(
-            Supplier.status.in_((SupplierStatus.active, SupplierStatus.disabled)),
+            Supplier.status.in_(
+                (
+                    SupplierStatus.active,
+                    SupplierStatus.disabled,
+                    SupplierStatus.parsing,
+                )
+            ),
             # Службовий магазин платформи (Taverna Support) не показуємо
             # серед магазинів користувачів:
             or_(
@@ -960,6 +1073,18 @@ async def direct_create_supplier(
         contact_telegram_id=owner_tg,
         user_id=owner_user_id,
     )
+    # --- ЖОРСТКА ГАРАНТІЯ ВЛАСНИКА -----------------------------------------
+    # Нова вітрина адміна обов'язково має з'явитись у нього в «Мої магазини»
+    # (GET /me/shops матчить за Supplier.user_id, api/suppliers.py). Якщо
+    # власника не передали в запиті (або резолвер не знайшов User у БД) —
+    # ПРИМУСОВО призначаємо поточного адміна. Без цього магазин-сирота
+    # не показується нікому.
+    if not getattr(new_supplier, "user_id", None) and admin_user is not None:
+        new_supplier.user_id = int(admin_user.id)
+        if not owner_tg and getattr(admin_user, "telegram_id", None):
+            owner_tg = int(admin_user.telegram_id)
+    if not getattr(new_supplier, "contact_telegram_id", None):
+        new_supplier.contact_telegram_id = str(effective_admin_tg)
     if source_type == "telegram" or yml_link or extracted_key:
         new_supplier.status = SupplierStatus.parsing
     db.add(new_supplier)
@@ -1098,8 +1223,10 @@ async def approve_supplier_application(
 
     import_started = False
     if source_type == "telegram":
-        supplier.status = SupplierStatus.parsing
-        import_started = True
+        # НОВА ЛОГІКА: Telegram-магазин НЕ стартує імпорт одразу.
+        # Адмін схвалив → постачальник обирає ліміт (напр. 600 з 1000
+        # постів) → тільки після вибору запускається run_telegram_import.
+        supplier.status = SupplierStatus.waiting_limit
     else:
         has_feed = bool(supplier.yml_link or supplier.xml_url or supplier.mydrop_api_key)
         if has_feed:
@@ -1112,7 +1239,12 @@ async def approve_supplier_application(
     await db.refresh(supplier)
 
     if source_type == "telegram":
-        background_tasks.add_task(run_telegram_import_job, supplier.id)
+        # Імпорт запуститься, коли постачальник обере ліміт (окремий ендпоінт
+        # вибору ліміту викликає run_telegram_import_job з цим лімітом).
+        logger.info(
+            "Заявку #%s (telegram) схвалено — статус waiting_limit, чекаємо вибір ліміту постачальником.",
+            supplier_id,
+        )
     elif import_started:
         schedule_supplier_catalog_import(supplier.id)
 
@@ -1126,10 +1258,16 @@ async def approve_supplier_application(
 @router.post("/suppliers/{supplier_id}/reject", response_model=PendingSupplierApplicationResponse)
 async def reject_supplier_application(
     supplier_id: int,
+    request_data: RejectSupplierRequest,
     db: AsyncSession = Depends(get_db),
     telegram_id: Optional[int] = Query(default=None),
     authorization: Optional[str] = Header(default=None),
 ):
+    """
+    Відхилення заявки: статус rejected + причина відмови.
+    Role Reversion: якщо у власника не лишилось ЖОДНОГО живого магазину
+    (active/parsing/waiting_limit/pending*), його роль → client.
+    """
     _assert_admin(telegram_id, authorization)
 
     supplier = await db.get(Supplier, supplier_id)
@@ -1138,9 +1276,21 @@ async def reject_supplier_application(
 
     supplier.is_verified = False
     supplier.status = SupplierStatus.rejected
+    supplier.rejection_reason = request_data.reason
+
+    user_reverted = await _maybe_revert_user_to_client_after_reject(
+        db, supplier.user_id, supplier_id
+    )
+
+    # Глобальний «Дзвоник»: власник магазину бачить причину відмови в Mini App.
+    await _notify_supplier_rejected(db, supplier, request_data.reason)
+
     await db.commit()
     await db.refresh(supplier)
-    logger.info("Адмін відхилив заявку #%s", supplier_id)
+    logger.info(
+        "Адмін відхилив заявку #%s (причина: %s), user_reverted=%s",
+        supplier_id, request_data.reason, user_reverted,
+    )
     return _to_application(supplier)
 
 

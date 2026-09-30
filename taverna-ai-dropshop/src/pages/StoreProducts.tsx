@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -165,16 +165,27 @@ function ProductRow({
 export default function StoreProducts() {
   const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
+  const [searchParams] = useSearchParams();
   const supplierId = Number(id);
   const isValidId = Number.isInteger(supplierId) && supplierId > 0;
 
   const [products, setProducts] = useState<BackendSupplierProduct[]>([]);
   const [total, setTotal] = useState(0);
-  const [activeTab, setActiveTab] = useState<SupplierProductsTab>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Глибоке посилання: /supplier/:id/products?tab=active|moderation|drafts
+  // (кнопка «Товари» в адмін-панелі веде одразу на активні товари).
+  // Лінива ініціалізація — без подвійного fetch при першому рендері.
+  const [activeTab, setActiveTab] = useState<SupplierProductsTab>(() => {
+    const tabParam = searchParams.get("tab");
+    if (tabParam === "active" || tabParam === "moderation" || tabParam === "drafts") {
+      return tabParam;
+    }
+    return "all";
+  });
 
   const loadProducts = useCallback(async () => {
     if (!isValidId) {

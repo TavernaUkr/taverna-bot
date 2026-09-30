@@ -1,6 +1,16 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
+import {
   ArrowLeft, Users, Check, X, Loader2, ShoppingCart, Package,
   Shield, UserCog, RefreshCw,
   Crown, Tag, Gift, Brain, BookOpen, MessageSquare, Trophy, Store, Megaphone, Wallet,
@@ -128,6 +138,14 @@ interface TelegramAiScore {
   price_range: string;
   description_quality: string;
   admin_summary: string;
+  /** Smart Sampling (LLM): правила магазину з закріпленого поста. */
+  store_rules?: string;
+  /** Smart Sampling (LLM): категорії асортименту. */
+  main_categories?: string[];
+  /** Smart Sampling (LLM): короткий опис асортименту. */
+  store_description?: string;
+  /** Smart Sampling (LLM): «Низький/Середній/Високий...» — оцінка схожості. */
+  duplicate_risk?: string;
 }
 
 function parseTelegramAiScore(raw?: string | null): TelegramAiScore | null {
@@ -147,10 +165,41 @@ function parseTelegramAiScore(raw?: string | null): TelegramAiScore | null {
       price_range: String(parsed.price_range ?? "—"),
       description_quality: String(parsed.description_quality ?? "—"),
       admin_summary: String(parsed.admin_summary ?? ""),
+      // Smart Sampling (LLM): правила / категорії / опис / ризик дубліката
+      store_rules: String(parsed.store_rules ?? "").trim() || undefined,
+      main_categories: Array.isArray(parsed.main_categories)
+        ? parsed.main_categories.map((c) => String(c).trim()).filter(Boolean)
+        : undefined,
+      store_description: String(parsed.store_description ?? "").trim() || undefined,
+      duplicate_risk: String(parsed.duplicate_risk ?? "").trim() || undefined,
     };
   } catch {
     return null;
   }
+}
+
+/** Кольорове кодування ризику дубліката: Високий=червоний, Середній=жовтий, Низький=зелений. */
+function duplicateRiskStyle(risk?: string): { className: string; label: string } {
+  const raw = (risk || "").toLowerCase();
+  if (raw.includes("висок") || raw.includes("high")) {
+    return {
+      className: "bg-red-500/15 text-red-300 border-red-500/30",
+      label: "Високий",
+    };
+  }
+  if (raw.includes("серед") || raw.includes("medium") || raw.includes("mid")) {
+    return {
+      className: "bg-yellow-500/15 text-yellow-300 border-yellow-500/30",
+      label: "Середній",
+    };
+  }
+  if (raw.includes("низьк") || raw.includes("low")) {
+    return {
+      className: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
+      label: "Низький",
+    };
+  }
+  return { className: "bg-white/5 text-slate-300 border-white/10", label: "Не оцінено" };
 }
 
 function TelegramScoreDashboard({ score }: { score: TelegramAiScore }) {
@@ -187,6 +236,63 @@ function TelegramScoreDashboard({ score }: { score: TelegramAiScore }) {
         <p className="text-sm text-slate-400 leading-relaxed break-words">
           {score.description_quality || "—"}
         </p>
+      </div>
+      {/* Smart Sampling (LLM): правила / асортимент / ризик дубліката */}
+      {score.store_rules ? (
+        <div className="bg-white/5 border border-white/10 p-3 rounded-lg">
+          <p className="text-[10px] uppercase tracking-wide text-slate-400 mb-1">
+            📜 Правила та умови
+          </p>
+          <p className="text-sm text-slate-200 leading-relaxed break-words whitespace-pre-wrap">
+            {score.store_rules}
+          </p>
+        </div>
+      ) : null}
+      {(score.store_description || (score.main_categories?.length ?? 0) > 0) && (
+        <div className="bg-white/5 border border-white/10 p-3 rounded-lg">
+          <p className="text-[10px] uppercase tracking-wide text-slate-400 mb-1">
+            🛍️ Асортимент
+          </p>
+          {score.store_description ? (
+            <p className="text-sm text-slate-200 leading-relaxed break-words">
+              {score.store_description}
+            </p>
+          ) : null}
+          {(score.main_categories?.length ?? 0) > 0 && (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {score.main_categories!.map((category) => (
+                <span
+                  key={category}
+                  className="inline-flex items-center rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 text-[10px] font-medium break-words"
+                >
+                  {category}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <div className="bg-white/5 border border-white/10 p-3 rounded-lg">
+        <p className="text-[10px] uppercase tracking-wide text-slate-400 mb-1.5">
+          ⚠️ Ризик дубліката
+        </p>
+        {(() => {
+          const risk = duplicateRiskStyle(score.duplicate_risk);
+          return (
+            <>
+              <span
+                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold border ${risk.className}`}
+              >
+                {risk.label}
+              </span>
+              {score.duplicate_risk && risk.label !== "Не оцінено" ? (
+                <p className="text-xs text-slate-400 leading-relaxed break-words mt-2 whitespace-pre-wrap">
+                  {score.duplicate_risk}
+                </p>
+              ) : null}
+            </>
+          );
+        })()}
       </div>
       {score.admin_summary ? (
         <div className="bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 p-3 rounded-lg">
@@ -249,6 +355,9 @@ export default function AdminDashboard() {
   const [applicationsSubTab, setApplicationsSubTab] = useState<'partnership' | 'deletion' | 'history'>('partnership');
   const [processingAppId, setProcessingAppId] = useState<string | null>(null);
   const [processingAction, setProcessingAction] = useState<'approve' | 'reject' | 'delete' | 'approve-deletion' | 'restore' | null>(null);
+  // Модалка причини відмови: адмін ОБОВ'ЯЗКОВО вказує reason при reject
+  const [rejectTargetId, setRejectTargetId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [orderStats, setOrderStats] = useState<OrderStats>({
     totalOrders: 0, totalRevenue: 0, totalMargin: 0,
@@ -257,6 +366,10 @@ export default function AdminDashboard() {
   const [marketingSubTab, setMarketingSubTab] = useState<'promos' | 'bonuses' | 'giveaways'>('promos');
   const [analyticsSubTab, setAnalyticsSubTab] = useState<'insights' | 'reports'>('insights');
   const [storesSubTab, setStoresSubTab] = useState<'all' | 'partners' | 'my' | 'add'>('all');
+  // Лічильник оновлення списку магазинів: ручний "refresh token" для
+  // AdminStoreManager — після створення/передачі магазину список має
+  // перечитатись з бекенду одразу, без 5-хвилинних затримок.
+  const [storesRefreshToken, setStoresRefreshToken] = useState(0);
   const [ordersSubTab, setOrdersSubTab] = useState<'all' | 'my_stores'>('all');
 
   const isAdmin = isAuthenticated && effectiveRole === 'admin';
@@ -383,17 +496,33 @@ export default function AdminDashboard() {
   const handleReject = async (id: number) => {
     if (processingAppId) return;
     vibrate("error");
+    // Спершу — модалка причини відмови (reason обов'язковий на бекенді)
+    setRejectTargetId(String(id));
+    setRejectReason("");
+  };
+
+  const submitReject = async () => {
+    if (processingAppId || !rejectTargetId) return;
+    const reason = rejectReason.trim();
+    if (reason.length < 3) {
+      toast.error("Вкажіть причину відмови (мінімум 3 символи)");
+      return;
+    }
+    const id = Number(rejectTargetId);
     const idStr = String(id);
     setProcessingAppId(idStr);
     setProcessingAction('reject');
     try {
       await rejectSupplierApplication(
         id,
-        adminTelegramId ? Number(adminTelegramId) : undefined
+        adminTelegramId ? Number(adminTelegramId) : undefined,
+        reason
       );
       hapticSelection();
       setPendingSuppliers((prev) => prev.filter((item) => item.id !== idStr));
-      toast.success("Заявку відхилено");
+      toast.success(`Заявку відхилено. Причина: ${reason.slice(0, 60)}${reason.length > 60 ? "…" : ""}`);
+      setRejectTargetId(null);
+      setRejectReason("");
     } catch (err: any) {
       console.error("Reject error:", err);
       toast.error(err?.message || "Не вдалося відхилити заявку");
@@ -695,12 +824,12 @@ export default function AdminDashboard() {
               {storesSubTab === 'add' ? (
                 <div className="overflow-y-auto pb-24">
                   <div className="pr-4">
-                    <ManualSupplierForm onSuccess={() => { setStoresSubTab('my'); fetchOrderStats(); }} />
+                    <ManualSupplierForm onSuccess={() => { setStoresSubTab('my'); setStoresRefreshToken(t => t + 1); fetchOrderStats(); }} />
                   </div>
-                  </div>
-                ) : (
-                  <AdminStoreManager filter={storesSubTab === 'partners' ? 'partners' : storesSubTab === 'my' ? 'my' : 'all'} />
-                )}
+                </div>
+              ) : (
+                <AdminStoreManager key={storesRefreshToken} filter={storesSubTab === 'partners' ? 'partners' : storesSubTab === 'my' ? 'my' : 'all'} />
+              )}
             </div>
           </TabsContent>
 
@@ -1111,6 +1240,63 @@ export default function AdminDashboard() {
           </TabsContent>
         </div>
       </Tabs>
+
+      {/* Модалка причини відмови: reason обов'язковий на бекенді */}
+      <Dialog
+        open={rejectTargetId !== null}
+        onOpenChange={(open) => {
+          if (!open && processingAppId !== rejectTargetId) {
+            setRejectTargetId(null);
+            setRejectReason("");
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-[400px] mx-4">
+          <DialogHeader>
+            <DialogTitle className="text-slate-900 dark:text-white">Відхилити заявку</DialogTitle>
+            <DialogDescription className="text-slate-500 dark:text-slate-400">
+              Причину побачить постачальник в історії заявки. Мінімум 3 символи.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label
+              htmlFor="rejection-reason"
+              className="text-slate-800 dark:text-slate-200"
+            >
+              Причина відмови (обов'язково)
+            </Label>
+            <Textarea
+              id="rejection-reason"
+              value={rejectReason}
+              onChange={(event) => setRejectReason(event.target.value)}
+              placeholder="Наприклад: канал не відповідає правилам платформи / дублікат існуючого магазину"
+              rows={4}
+            />
+          </div>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setRejectTargetId(null);
+                setRejectReason("");
+              }}
+              disabled={processingAppId === rejectTargetId}
+            >
+              Скасувати
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={submitReject}
+              disabled={processingAppId === rejectTargetId || rejectReason.trim().length < 3}
+            >
+              {processingAppId === rejectTargetId && processingAction === "reject" ? (
+                <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
+              ) : null}
+              Відхилити заявку
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

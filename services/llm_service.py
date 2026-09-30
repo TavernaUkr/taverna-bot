@@ -7,7 +7,7 @@ OpenAI-сумісний REST API:
     POST {base_url}/chat/completions  ->  {"choices":[{"message":{"content":"..."}}]}
 
 Одина точка конфігурації моделі:
-  * .env: NVIDIA_MODEL=deepseek-ai/deepseek-v4.1-flash   (порожньо -> DEFAULT_MODEL)
+  * .env: NVIDIA_MODEL=...   (порожньо -> DEFAULT_MODEL)
   * .env: NVIDIA_BASE_URL=...                  (порожньо -> https://integrate.api.nvidia.com/v1)
   * .env: NVIDIA_API_KEY=nvapi-...
 
@@ -25,13 +25,19 @@ from config_reader import config
 
 logger = logging.getLogger(__name__)
 
-# --- Модель за замовчуванням (ЄДИНЕ місце зміни моделі для всього бота) ---
-DEFAULT_MODEL: str = "deepseek-ai/deepseek-v4.1-flash"
+# --- Модель за замовчуванням (ЄДИНЕ місце конфігурації — .env) ---------------
+# Жодного хардкоду назв моделей у коді: DEFAULT_MODEL береться з .env
+# (config.NVIDIA_MODEL). Якщо NVIDIA_MODEL порожній у .env — рядок порожній,
+# і chat_completion кинуть LLMConfigError з підказкою налаштувати .env.
+DEFAULT_MODEL: str = config.NVIDIA_MODEL
 
 # --- Базовий URL NVIDIA NIM (OpenAI-сумісний ендпоінт) ---
 DEFAULT_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
 
-# Таймаут одного запиту (NVIDIA-моделі 30B думають повільніше за Gemini Flash)
+# Таймаут одного запиту. 300с — архітектурна помилка для фонової черги:
+# один виклик міг блокувати обробку на 15 хв (300с × 3 ретраї). Для
+# оптимізованих NIM-моделей 120с достатньо; якщо NIM не відповів —
+# LLMCapacityError → наші ретраї MAX_RETRIES (без SDK-ретраїв).
 REQUEST_TIMEOUT_SECONDS: float = 120.0
 
 # Кількість автоматичних ретраїв (429/5xx/мережеві збої)
@@ -234,15 +240,26 @@ async def chat_completion(
     model: Optional[str] = None,
     temperature: float = 0.2,
     max_tokens: int = 4096,
+    frequency_penalty: float = 0.0,
+    presence_penalty: float = 0.0,
 ) -> str:
     """
     Базовий виклик chat/completions з ретраями на 429/5xx/таймаут.
     Повертає текст відповіді. Бросає LLMCapacityError, якщо NIM так і не відповів.
+
+    frequency_penalty / presence_penalty — за замовчуванням 0 (нейтрально):
+    жорсткі значення для боротьби з зацикленнями передає лише
+    generate_json_response (парсинг товарів), не чат підтримки.
     """
     if not has_llm_keys():
         raise LLMConfigError("NVIDIA_API_KEY не знайдено у .env")
 
     target_model = (model or config.NVIDIA_MODEL or DEFAULT_MODEL).strip()
+    if not target_model:
+        raise LLMConfigError(
+            "NVIDIA_MODEL порожній у .env — модель не обрано. "
+            "Пропишіть NVIDIA_MODEL=... у .env (напр. з build.nvidia.com)."
+        )
     client = get_client()
 
     last_exc: Optional[BaseException] = None
@@ -253,6 +270,8 @@ async def chat_completion(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                frequency_penalty=frequency_penalty,
+                presence_penalty=presence_penalty,
             )
             # Стандартна структура OpenAI: choices[0].message.content
             choices = response.choices or []
@@ -286,9 +305,9 @@ async def chat_completion(
 async def generate_json_response(
     prompt: str,
     system_prompt: str,
-    model: Optional[str] = "deepseek-ai/deepseek-v4.1-flash",
+    model: Optional[str] = DEFAULT_MODEL,
     image_url: Optional[str] = None,
-    temperature: float = 0.2,
+    temperature: float = 0.3,
     max_tokens: int = 4096,
 ) -> str:
     """
@@ -297,6 +316,11 @@ async def generate_json_response(
 
     image_url: http(s)-посилання на фото (OpenAI content-part format
     [{"type": "image_url", "image_url": {"url": ...}}]). Для NVIDIA Vision-моделей.
+
+    Анти-галюцинаційний режим: temperature=0.3 дає мінімальну гнучкість,
+    frequency_penalty=0.5 жорстко обрізає повторення фраз (модель мала
+    зациклюватись і дублювати одне речення десятки разів у JSON),
+    presence_penalty=0.1 стимулює нові слова.
     """
     user_content: List[Dict[str, Any]] = []
     if image_url:
@@ -313,13 +337,16 @@ async def generate_json_response(
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
+        # Анти-зациклення: жорсткі пенальті лише для JSON-парсингу товарів.
+        frequency_penalty=0.5,
+        presence_penalty=0.1,
     )
     return clean_json_string(raw)
 
 
 async def generate_chat_response(
     messages: List[Dict[str, str]],
-    model: Optional[str] = "deepseek-ai/deepseek-v4.1-flash",
+    model: Optional[str] = DEFAULT_MODEL,
     system_prompt: Optional[str] = None,
     temperature: float = 0.4,
     max_tokens: int = 800,

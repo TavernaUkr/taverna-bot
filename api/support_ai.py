@@ -233,7 +233,7 @@ async def support_ai_chat(
             messages=chat_messages,
             system_prompt=system_instruction,
             temperature=0.4,
-            # deepseek-v4.1-flash може «думати» перед відповіддю, тому ліміт
+            # meta/muse-glimmer-30b може «думати» перед відповіддю, тому ліміт
             # має покривати і роздуми, і саму відповідь (не 800!).
             max_tokens=4096,
         )

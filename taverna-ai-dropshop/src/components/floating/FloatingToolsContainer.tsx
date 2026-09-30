@@ -1,6 +1,7 @@
 import { AIChatAssistant } from "@/components/AIChatAssistant";
 import { FloatingBonusWidget } from "@/components/promos/FloatingBonusWidget";
 import { FloatingSupportWidget } from "@/components/floating/FloatingSupportWidget";
+import { NotificationBell } from "@/components/floating/NotificationBell";
 import { useFloatingTools } from "@/components/floating/FloatingToolsContext";
 
 /**
@@ -14,6 +15,7 @@ export function FloatingToolsContainer() {
 
   return (
     <div className="fixed bottom-24 right-4 z-[90] flex flex-col items-end gap-3">
+      <NotificationBell />
       <FloatingSupportWidget />
       <FloatingBonusWidget />
       <AIChatAssistant />

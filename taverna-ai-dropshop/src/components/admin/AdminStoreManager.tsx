@@ -415,6 +415,22 @@ export function AdminStoreManager({ filter = 'all' }: { filter?: 'all' | 'partne
 
                     {/* === ФУТЕР: адмін-специфічні дії === */}
                     <div className="px-3 pb-3 space-y-2">
+                      {/* Кнопка: Товари — дашборд асортименту магазину
+                          (той самий роут, що й «Мої Товари» у MyShops
+                          для постачальника/менеджера; адмін — власник
+                          цього магазину, RBAC на бекенді його пропускає). */}
+                      <Button
+                        size="sm"
+                        className="w-full h-9 justify-start gap-2 px-3 text-xs font-medium"
+                        onClick={() => {
+                          hapticSelection();
+                          navigate(`/supplier/${supplier.id}/products?tab=active`);
+                        }}
+                      >
+                        <Package className="h-4 w-4 shrink-0" />
+                        <span>Товари</span>
+                      </Button>
+
                       {/* Кнопка 5: Замовлення / Комунікація — на всю ширину */}
                       <Button
                         size="sm"

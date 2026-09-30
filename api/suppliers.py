@@ -15,12 +15,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from fastapi import APIRouter, Depends, HTTPException, Header, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Header, Query
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from api_models import (
+    ImportLimitRequest,
+    ImportLimitResponse,
     ManagerCommSettings,
     ManagerCommUpdateRequest,
     ManagerContractMeResponse,
@@ -70,6 +72,7 @@ from database.models import (
 from api.auth import validate_init_data
 from services.mydrop_api import InvalidMyDropYmlLinkError, normalize_mydrop_yml_link
 from services.supplier_analyzer import SupplierAnalyzer, analyze_telegram_channel
+from services.telegram_sync import run_telegram_import_job
 from services.ai_queue_worker import (
     BLOCKED_SUPPLIER_STATUSES,
     build_ai_queue_view,
@@ -360,6 +363,16 @@ async def _process_application_background(
             logger.error("Фонова обробка: заявку #%s не знайдено.", supplier_id)
             return
         supplier.ai_score_report = report
+        # Швидкий скан каналу (БЕЗ ШІ): кількість постів за 365 днів —
+        # з неї постачальник обиратиме ліміт імпорту (напр. 600 з 1000).
+        try:
+            scan_data = json.loads(report) if source_type == "telegram" else None
+        except Exception:
+            scan_data = None
+        if isinstance(scan_data, dict):
+            posts = scan_data.get("total_posts_last_year")
+            if isinstance(posts, int) and posts >= 0:
+                supplier.total_posts_last_year = posts
         if supplier.status in (
             SupplierStatus.pending_ai_analysis,
             SupplierStatus.ai_in_progress,
@@ -404,6 +417,9 @@ async def _get_suppliers_for_telegram(
         .where(
             or_(*filters),
             Supplier.status != SupplierStatus.deleted,
+            # Відхилені заявки приховуємо від постачальника (бачить лише
+            # адмін в історії, разом із rejection_reason).
+            Supplier.status != SupplierStatus.rejected,
         )
         .order_by(
             (Supplier.status == SupplierStatus.active).desc(),
@@ -770,6 +786,9 @@ def _widget_shop_from_row(row: dict) -> SupplierQueueShopProgress:
         wait_minutes=int(row["wait_minutes"]),
         is_processing=bool(row["is_processing"]),
         is_fetching_xml=fetching,
+        # Лімітний імпорт (Telegram): «Завантажено X з Y останніх товарів»
+        imported_count=int(row.get("imported_count") or 0),
+        import_limit=int(row.get("import_limit") or 0),
     )
 
 
@@ -1109,7 +1128,8 @@ async def get_my_shops(
     if not user:
         return []
 
-    # Магазини, де юзер — власник
+    # Магазини, де юзер — власник. Відхилені (rejected) приховуємо —
+    # користувач не має бачити та керувати заявками, які адмін відхилив.
     stmt = (
         select(Supplier)
         .where(
@@ -1118,6 +1138,7 @@ async def get_my_shops(
                 Supplier.managers.any(id=user.id),
             ),
             Supplier.status != SupplierStatus.deleted,
+            Supplier.status != SupplierStatus.rejected,
         )
         .order_by(
             (Supplier.status == SupplierStatus.active).desc(),
@@ -1170,9 +1191,100 @@ async def get_my_shops(
                 deletion_requested=_deletion_requested(supplier),
                 created_at=getattr(supplier, "created_at", None),
                 permissions=my_permissions,
+                total_posts_last_year=int(getattr(supplier, "total_posts_last_year", 0) or 0),
             )
         )
     return result
+
+
+@router.post("/me/shops/{supplier_id}/start-import", response_model=ImportLimitResponse)
+async def start_import_with_limit(
+    supplier_id: int,
+    payload: ImportLimitRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Вибір ліміту імпорту постачальником (статус waiting_limit):
+    1. Лише власник магазину (менеджер не може стартувати імпорт).
+    2. Магазин має бути в waiting_limit (схвалено адміном, ліміт ще не обрано).
+    3. import_limit = ліміт постів (товарів) з каналу.
+    4. статус → parsing і фоновий Telegram-імпорт з вибраним лімітом.
+    """
+    telegram_id = _telegram_id_from_authorization(authorization)
+    if not telegram_id:
+        raise HTTPException(
+            status_code=401,
+            detail="Потрібна авторизація Telegram Mini App (Bearer initData).",
+        )
+
+    user = await _get_user_by_telegram_id(db, telegram_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    supplier = await db.get(Supplier, supplier_id)
+    if not supplier:
+        raise HTTPException(status_code=404, detail="Магазин не знайдено")
+
+    # Лише власник: менеджер не має права обирати ліміт імпорту
+    if supplier.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Немає доступу до цього магазину")
+
+    status_value = _enum_value(supplier.status)
+    allowed = (SupplierStatus.waiting_limit.value, SupplierStatus.disabled.value)
+    if status_value not in allowed:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Імпорт можна запустити лише для магазину, який схвалено "
+                "адміном і який чекає вибору ліміту (waiting_limit)."
+            ),
+        )
+
+    channel_link = (
+        getattr(supplier, "telegram_channel_link", None)
+        or getattr(supplier, "channel_link", None)
+        or ""
+    ).strip()
+    if not channel_link:
+        raise HTTPException(
+            status_code=400,
+            detail="У магазину немає Telegram-каналу для імпорту товарів.",
+        )
+
+    # Ліміт постів: не більше, ніж знайшов скан за 365 днів (якщо скан був);
+    # захист зверху на 10000 — у Pydantic-схемі ImportLimitRequest.
+    limit = int(payload.limit)
+    scanned = int(getattr(supplier, "total_posts_last_year", 0) or 0)
+    if scanned > 0 and limit > scanned:
+        limit = scanned
+
+    supplier.import_limit = limit
+    supplier.status = SupplierStatus.parsing
+    await db.commit()
+    await db.refresh(supplier)
+
+    # Фоновий імпорт: run_telegram_import_job відкриває ВЛАСНУ сесію БД
+    # (request-сесія закривається одразу після відповіді FastAPI, тому
+    # передавати db у background task заборонено).
+    background_tasks.add_task(run_telegram_import_job, supplier.id)
+
+    logger.info(
+        "Постачальник #%s обрав ліміт імпорту %s постів (скан: %s) — старт парсингу.",
+        supplier.id, limit, scanned or "невідомо",
+    )
+    return ImportLimitResponse(
+        ok=True,
+        supplier_id=supplier.id,
+        store_name=(supplier.store_name or supplier.name or f"Магазин #{supplier.id}"),
+        status=SupplierStatus.parsing.value,
+        import_limit=limit,
+        detail=(
+            f"Ліміт {limit} постів встановлено. Парсинг каналу запущено — "
+            "товари з'являтимуться в магазині поступово."
+        ),
+    )
 
 
 async def _get_supplier_with_access(

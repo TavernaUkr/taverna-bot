@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Store, Loader2, Package, Link2, Bot, Info, AlertCircle } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,6 +29,10 @@ interface ManualSupplierFormProps {
 
 export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
   const { toast: uiToast } = useToast();
+  // Інвалідація react-query кешу після створення магазину: список магазинів
+  // (адмінка «Усі/Мої магазини» та «Магазини» постачальника) має оновитись
+  // миттєво, а не при наступному вході на вкладку.
+  const queryClient = useQueryClient();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isCheckingTg, setIsCheckingTg] = useState(false);
   const [tgVerified, setTgVerified] = useState(false);
@@ -148,6 +153,10 @@ export function ManualSupplierForm({ onSuccess }: ManualSupplierFormProps) {
       setSourceType("xml");
       setTgVerified(false);
       setFieldErrors({});
+      // Миттєве оновлення списків магазинів у всьому застосунку:
+      // адмінка (AdminStoreManager) та «Мої магазини» постачальника.
+      queryClient.invalidateQueries({ queryKey: ["adminSuppliers"] });
+      queryClient.invalidateQueries({ queryKey: ["myShops"] });
       onSuccess?.();
     } catch (err: any) {
       console.error("Error creating supplier:", err);

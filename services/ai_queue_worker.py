@@ -3,7 +3,9 @@
 Контрольована черга Gemini: 1 товар / 10 секунд (~6 на хвилину).
 Строго по даті реєстрації постачальника: спочатку один магазин, потім наступний.
 Якщо найстаріший ще парсить XML — чекаємо, наступних не чіпаємо.
-Без asyncio.gather. 429/503 → знову pending.
+Якщо найстаріший ЗАВИС у parsing (краш парсера, 503, таймаут) — його pending-
+товари тимчасово пропускаємо і обробляємо наступний active-магазин, щоб один
+завислий магазин не блокував усю чергу. Без asyncio.gather. 429/503 → знову pending.
 
 Платний тариф Gemini API — жорсткий троттлінг (35с) знято, повернуто швидкий
 інтервал. Якщо квоти знову стануть проблемою, підніми AI_QUEUE_INTERVAL_SECONDS.
@@ -219,6 +221,11 @@ async def build_ai_queue_view(db) -> List[Dict[str, Any]]:
                     getattr(supplier, "queue_joined_at", None) if supplier else None
                 ) or row.get("queue_joined_at") or row.get("registered_at"),
                 "is_fetching_xml": is_fetching_xml(supplier, total) or bool(row.get("is_parsing") and int(row["pending_count"] or 0) == 0),
+                # Лімітний імпорт (Telegram): вибрав постачальник у Mini App
+                "imported_count": int(getattr(supplier, "imported_count", 0) or 0) if supplier else 0,
+                "import_limit": (
+                    int(v) if (v := getattr(supplier, "import_limit", None)) is not None and str(v).strip().lstrip("-").isdigit() else 0
+                ) if supplier else 0,
             }
         )
 
@@ -262,6 +269,9 @@ async def build_ai_queue_view(db) -> List[Dict[str, Any]]:
                 "is_processing": is_processing,
                 "is_fetching_xml": fetching if index == 0 else False,
                 "status": status,
+                # Лімітний імпорт (Telegram): для віджета «Завантажено X з Y»
+                "imported_count": int(row.get("imported_count") or 0),
+                "import_limit": int(row.get("import_limit") or 0),
             }
         )
         items_ahead += pending
@@ -293,6 +303,31 @@ async def _reclaim_stale_processing(db) -> None:
         )
 
 
+async def _increment_imported_count(db, supplier_id: int) -> None:
+    """
+    +1 до supplier.imported_count після успішної AI-обробки товару.
+    Атомарний SQL-інкремент — безпечно при паралельних задачах (не залежить
+    від стану ORM-об'єкта supplier у цій сесії). Лічильник — телеметрія:
+    збій інкремента НЕ зупиняє обробку товарів (лог + rollback, далі йдемо).
+    """
+    try:
+        await db.execute(
+            update(Supplier)
+            .where(Supplier.id == int(supplier_id))
+            .values(imported_count=func.coalesce(Supplier.imported_count, 0) + 1)
+        )
+        await db.commit()
+    except Exception as e:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        logger.warning(
+            "AI-черга: imported_count для магазину #%s не збільшено: %s",
+            supplier_id, e,
+        )
+
+
 async def process_next_pending_product() -> None:
     """Бере РІВНО один pending-товар, обробляє, комітить. Без паралелі."""
     if AsyncSessionLocal is None:
@@ -320,10 +355,33 @@ async def process_next_pending_product() -> None:
             pending_count = int(head.get("pending_count") or 0)
             is_parsing = bool(head.get("is_parsing"))
 
-            if is_parsing and pending_count <= 0:
-                wait_for_xml = True
-                wait_supplier_id = active_supplier_id
+            if is_parsing:
+                # Магазин у parsing: або легітимно тягне каталог (щойно створений),
+                # або ЗАВИС після крашу парсера на 503/таймауті (жорсткий kill —
+                # finally міг не відпрацювати). У ОБОХ випадках не блокуємо
+                # всю чергу: шукаємо pending-товар ІНШОГО постачальника (active).
+                # Якщо такого немає — нижче просто чекаємо (wait_for_xml).
+                skip_ids = {
+                    int(row["supplier_id"])
+                    for row in queue
+                    if bool(row.get("is_parsing"))
+                }
+                stmt = (
+                    select(Product)
+                    .where(
+                        *_PENDING_PRODUCT,
+                        Product.supplier_id.notin_(skip_ids),
+                        Product.supplier_id.in_(
+                            select(Supplier.id).where(
+                                Supplier.status == SupplierStatus.active
+                            )
+                        ),
+                    )
+                    .order_by(Product.created_at.asc(), Product.id.asc())
+                    .limit(1)
+                )
             elif pending_count > 0:
+                # Звичайна строга черга: найстаріший pending-товар головного active-магазину.
                 stmt = (
                     select(Product)
                     .where(
@@ -333,41 +391,59 @@ async def process_next_pending_product() -> None:
                     .order_by(Product.created_at.asc(), Product.id.asc())
                     .limit(1)
                 )
-                if engine is not None and engine.dialect.name == "postgresql":
-                    stmt = stmt.with_for_update(skip_locked=True)
-                product = (await db.execute(stmt)).scalars().first()
+            else:
+                # Голова active без pending бути не може (fetch_strict_supplier_queue
+                # бере лише parsing АБО з pending), але захистимося на всяк випадок.
+                return
 
-                if product:
-                    supplier = await db.get(Supplier, product.supplier_id)
-                    supplier_status = (
-                        supplier.status.value if supplier and hasattr(supplier.status, "value") else (
-                            str(supplier.status) if supplier else ""
-                        )
-                    )
-                    if supplier_status in (
-                        SupplierStatus.deletion_requested.value,
-                        SupplierStatus.deleted.value,
-                        SupplierStatus.banned.value,
-                    ):
-                        product.ai_status = ProductAIStatus.cancelled
-                        await db.commit()
-                        logger.info(
-                            "AI-черга: товар #%s cancelled (магазин #%s статус=%s).",
-                            product.id,
-                            product.supplier_id,
-                            supplier_status,
-                        )
-                        return
+            if engine is not None and engine.dialect.name == "postgresql":
+                stmt = stmt.with_for_update(skip_locked=True)
+            product = (await db.execute(stmt)).scalars().first()
 
-                    product_id = product.id
-                    product.ai_status = ProductAIStatus.processing
-                    await db.commit()
-                    await db.refresh(product)
-                    logger.info(
-                        "AI-черга: магазин #%s, товар #%s (строга черга за датою реєстрації).",
-                        product.supplier_id,
-                        product_id,
-                    )
+            if product is None:
+                if is_parsing:
+                    # Інших active-магазинів з pending немає — чекаємо, поки
+                    # parsing розблокується (finally в парсерах / unstick).
+                    wait_for_xml = True
+                    wait_supplier_id = active_supplier_id
+                return
+
+            if is_parsing:
+                logger.warning(
+                    "AI-черга: магазин #%s у parsing — обробляємо товар #%s магазину #%s (не блокуємо чергу).",
+                    active_supplier_id, product.id, product.supplier_id,
+                )
+
+            supplier = await db.get(Supplier, product.supplier_id)
+            supplier_status = (
+                supplier.status.value if supplier and hasattr(supplier.status, "value") else (
+                    str(supplier.status) if supplier else ""
+                )
+            )
+            if supplier_status in (
+                SupplierStatus.deletion_requested.value,
+                SupplierStatus.deleted.value,
+                SupplierStatus.banned.value,
+            ):
+                product.ai_status = ProductAIStatus.cancelled
+                await db.commit()
+                logger.info(
+                    "AI-черга: товар #%s cancelled (магазин #%s статус=%s).",
+                    product.id,
+                    product.supplier_id,
+                    supplier_status,
+                )
+                return
+
+            product_id = product.id
+            product.ai_status = ProductAIStatus.processing
+            await db.commit()
+            await db.refresh(product)
+            logger.info(
+                "AI-черга: магазин #%s, товар #%s (строга черга за датою реєстрації).",
+                product.supplier_id,
+                product_id,
+            )
         except Exception as e:
             logger.error("AI-черга: не вдалося взяти pending-товар: %s", e, exc_info=True)
             await db.rollback()
@@ -375,7 +451,7 @@ async def process_next_pending_product() -> None:
 
     if wait_for_xml:
         logger.info(
-            "AI-черга: магазин #%s парсить XML, pending ще немає — чекаємо, наступних не чіпаємо.",
+            "AI-черга: магазин #%s парсить каталог (parsing, інших pending-магазинів немає) — чекаємо розблокування.",
             wait_supplier_id,
         )
         await asyncio.sleep(AI_QUEUE_INTERVAL_SECONDS)
@@ -402,6 +478,8 @@ async def process_next_pending_product() -> None:
                 product.is_ai_processed = True
                 product.status = ProductStatus.active
                 await db.commit()
+                # Лічильник імпорту магазину: +1 готовий до продажу товар.
+                await _increment_imported_count(db, int(product.supplier_id))
                 logger.info("AI-черга: товар #%s completed.", product_id)
                 return
 

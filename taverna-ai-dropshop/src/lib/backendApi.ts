@@ -900,6 +900,9 @@ export interface BackendWidgetQueueShop {
   estimated_minutes: number;
   supplier_id?: number;
   is_fetching_xml?: boolean;
+  /** Лімітний Telegram-імпорт: скільки останніх товарів обрав постачальник. */
+  imported_count?: number;
+  import_limit?: number;
 }
 
 export interface BackendSupplierQueueShop {
@@ -1290,6 +1293,8 @@ export interface BackendMyShop {
   created_at?: string | null;
   /** RBAC: права поточного менеджера в цьому магазині (власник — null = можна все). */
   permissions?: ManagerPermissions | null;
+  /** Telegram-імпорт: постів знайдено сканом за 365д (для вибору ліміту). */
+  total_posts_last_year?: number;
 }
 
 /** GET /api/v1/suppliers/me/shops — магазини, де я власник або менеджер. */
@@ -1299,6 +1304,19 @@ export async function getMyShops(): Promise<BackendMyShop[]> {
     adminTelegramHeaders()
   );
   return Array.isArray(data) ? data.filter(Boolean) : [];
+}
+
+/** POST /api/v1/suppliers/me/shops/{id}/start-import — вибір ліміту імпорту. */
+export async function startShopImport(
+  supplierId: number,
+  limit: number
+): Promise<{ ok: boolean; status: string; import_limit: number; detail?: string }> {
+  return backendPost(
+    `${MY_SHOPS_ENDPOINT}/${encodeURIComponent(String(supplierId))}/start-import`,
+    { limit },
+    "Не вдалося запустити імпорт товарів",
+    adminTelegramHeaders()
+  );
 }
 
 /** Матриця прав менеджера (RBAC, B2B). */
@@ -1851,12 +1869,13 @@ export async function approveSupplierApplication(
 
 export async function rejectSupplierApplication(
   supplierId: number,
-  telegramId?: number | null
+  telegramId?: number | null,
+  reason?: string
 ): Promise<BackendPendingSupplierApplication> {
   const params = `?telegram_id=${encodeURIComponent(resolveAdminTelegramId(telegramId))}`;
   return backendPost<BackendPendingSupplierApplication>(
     `${API_BASE_URL}/api/v1/admin/suppliers/${supplierId}/reject${params}`,
-    {},
+    { reason: (reason || "").trim() || "Заявка відхилена адміністратором" },
     "Не вдалося відхилити заявку",
     adminTelegramHeaders()
   );
@@ -2171,4 +2190,126 @@ export async function resolveSupportShopId(): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+// --- Завантаження зображень вітрини магазину (Supabase Storage) ---------------
+
+export const UPLOAD_IMAGE_ENDPOINT = `${API_BASE_URL}/api/v1/upload/image`;
+
+/**
+ * POST /api/v1/upload/image — лого/банер магазину у бакет taverna-assets.
+ * multipart/form-data (поле "file"), захист Bearer initData.
+ * Повертає публічний URL завантаженого зображення.
+ * Помилки: 401 (нема авторизації), 400 (порожній файл), 413 (>8 МБ),
+ * 503 (невалідний формат або Supabase недоступний).
+ */
+export async function uploadImage(file: File): Promise<{ url: string }> {
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+
+  let response: Response;
+  try {
+    response = await fetchWithTimeout(UPLOAD_IMAGE_ENDPOINT, 60000, {
+      method: "POST",
+      headers: tgAuthHeaders(),
+      body: formData,
+    });
+  } catch (networkError) {
+    if (networkError instanceof DOMException && networkError.name === "AbortError") {
+      throw new BackendApiError("Завантаження не встигло за 60с — спробуйте менший файл.");
+    }
+    throw new BackendApiError(
+      "Не вдалося з'єднатися з сервером для завантаження зображення."
+    );
+  }
+
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const errJson = await response.json();
+      if (errJson?.detail) {
+        detail = typeof errJson.detail === "string"
+          ? ` (${errJson.detail})`
+          : ` (${JSON.stringify(errJson.detail)})`;
+      }
+    } catch {
+      // тіло не JSON — показуємо базову помилку статусу
+    }
+    throw new BackendApiError(
+      `Не вдалося завантажити зображення: помилка ${response.status}${detail}`,
+      response.status
+    );
+  }
+
+  return (await response.json()) as { url: string };
+}
+
+// --- Сповіщення (Глобальний «Дзвоник» Mini App) --------------------------------
+
+export const MY_NOTIFICATIONS_ENDPOINT = `${API_BASE_URL}/api/v1/me/notifications`;
+export const MY_NOTIFICATIONS_READ_ALL_ENDPOINT = `${API_BASE_URL}/api/v1/me/notifications/read-all`;
+
+/** Одне сповіщення користувача (NotificationResponse). */
+export interface BackendNotification {
+  id: number;
+  user_id: number;
+  title: string;
+  message: string;
+  image_url?: string | null;
+  is_read: boolean;
+  created_at?: string | null;
+}
+
+/** Відповідь GET /api/v1/me/notifications: список + лічильник непрочитаних. */
+export interface BackendNotificationsList {
+  items: BackendNotification[];
+  unread_count: number;
+}
+
+/**
+ * GET /api/v1/me/notifications — сповіщення поточного користувача
+ * (новіші першими) + unread_count для бейджа дзвоника.
+ * 401/404 мовчки перетворюємо на порожній список — дзвоник не має
+ * ламати UX для гостьових сесій.
+ */
+export async function fetchMyNotifications(
+  limit?: number
+): Promise<BackendNotificationsList> {
+  const params = new URLSearchParams();
+  if (typeof limit === "number" && Number.isFinite(limit) && limit > 0) {
+    params.set("limit", String(Math.min(Math.trunc(limit), 200)));
+  }
+  const qs = params.toString();
+  const url = `${MY_NOTIFICATIONS_ENDPOINT}${qs ? `?${qs}` : ""}`;
+  try {
+    const data = await backendGet<BackendNotificationsList | BackendNotification[]>(
+      url,
+      tgAuthHeaders()
+    );
+    if (Array.isArray(data)) {
+      return { items: data.filter(Boolean), unread_count: data.filter((n) => !n.is_read).length };
+    }
+    if (data && Array.isArray(data.items)) {
+      return {
+        items: data.items.filter(Boolean),
+        unread_count: typeof data.unread_count === "number" ? data.unread_count : 0,
+      };
+    }
+    return { items: [], unread_count: 0 };
+  } catch (error) {
+    if (error instanceof BackendApiError && (error.status === 401 || error.status === 404)) {
+      return { items: [], unread_count: 0 };
+    }
+    throw error;
+  }
+}
+
+/** POST /api/v1/me/notifications/read-all — позначити всі сповіщення прочитаними. */
+export async function markAllNotificationsRead(): Promise<{ ok: boolean; marked_read: number }> {
+  return backendPost(
+    MY_NOTIFICATIONS_READ_ALL_ENDPOINT,
+    {},
+    "Не вдалося позначити сповіщення прочитаними",
+    tgAuthHeaders()
+  );
 }
